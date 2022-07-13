@@ -50,11 +50,12 @@
 #include "revng/Support/FunctionTags.h"
 #include "revng/Support/ProgramCounterHandler.h"
 
+#include "qemu/libtcg/libtcg.h"
+
 #include "CodeGenerator.h"
 #include "ExternalJumpsHandler.h"
 #include "InstructionTranslator.h"
 #include "JumpTargetManager.h"
-#include "PTCInterface.h"
 #include "VariableManager.h"
 
 using namespace llvm;
@@ -158,7 +159,7 @@ CodeGenerator::CodeGenerator(const RawBinaryView &RawBinary,
   TargetArchitecture(TargetArchitecture) {
 
   OriginalInstrMDKind = Context.getMDKindID("oi");
-  PTCInstrMDKind = Context.getMDKindID("pi");
+  LibTcgInstrMDKind = Context.getMDKindID("pi");
 
   HelpersModule = parseIR(Helpers, Context);
 
@@ -195,17 +196,17 @@ CodeGenerator::CodeGenerator(const RawBinaryView &RawBinary,
     if (Segment.IsExecutable) {
       // We ignore possible p_filesz-p_memsz mismatches, zeros wouldn't be
       // useful code anyway
-      size_t Size = Segment.FileSize;
-      bool Success = ptc.mmap(Segment.StartAddress.address(),
-                              static_cast<const void *>(Data.data()),
-                              Size);
-      if (not Success) {
-        revng_log(Log,
-                  "Couldn't mmap segment starting at "
-                    << Segment.StartAddress.toString() << " with size 0x"
-                    << Size);
-        continue;
-      }
+      //size_t Size = Segment.FileSize;
+      //bool Success = ptc.mmap(Segment.StartAddress.address(),
+      //                        static_cast<const void *>(Data.data()),
+      //                        Size);
+      //if (not Success) {
+      //  revng_log(Log,
+      //            "Couldn't mmap segment starting at "
+      //              << Segment.StartAddress.toString() << " with size 0x"
+      //              << Size);
+      //  continue;
+      //}
 
       bool Found = false;
       MetaAddress End = Segment.pagesRange().second;
@@ -224,9 +225,9 @@ CodeGenerator::CodeGenerator(const RawBinaryView &RawBinary,
         using namespace model::Architecture;
         auto Architecture = Model->Architecture;
         auto BasicBlockEndingPattern = getBasicBlockEndingPattern(Architecture);
-        ptc.mmap(End.address(),
-                 BasicBlockEndingPattern.data(),
-                 BasicBlockEndingPattern.size());
+        //ptc.mmap(End.address(),
+        //         BasicBlockEndingPattern.data(),
+        //         BasicBlockEndingPattern.size());
       }
     }
   }
@@ -578,7 +579,7 @@ bool CpuLoopExitPass::runOnModule(llvm::Module &M) {
   return true;
 }
 
-void CodeGenerator::translate(Optional<uint64_t> RawVirtualAddress) {
+void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> RawVirtualAddress) {
   using FT = FunctionType;
 
   // Declare the abort function
@@ -594,7 +595,7 @@ void CodeGenerator::translate(Optional<uint64_t> RawVirtualAddress) {
   // running SROA
   legacy::PassManager CpuLoopPM;
   CpuLoopPM.add(new LoopInfoWrapperPass());
-  CpuLoopPM.add(new CpuLoopFunctionPass(ptc.exception_index));
+  CpuLoopPM.add(new CpuLoopFunctionPass(LibTcg.exception_index));
   CpuLoopPM.add(createSROAPass());
   CpuLoopPM.run(*HelpersModule);
 
@@ -1017,7 +1018,7 @@ void CodeGenerator::translate(Optional<uint64_t> RawVirtualAddress) {
           if (MDOriginalInstr != nullptr)
             I->setMetadata(OriginalInstrMDKind, MDOriginalInstr);
           if (MDPTCInstr != nullptr)
-            I->setMetadata(PTCInstrMDKind, MDPTCInstr);
+            I->setMetadata(LibTcgInstrMDKind, MDPTCInstr);
         }
       }
 
