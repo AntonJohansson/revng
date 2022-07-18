@@ -50,11 +50,13 @@
 #include "revng/Support/FunctionTags.h"
 #include "revng/Support/ProgramCounterHandler.h"
 
+#include "qemu/libtcg/libtcg.h"
+
 #include "CodeGenerator.h"
 #include "ExternalJumpsHandler.h"
-#include "InstructionTranslator.h"
+// TODO(anjo): convert this to new libtcg
+//#include "InstructionTranslator.h"
 #include "JumpTargetManager.h"
-#include "PTCInterface.h"
 #include "VariableManager.h"
 
 using namespace llvm;
@@ -158,7 +160,7 @@ CodeGenerator::CodeGenerator(const RawBinaryView &RawBinary,
   TargetArchitecture(TargetArchitecture) {
 
   OriginalInstrMDKind = Context.getMDKindID("oi");
-  PTCInstrMDKind = Context.getMDKindID("pi");
+  LibTcgInstrMDKind = Context.getMDKindID("pi");
 
   HelpersModule = parseIR(Helpers, Context);
 
@@ -195,20 +197,6 @@ CodeGenerator::CodeGenerator(const RawBinaryView &RawBinary,
   for (auto &[Segment, Data] : RawBinary.segments()) {
     // If it's executable register it as a valid code area
     if (Segment.IsExecutable()) {
-      // We ignore possible p_filesz-p_memsz mismatches, zeros wouldn't be
-      // useful code anyway
-      size_t Size = Segment.FileSize();
-      bool Success = ptc.mmap(Segment.StartAddress().address(),
-                              static_cast<const void *>(Data.data()),
-                              Size);
-      if (not Success) {
-        revng_log(Log,
-                  "Couldn't mmap segment starting at "
-                    << Segment.StartAddress().toString() << " with size 0x"
-                    << Size);
-        continue;
-      }
-
       bool Found = false;
       MetaAddress End = Segment.pagesRange().second;
       revng_assert(End.isValid() and End.address() % 4096 == 0);
@@ -219,16 +207,13 @@ CodeGenerator::CodeGenerator(const RawBinaryView &RawBinary,
         }
       }
 
+      // NOTE(anjo): I assume this is something we need to keep
+      // as NoMoreCodeBoundaries gets populated.
+
       // The next page is not mapped
       if (not Found) {
         revng_check(Segment.endAddress().address() != 0);
         NoMoreCodeBoundaries.insert(Segment.endAddress());
-        using namespace model::Architecture;
-        auto Architecture = Model->Architecture();
-        auto BasicBlockEndingPattern = getBasicBlockEndingPattern(Architecture);
-        ptc.mmap(End.address(),
-                 BasicBlockEndingPattern.data(),
-                 BasicBlockEndingPattern.size());
       }
     }
   }
@@ -577,7 +562,7 @@ bool CpuLoopExitPass::runOnModule(llvm::Module &M) {
   return true;
 }
 
-void CodeGenerator::translate(optional<uint64_t> RawVirtualAddress) {
+void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> RawVirtualAddress) {
   using FT = FunctionType;
 
   Task T(12, "Translation");
@@ -596,7 +581,7 @@ void CodeGenerator::translate(optional<uint64_t> RawVirtualAddress) {
   T.advance("Prepare helpers module", true);
   legacy::PassManager CpuLoopPM;
   CpuLoopPM.add(new LoopInfoWrapperPass());
-  CpuLoopPM.add(new CpuLoopFunctionPass(ptc.exception_index));
+  CpuLoopPM.add(new CpuLoopFunctionPass(LibTcg.exception_index));
   CpuLoopPM.add(createSROAPass());
   CpuLoopPM.run(*HelpersModule);
 
@@ -701,6 +686,13 @@ void CodeGenerator::translate(optional<uint64_t> RawVirtualAddress) {
         F->setLinkage(GlobalValue::InternalLinkage);
 
   //
+  // Create the libtcg context
+  //
+  // TODO(anjo): Move to Lift.cpp?
+  LibTinyCodeDesc Desc = {};
+  auto *LibTcgContext = LibTcg.context_create(&Desc);
+
+  //
   // Create the VariableManager
   //
   bool TargetIsLittleEndian;
@@ -716,10 +708,7 @@ void CodeGenerator::translate(optional<uint64_t> RawVirtualAddress) {
   auto *CPUStruct = StructType::getTypeByName(TheModule->getContext(),
                                               CPUStructName);
   revng_assert(CPUStruct != nullptr);
-  VariableManager Variables(*TheModule,
-                            TargetIsLittleEndian,
-                            CPUStruct,
-                            ptc.env_offset);
+  VariableManager Variables(*TheModule, TargetIsLittleEndian, CPUStruct, LibTcg.env_ptr(LibTcgContext));
   auto CreateCPUStateAccessAnalysisPass = [&Variables]() {
     return new CPUStateAccessAnalysisPass(&Variables, true);
   };
@@ -743,20 +732,20 @@ void CodeGenerator::translate(optional<uint64_t> RawVirtualAddress) {
   //
   auto SP = model::Architecture::getStackPointer(Model->Architecture());
   std::string SPName = model::Register::getCSVName(SP).str();
-  GlobalVariable *SPReg = Variables.getByEnvOffset(ptc.sp, SPName).first;
+  GlobalVariable *SPReg = Variables.getByEnvOffset(LibTcg.sp, SPName).first;
 
   using PCHOwner = std::unique_ptr<ProgramCounterHandler>;
-  auto Factory = [&Variables](PCAffectingCSV::Values CSVID,
-                              llvm::StringRef Name) -> GlobalVariable * {
+  auto Factory = [&Variables, &LibTcg](PCAffectingCSV::Values CSVID,
+                                       llvm::StringRef Name) -> GlobalVariable * {
     intptr_t Offset = 0;
 
     switch (CSVID) {
     case PCAffectingCSV::PC:
-      Offset = ptc.pc;
+      Offset = LibTcg.pc;
       break;
 
     case PCAffectingCSV::IsThumb:
-      Offset = ptc.is_thumb;
+      Offset = LibTcg.is_thumb;
       break;
 
     default:
@@ -856,12 +845,21 @@ void CodeGenerator::translate(optional<uint64_t> RawVirtualAddress) {
   Task LiftTask({}, "Lifting");
   LiftTask.advance("Initial address peeking", false);
 
-  InstructionTranslator Translator(Builder,
-                                   Variables,
-                                   JumpTargets,
-                                   Blocks,
-                                   EndianessMismatch,
-                                   PCH.get());
+  // TODO(anjo): Convert this to new libtcg
+  //InstructionTranslator Translator(Builder,
+  //                                 Variables,
+  //                                 JumpTargets,
+  //                                 Blocks,
+  //                                 EndianessMismatch,
+  //                                 PCH.get());
+
+  auto Segments = RawBinary.segments();
+  auto SegmentIt = Segments.begin();
+  size_t OffsetInSegment = 0;
+
+  for (; SegmentIt != Segments.end(); SegmentIt++)
+    if (SegmentIt->first.IsExecutable)
+      break;
 
   std::tie(VirtualAddress, Entry) = JumpTargets.peek();
 
@@ -874,53 +872,73 @@ void CodeGenerator::translate(optional<uint64_t> RawVirtualAddress) {
     Builder.SetInsertPoint(Entry);
 
     // TODO: what if create a new instance of an InstructionTranslator here?
-    Translator.reset();
+    //Translator.reset();
 
     // TODO: rename this type
-    PTCInstructionListPtr InstructionList(new PTCInstructionList);
     size_t ConsumedSize = 0;
 
-    PTCCodeType Type = PTC_CODE_REGULAR;
+    //
+    // TODO(anjo): We don't handle THUMB in libtcg yet!
+    //
+    //PTCCodeType Type = PTC_CODE_REGULAR;
 
-    switch (VirtualAddress.type()) {
-    case MetaAddressType::Invalid:
-      revng_abort();
+    //switch (VirtualAddress.type()) {
+    //case MetaAddressType::Invalid:
+    //  revng_abort();
 
-    case MetaAddressType::Code_arm_thumb:
-      Type = PTC_CODE_ARM_THUMB;
-      break;
+    //case MetaAddressType::Code_arm_thumb:
+    //  Type = PTC_CODE_ARM_THUMB;
+    //  break;
 
-    default:
-      Type = PTC_CODE_REGULAR;
-      break;
+    //default:
+    //  Type = PTC_CODE_REGULAR;
+    //  break;
+    //}
+
+    if (OffsetInSegment >= SegmentIt->first.size()) {
+      for (; SegmentIt != Segments.end(); SegmentIt++)
+        if (SegmentIt->first.IsExecutable)
+          break;
+      OffsetInSegment = 0;
     }
 
-    ConsumedSize = ptc.translate(VirtualAddress.address(),
-                                 Type,
-                                 InstructionList.get());
+    //ConsumedSize = ptc.translate(VirtualAddress.address(),
+    //                             Type,
+    //                             InstructionList.get());
 
-    if (ConsumedSize == 0) {
-      Translator.emitNewPCCall(Builder, VirtualAddress, 1, nullptr);
-      Builder.CreateCall(AbortFunction);
-      Builder.CreateUnreachable();
+    //if (ConsumedSize == 0) {
+    //  Translator.emitNewPCCall(Builder, VirtualAddress, 1, nullptr);
+    //  Builder.CreateCall(AbortFunction);
+    //  Builder.CreateUnreachable();
 
       // Obtain a new program counter to translate
-      TranslateTask.complete();
-      LiftTask.advance("Peek new address", true);
-      std::tie(VirtualAddress, Entry) = JumpTargets.peek();
+    TranslateTask.complete();
+    LiftTask.advance("Peek new address", true);
+    //  // Obtain a new program counter to translate
+    //  std::tie(VirtualAddress, Entry) = JumpTargets.peek();
 
-      continue;
-    }
+    //  continue;
+    //}
 
-    // Check whether we ended up in an unmapped page
-    MetaAddress AbortAt = MetaAddress::invalid();
-    MetaAddress LastByte = VirtualAddress.toGeneric() + (ConsumedSize - 1);
-    if (VirtualAddress.pageStart() != LastByte.pageStart()) {
-      MetaAddress NextPage = VirtualAddress.nextPageStart();
-      if (NoMoreCodeBoundaries.contains(NextPage))
-        AbortAt = NextPage;
-    }
+    //// Check whether we ended up in an unmapped page
+    //MetaAddress AbortAt = MetaAddress::invalid();
+    //MetaAddress LastByte = VirtualAddress.toGeneric() + (ConsumedSize - 1);
+    //if (VirtualAddress.pageStart() != LastByte.pageStart()) {
+    //  MetaAddress NextPage = VirtualAddress.nextPageStart();
+    //  if (NoMoreCodeBoundaries.count(NextPage) != 0)
+    //    AbortAt = NextPage;
+    //}
 
+    // TODO(anjo): We are not using Type here
+    // TODO(anjo): Should obv use VirtualAddress here
+    auto NewInstructionList = LibTcg.translate(LibTcgContext,
+                                               SegmentIt->second.data() + OffsetInSegment,
+                                               SegmentIt->second.size() - OffsetInSegment,
+                                               SegmentIt->first.startAddress().address() + OffsetInSegment);
+    ConsumedSize = NewInstructionList.size_in_bytes;
+    OffsetInSegment += ConsumedSize;
+
+#if 0
     SmallSet<unsigned, 1> ToIgnore;
     ToIgnore = Translator.preprocess(InstructionList.get());
 
@@ -940,8 +958,8 @@ void CodeGenerator::translate(optional<uint64_t> RawVirtualAddress) {
     MetaAddress EndPC = VirtualAddress + ConsumedSize;
 
     const auto InstructionCount = InstructionList->instruction_count;
-    using IT = InstructionTranslator;
-    IT::TranslationResult Result;
+    //using IT = InstructionTranslator;
+    //IT::TranslationResult Result;
 
     TranslateTask.advance("Translate to LLVM IR", true);
 
@@ -1061,7 +1079,7 @@ void CodeGenerator::translate(optional<uint64_t> RawVirtualAddress) {
           if (MDOriginalInstr != nullptr)
             I->setMetadata(OriginalInstrMDKind, MDOriginalInstr);
           if (MDPTCInstr != nullptr)
-            I->setMetadata(PTCInstrMDKind, MDPTCInstr);
+            I->setMetadata(LibTcgInstrMDKind, MDPTCInstr);
         }
       }
 
@@ -1087,10 +1105,16 @@ void CodeGenerator::translate(optional<uint64_t> RawVirtualAddress) {
     TranslateTask.complete();
     LiftTask.advance("Peek new address", true);
     std::tie(VirtualAddress, Entry) = JumpTargets.peek();
+#endif
   } // End translations loop
 
   LiftTask.complete();
 
+  // TODO(anjo): Destroy the libtcg context, note this
+  // might be nice to move out of this translate function.
+  LibTcg.context_destroy(LibTcgContext);
+
+#if 0
   OI.drop();
 
   // Reorder basic blocks in RPOT
@@ -1207,4 +1231,5 @@ void CodeGenerator::translate(optional<uint64_t> RawVirtualAddress) {
   JumpOutHandler.createExternalJumpsHandler();
 
   Variables.finalize();
+#endif
 }
