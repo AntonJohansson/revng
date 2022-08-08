@@ -14,7 +14,6 @@
 #include "revng/Support/CommandLine.h"
 
 #include "CPUStateAccessAnalysisPass.h"
-#include "PTCDump.h"
 
 namespace llvm {
 class AllocaInst;
@@ -37,27 +36,29 @@ extern llvm::cl::opt<bool> External;
 /// created on the fly.
 class VariableManager {
 public:
-  VariableManager(llvm::Module &M, bool TargetIsLittleEndian);
+  VariableManager(llvm::Module &M,
+                  bool TargetIsLittleEndian,
+                  uint8_t *LibTcgEnvAddress);
 
   void setAllocaInsertPoint(llvm::Instruction *I) {
     AllocaBuilder.SetInsertPoint(I);
   }
 
-  llvm::Instruction *load(llvm::IRBuilder<> &Builder, unsigned TemporaryId) {
-    using namespace llvm;
+  //llvm::Instruction *load(llvm::IRBuilder<> &Builder, unsigned TemporaryId) {
+  //  using namespace llvm;
 
-    auto [IsNew, V] = getOrCreate(TemporaryId, true);
+  //  auto [IsNew, V] = getOrCreate(TemporaryId, true);
 
-    if (V == nullptr)
-      return nullptr;
+  //  if (V == nullptr)
+  //    return nullptr;
 
-    if (IsNew) {
-      auto *Undef = UndefValue::get(V->getType()->getPointerElementType());
-      Builder.CreateStore(Undef, V);
-    }
+  //  if (IsNew) {
+  //    auto *Undef = UndefValue::get(V->getType()->getPointerElementType());
+  //    Builder.CreateStore(Undef, V);
+  //  }
 
-    return Builder.CreateLoad(V);
-  }
+  //  return Builder.CreateLoad(V);
+  //}
 
   /// \brief Get or create the LLVM value associated to a PTC temporary
   ///
@@ -67,9 +68,9 @@ public:
   /// \param TemporaryId the PTC temporary identifier.
   ///
   /// \return a `Value` wrapping the requested global or local variable.
-  llvm::Value *getOrCreate(unsigned TemporaryId) {
-    return getOrCreate(TemporaryId, false).second;
-  }
+  //llvm::Value *getOrCreate(unsigned TemporaryId) {
+  //  return getOrCreate(TemporaryId, false).second;
+  //}
 
   /// \brief Return the global variable corresponding to \p Offset in the CPU
   ///        state.
@@ -96,7 +97,7 @@ public:
   ///       function concept with other meanings.
   ///
   /// \param Instructions the new PTCInstructionList to use from now on.
-  void newFunction(PTCInstructionList *Instructions);
+  //void newFunction(PTCInstructionList *Instructions);
 
   /// Informs the VariableManager that a new basic block has begun, so it can
   /// discard basic block-level variables.
@@ -154,8 +155,8 @@ public:
                              llvm::Instruction *InsertBefore) const;
 
 private:
-  std::pair<bool, llvm::Value *>
-  getOrCreate(unsigned TemporaryId, bool Reading);
+  //std::pair<bool, llvm::Value *>
+  //getOrCreate(unsigned TemporaryId, bool Reading);
 
   llvm::Value *loadFromCPUStateOffset(llvm::IRBuilder<> &Builder,
                                       unsigned LoadSize,
@@ -182,7 +183,7 @@ private:
   GlobalsMap OtherGlobals;
   TemporariesMap Temporaries;
   TemporariesMap LocalTemporaries;
-  PTCInstructionList *Instructions;
+  //PTCInstructionList *Instructions;
 
   llvm::StructType *CPUStateType;
   const llvm::DataLayout *ModuleLayout;
@@ -190,4 +191,5 @@ private:
 
   llvm::GlobalVariable *Env;
   bool TargetIsLittleEndian;
+  uint8_t *LibTcgEnvAddress;
 };
