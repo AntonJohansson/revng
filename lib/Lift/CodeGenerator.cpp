@@ -53,7 +53,8 @@
 
 #include "CodeGenerator.h"
 #include "ExternalJumpsHandler.h"
-#include "InstructionTranslator.h"
+// TODO(anjo): convert this to new libtcg
+//#include "InstructionTranslator.h"
 #include "JumpTargetManager.h"
 #include "VariableManager.h"
 
@@ -681,6 +682,13 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
         F->setLinkage(GlobalValue::InternalLinkage);
 
   //
+  // Create the libtcg context
+  //
+  // TODO(anjo): Move to Lift.cpp?
+  LibTinyCodeDesc Desc = {};
+  auto *LibTcgContext = LibTcg.context_create(&Desc);
+
+  //
   // Create the VariableManager
   //
   bool TargetIsLittleEndian;
@@ -688,7 +696,7 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
     using namespace model::Architecture;
     TargetIsLittleEndian = isLittleEndian(TargetArchitecture);
   }
-  VariableManager Variables(*TheModule, TargetIsLittleEndian);
+  VariableManager Variables(*TheModule, TargetIsLittleEndian, LibTcg.env_ptr(LibTcgContext));
   auto CreateCPUStateAccessAnalysisPass = [&Variables]() {
     return new CPUStateAccessAnalysisPass(&Variables, true);
   };
@@ -711,20 +719,20 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
   //
   auto SP = model::Architecture::getStackPointer(Model->Architecture());
   std::string SPName = model::Register::getCSVName(SP).str();
-  GlobalVariable *SPReg = Variables.getByEnvOffset(ptc.sp, SPName).first;
+  GlobalVariable *SPReg = Variables.getByEnvOffset(LibTcg.sp, SPName).first;
 
   using PCHOwner = std::unique_ptr<ProgramCounterHandler>;
-  auto Factory = [&Variables](PCAffectingCSV::Values CSVID,
-                              llvm::StringRef Name) -> GlobalVariable * {
+  auto Factory = [&Variables, &LibTcg](PCAffectingCSV::Values CSVID,
+                                       llvm::StringRef Name) -> GlobalVariable * {
     intptr_t Offset = 0;
 
     switch (CSVID) {
     case PCAffectingCSV::PC:
-      Offset = ptc.pc;
+      Offset = LibTcg.pc;
       break;
 
     case PCAffectingCSV::IsThumb:
-      Offset = ptc.is_thumb;
+      Offset = LibTcg.is_thumb;
       break;
 
     default:
@@ -819,12 +827,20 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
     EndianessMismatch = TargetIsLittleEndian != SourceIsLittleEndian;
   }
 
-  InstructionTranslator Translator(Builder,
-                                   Variables,
-                                   JumpTargets,
-                                   Blocks,
-                                   EndianessMismatch,
-                                   PCH.get());
+  // TODO(anjo): Convert this to new libtcg
+  //InstructionTranslator Translator(Builder,
+  //                                 Variables,
+  //                                 JumpTargets,
+  //                                 Blocks,
+  //                                 EndianessMismatch,
+  //                                 PCH.get());
+
+  auto Segments = RawBinary.segments();
+  auto SegmentIt = Segments.begin();
+
+  for (; SegmentIt != Segments.end(); SegmentIt++)
+    if (SegmentIt->first.IsExecutable)
+      break;
 
   std::tie(VirtualAddress, Entry) = JumpTargets.peek();
 
@@ -832,51 +848,37 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
     Builder.SetInsertPoint(Entry);
 
     // TODO: what if create a new instance of an InstructionTranslator here?
-    Translator.reset();
+    //Translator.reset();
 
     // TODO: rename this type
-    PTCInstructionListPtr InstructionList(new PTCInstructionList);
     size_t ConsumedSize = 0;
 
-    PTCCodeType Type = PTC_CODE_REGULAR;
+    //
+    // TODO(anjo): We don't handle THUMB in libtcg yet!
+    //
+    //PTCCodeType Type = PTC_CODE_REGULAR;
 
-    switch (VirtualAddress.type()) {
-    case MetaAddressType::Invalid:
-      revng_abort();
+    //switch (VirtualAddress.type()) {
+    //case MetaAddressType::Invalid:
+    //  revng_abort();
 
-    case MetaAddressType::Code_arm_thumb:
-      Type = PTC_CODE_ARM_THUMB;
-      break;
+    //case MetaAddressType::Code_arm_thumb:
+    //  Type = PTC_CODE_ARM_THUMB;
+    //  break;
 
-    default:
-      Type = PTC_CODE_REGULAR;
-      break;
-    }
+    //default:
+    //  Type = PTC_CODE_REGULAR;
+    //  break;
+    //}
 
-    ConsumedSize = ptc.translate(VirtualAddress.address(),
-                                 Type,
-                                 InstructionList.get());
+    // TODO(anjo): We are not using Type here
+    auto NewInstructionList = LibTcg.translate(LibTcgContext,
+                                               0,
+                                               0,
+                                               VirtualAddress.address());
+    ConsumedSize = NewInstructionList.size_in_bytes;
 
-    if (ConsumedSize == 0) {
-      Translator.emitNewPCCall(Builder, VirtualAddress, 1, nullptr);
-      Builder.CreateCall(AbortFunction);
-      Builder.CreateUnreachable();
-
-      // Obtain a new program counter to translate
-      std::tie(VirtualAddress, Entry) = JumpTargets.peek();
-
-      continue;
-    }
-
-    // Check whether we ended up in an unmapped page
-    MetaAddress AbortAt = MetaAddress::invalid();
-    MetaAddress LastByte = VirtualAddress.toGeneric() + (ConsumedSize - 1);
-    if (VirtualAddress.pageStart() != LastByte.pageStart()) {
-      MetaAddress NextPage = VirtualAddress.nextPageStart();
-      if (NoMoreCodeBoundaries.count(NextPage) != 0)
-        AbortAt = NextPage;
-    }
-
+#if 0
     SmallSet<unsigned, 1> ToIgnore;
     ToIgnore = Translator.preprocess(InstructionList.get());
 
@@ -896,8 +898,8 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
     MetaAddress EndPC = VirtualAddress + ConsumedSize;
 
     const auto InstructionCount = InstructionList->instruction_count;
-    using IT = InstructionTranslator;
-    IT::TranslationResult Result;
+    //using IT = InstructionTranslator;
+    //IT::TranslationResult Result;
 
     // Handle the first PTC_INSTRUCTION_op_debug_insn_start
     {
@@ -1031,8 +1033,14 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
 
     // Obtain a new program counter to translate
     std::tie(VirtualAddress, Entry) = JumpTargets.peek();
+#endif
   } // End translations loop
 
+  // TODO(anjo): Destroy the libtcg context, note this
+  // might be nice to move out of this translate function.
+  LibTcg.context_destroy(LibTcgContext);
+
+#if 0
   OI.drop();
 
   // Reorder basic blocks in RPOT
@@ -1144,4 +1152,5 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
   JumpOutHandler.createExternalJumpsHandler();
 
   Variables.finalize();
+#endif
 }
