@@ -25,8 +25,6 @@
 #include "revng/Support/Debug.h"
 #include "revng/Support/IRHelpers.h"
 
-#include "PTCDump.h"
-#include "PTCInterface.h"
 #include "VariableManager.h"
 
 using namespace llvm;
@@ -154,16 +152,18 @@ getTypeAtOffset(const DataLayout *TheLayout, Type *VarType, intptr_t Offset) {
 VariableManager::VariableManager(Module &M,
                                  bool TargetIsLittleEndian,
                                  StructType *CPUStruct,
-                                 unsigned EnvOffset) :
+                                 unsigned EnvOffset,
+                                 uint8_t *LibTcgEnvAddress) :
   TheModule(M),
   AllocaBuilder(getContext(&M)),
   CPUStateType(CPUStruct),
   ModuleLayout(&TheModule.getDataLayout()),
   EnvOffset(EnvOffset),
   Env(nullptr),
-  TargetIsLittleEndian(TargetIsLittleEndian) {
+  TargetIsLittleEndian(TargetIsLittleEndian),
+  LibTcgEnvAddress(LibTcgEnvAddress) {
 
-  revng_assert(ptc.initialized_env != nullptr);
+  revng_assert(LibTcgEnvAddress != nullptr);
 
   IntegerType *IntPtrTy = AllocaBuilder.getIntPtrTy(*ModuleLayout);
   Env = cast<GlobalVariable>(TheModule.getOrInsertGlobal("env", IntPtrTy));
@@ -421,11 +421,11 @@ void VariableManager::finalize() {
 
 // TODO: `newFunction` reflects the tcg terminology but in this context is
 //       highly misleading
-void VariableManager::newFunction(PTCInstructionList *Instructions) {
-  LocalTemporaries.clear();
-  this->Instructions = Instructions;
-  newBasicBlock();
-}
+//void VariableManager::newFunction(PTCInstructionList *Instructions) {
+//  LocalTemporaries.clear();
+//  this->Instructions = Instructions;
+//  newBasicBlock();
+//}
 
 bool VariableManager::isEnv(Value *TheValue) {
   auto *Load = dyn_cast<LoadInst>(TheValue);
@@ -492,7 +492,7 @@ VariableManager::getByCPUStateOffsetInternal(intptr_t Offset,
 
     // TODO: offset could be negative, we could segfault here
     auto *InitialValue = fromBytes(cast<IntegerType>(VariableType),
-                                   ptc.initialized_env - EnvOffset + Offset);
+                                   LibTcgEnvAddress - EnvOffset + Offset);
 
     auto *NewVariable = new GlobalVariable(TheModule,
                                            VariableType,
@@ -516,73 +516,73 @@ VariableManager::getByCPUStateOffsetInternal(intptr_t Offset,
   }
 }
 
-std::pair<bool, Value *> VariableManager::getOrCreate(unsigned TemporaryId,
-                                                      bool Reading) {
-  revng_assert(Instructions != nullptr);
-
-  PTCTemp *Temporary = ptc_temp_get(Instructions, TemporaryId);
-  Type *VariableType = Temporary->type == PTC_TYPE_I32 ?
-                         AllocaBuilder.getInt32Ty() :
-                         AllocaBuilder.getInt64Ty();
-
-  if (ptc_temp_is_global(Instructions, TemporaryId)) {
-    // Basically we use fixed_reg to detect "env"
-    if (Temporary->fixed_reg == 0) {
-      Value *Result = getByCPUStateOffset(EnvOffset + Temporary->mem_offset,
-                                          Temporary->name);
-      revng_assert(Result != nullptr);
-      return { false, Result };
-    } else {
-      GlobalsMap::iterator It = OtherGlobals.find(TemporaryId);
-      if (It != OtherGlobals.end()) {
-        return { false, It->second };
-      } else {
-        // TODO: what do we have here, apart from env?
-        auto InitialValue = ConstantInt::get(VariableType, 0);
-        StringRef Name(Temporary->name);
-        GlobalVariable *Result = nullptr;
-
-        if (Name == "env") {
-          revng_assert(Env != nullptr);
-          Result = Env;
-        } else {
-          Result = new GlobalVariable(TheModule,
-                                      VariableType,
-                                      false,
-                                      GlobalValue::CommonLinkage,
-                                      InitialValue,
-                                      Name);
-        }
-
-        OtherGlobals[TemporaryId] = Result;
-        return { false, Result };
-      }
-    }
-  } else if (Temporary->temp_local) {
-    auto It = LocalTemporaries.find(TemporaryId);
-    if (It != LocalTemporaries.end()) {
-      return { false, It->second };
-    } else {
-      AllocaInst *NewTemporary = AllocaBuilder.CreateAlloca(VariableType);
-      LocalTemporaries[TemporaryId] = NewTemporary;
-      return { true, NewTemporary };
-    }
-  } else {
-    auto It = Temporaries.find(TemporaryId);
-    if (It != Temporaries.end()) {
-      return { false, It->second };
-    } else {
-      // Can't read a temporary if it has never been written, we're probably
-      // translating rubbish
-      if (Reading)
-        return { false, nullptr };
-
-      AllocaInst *NewTemporary = AllocaBuilder.CreateAlloca(VariableType);
-      Temporaries[TemporaryId] = NewTemporary;
-      return { true, NewTemporary };
-    }
-  }
-}
+//std::pair<bool, Value *> VariableManager::getOrCreate(unsigned TemporaryId,
+//                                                      bool Reading) {
+//  revng_assert(Instructions != nullptr);
+//
+//  PTCTemp *Temporary = ptc_temp_get(Instructions, TemporaryId);
+//  Type *VariableType = Temporary->type == PTC_TYPE_I32 ?
+//                         AllocaBuilder.getInt32Ty() :
+//                         AllocaBuilder.getInt64Ty();
+//
+//  if (ptc_temp_is_global(Instructions, TemporaryId)) {
+//    // Basically we use fixed_reg to detect "env"
+//    if (Temporary->fixed_reg == 0) {
+//      Value *Result = getByCPUStateOffset(EnvOffset + Temporary->mem_offset,
+//                                          Temporary->name);
+//      revng_assert(Result != nullptr);
+//      return { false, Result };
+//    } else {
+//      GlobalsMap::iterator It = OtherGlobals.find(TemporaryId);
+//      if (It != OtherGlobals.end()) {
+//        return { false, It->second };
+//      } else {
+//        // TODO: what do we have here, apart from env?
+//        auto InitialValue = ConstantInt::get(VariableType, 0);
+//        StringRef Name(Temporary->name);
+//        GlobalVariable *Result = nullptr;
+//
+//        if (Name == "env") {
+//          revng_assert(Env != nullptr);
+//          Result = Env;
+//        } else {
+//          Result = new GlobalVariable(TheModule,
+//                                      VariableType,
+//                                      false,
+//                                      GlobalValue::CommonLinkage,
+//                                      InitialValue,
+//                                      Name);
+//        }
+//
+//        OtherGlobals[TemporaryId] = Result;
+//        return { false, Result };
+//      }
+//    }
+//  } else if (Temporary->temp_local) {
+//    auto It = LocalTemporaries.find(TemporaryId);
+//    if (It != LocalTemporaries.end()) {
+//      return { false, It->second };
+//    } else {
+//      AllocaInst *NewTemporary = AllocaBuilder.CreateAlloca(VariableType);
+//      LocalTemporaries[TemporaryId] = NewTemporary;
+//      return { true, NewTemporary };
+//    }
+//  } else {
+//    auto It = Temporaries.find(TemporaryId);
+//    if (It != Temporaries.end()) {
+//      return { false, It->second };
+//    } else {
+//      // Can't read a temporary if it has never been written, we're probably
+//      // translating rubbish
+//      if (Reading)
+//        return { false, nullptr };
+//
+//      AllocaInst *NewTemporary = AllocaBuilder.CreateAlloca(VariableType);
+//      Temporaries[TemporaryId] = NewTemporary;
+//      return { true, NewTemporary };
+//    }
+//  }
+//}
 
 Value *VariableManager::computeEnvAddress(Type *TargetType,
                                           Instruction *InsertBefore,
