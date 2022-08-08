@@ -9,14 +9,15 @@ revng_add_library_internal(
   CPUStateAccessAnalysisPass.cpp
   CSVOffsets.cpp
   ExternalJumpsHandler.cpp
-  InstructionTranslator.cpp
+  #InstructionTranslator.cpp
   Lift.cpp
   LiftPipe.cpp
   LinkSupportPipe.cpp
   LoadBinaryPass.cpp
   JumpTargetManager.cpp
-  PTCDump.cpp
-  VariableManager.cpp)
+  #PTCDump.cpp
+  VariableManager.cpp
+  )
 
 target_link_libraries(
   revngLift
