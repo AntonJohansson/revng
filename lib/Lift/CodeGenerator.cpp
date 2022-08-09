@@ -840,6 +840,7 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
 
   auto Segments = RawBinary.segments();
   auto SegmentIt = Segments.begin();
+  size_t OffsetInSegment = 0;
 
   for (; SegmentIt != Segments.end(); SegmentIt++)
     if (SegmentIt->first.IsExecutable)
@@ -872,12 +873,21 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
     //  break;
     //}
 
+    if (OffsetInSegment >= SegmentIt->first.size()) {
+      for (; SegmentIt != Segments.end(); SegmentIt++)
+        if (SegmentIt->first.IsExecutable)
+          break;
+      OffsetInSegment = 0;
+    }
+
     // TODO(anjo): We are not using Type here
+    // TODO(anjo): Should obv use VirtualAddress here
     auto NewInstructionList = LibTcg.translate(LibTcgContext,
-                                               0,
-                                               0,
-                                               VirtualAddress.address());
+                                               SegmentIt->second.data() + OffsetInSegment,
+                                               SegmentIt->second.size() - OffsetInSegment,
+                                               SegmentIt->first.startAddress().address() + OffsetInSegment);
     ConsumedSize = NewInstructionList.size_in_bytes;
+    OffsetInSegment += ConsumedSize;
 
 #if 0
     SmallSet<unsigned, 1> ToIgnore;
