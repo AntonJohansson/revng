@@ -340,19 +340,16 @@ bool CpuLoopFunctionPass::runOnModule(Module &M) {
   ReturnInst::Create(F.getParent()->getContext(), Footer);
 
   // Part 2: replace the call to cpu_*_exec with exception_index
-  auto IsCpuExec = [](Function &TheFunction) {
-    StringRef Name = TheFunction.getName();
-    return Name.startswith("cpu_") && Name.endswith("_exec");
-  };
-  Function &CpuExec = findUnique(F.getParent()->functions(), IsCpuExec);
+  Function &CpuExec = findUnique(F.getParent()->functions(), [](Function &F) {
+    return F.getName() == "cpu_exec";
+  });
 
-  User *CallUser = findUnique(CpuExec.users(), [&F](User *TheUser) {
-    auto *TheInstruction = dyn_cast<Instruction>(TheUser);
-
-    if (TheInstruction == nullptr)
+  User *CallUser = findUnique(CpuExec.users(), [&F](User *U) {
+    if (auto *I = dyn_cast<Instruction>(U)) {
+      return I->getParent()->getParent() == &F;
+    } else {
       return false;
-
-    return TheInstruction->getParent()->getParent() == &F;
+    }
   });
 
   auto *Call = cast<CallInst>(CallUser);
