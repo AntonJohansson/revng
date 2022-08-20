@@ -338,6 +338,9 @@ bool CpuLoopFunctionPass::runOnModule(Module &M) {
   ReturnInst::Create(F.getParent()->getContext(), Footer);
 
   // Part 2: replace the call to cpu_*_exec with exception_index
+  // TODO(anjo): we fail here, but I am a bit confused as to what is
+  // actually meant. Comments say to replace `cpu_*_exec` but we
+  // use find unique, so we're assuming only one such function.
   auto IsCpuExec = [](Function &TheFunction) {
     StringRef Name = TheFunction.getName();
     return Name.startswith("cpu_") && Name.endswith("_exec");
