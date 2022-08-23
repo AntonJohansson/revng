@@ -337,22 +337,32 @@ bool CpuLoopFunctionPass::runOnModule(Module &M) {
   ReturnInst::Create(F.getParent()->getContext(), Footer);
 
   // Part 2: replace the call to cpu_*_exec with exception_index
-  // TODO(anjo): we fail here, but I am a bit confused as to what is
-  // actually meant. Comments say to replace `cpu_*_exec` but we
-  // use find unique, so we're assuming only one such function.
   auto IsCpuExec = [](Function &TheFunction) {
-    StringRef Name = TheFunction.getName();
-    return Name.startswith("cpu_") && Name.endswith("_exec");
+    return TheFunction.getName().equals("cpu_exec");
   };
   Function &CpuExec = findUnique(F.getParent()->functions(), IsCpuExec);
 
-  User *CallUser = findUnique(CpuExec.users(), [&F](User *TheUser) {
-    auto *TheInstruction = dyn_cast<Instruction>(TheUser);
-
-    if (TheInstruction == nullptr)
+  // TODO(anjo): The lambda here also checks for constant expressions,
+  //             reason being that `cpu_exec` is being casted to another
+  //             function pointer in the call instruction. Note sure why
+  //             but the LLVM IR includes two stypes for CPUState:
+  //
+  //               %struct.CPUState,
+  //               %struct.CPUState.1342
+  //
+  User *CallUser = findUnique(CpuExec.users(), [&F](User *U) {
+    if (auto *I = dyn_cast<Instruction>(U)) {
+      return I->getParent()->getParent() == &F;
+    } else if (auto *CE = dyn_cast<ConstantExpr>(U)) {
+      revng_assert(CE->hasOneUse());
+      if (auto *I = dyn_cast<Instruction>(*CE->user_begin())) {
+        return I->getParent()->getParent() == &F;
+      } else {
+        return false;
+      }
+    } else {
       return false;
-
-    return TheInstruction->getParent()->getParent() == &F;
+    }
   });
 
   auto *Call = cast<CallInst>(CallUser);
