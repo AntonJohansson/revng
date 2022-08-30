@@ -396,13 +396,15 @@ static void purgeNoReturn(Function *F) {
   if (F->hasFnAttribute(Attribute::NoReturn))
     F->removeFnAttr(Attribute::NoReturn);
 
-  for (User *U : F->users())
-    if (auto *Call = dyn_cast<CallInst>(U))
+  for (User *U : F->users()) {
+    if (auto *Call = dyn_cast<CallInst>(U)) {
       if (Call->hasFnAttr(Attribute::NoReturn)) {
         auto OldAttr = Call->getAttributes();
         auto NewAttr = OldAttr.removeFnAttribute(Context, Attribute::NoReturn);
         Call->setAttributes(NewAttr);
       }
+    }
+  }
 }
 
 static ReturnInst *createRet(Instruction *Position) {
@@ -445,7 +447,6 @@ bool CpuLoopExitPass::runOnModule(llvm::Module &M) {
 
   purgeNoReturn(CpuLoopExit);
 
-  Function *CpuLoop = M.getFunction("cpu_loop");
   IntegerType *BoolType = Type::getInt1Ty(Context);
   std::set<Function *> FixedCallers;
   GlobalVariable *CpuLoopExitingVariable = nullptr;
@@ -456,19 +457,14 @@ bool CpuLoopExitPass::runOnModule(llvm::Module &M) {
                                               ConstantInt::getFalse(BoolType),
                                               StringRef("cpu_loop_exiting"));
 
+  Function *CpuLoop = M.getFunction("cpu_loop");
   revng_assert(CpuLoop != nullptr);
 
-  std::queue<User *> CpuLoopExitUsers;
-  for (User *TheUser : CpuLoopExit->users())
-    CpuLoopExitUsers.push(TheUser);
-
-  while (!CpuLoopExitUsers.empty()) {
-    auto *Call = cast<CallInst>(CpuLoopExitUsers.front());
-    CpuLoopExitUsers.pop();
+  for (User *U : CpuLoopExit->users()) {
+    auto *Call = cast<CallInst>(U);
     revng_assert(Call->getCalledFunction() == CpuLoopExit);
 
     // Call cpu_loop
-    auto *FirstArgTy = CpuLoop->getFunctionType()->getParamType(0);
     auto *EnvPtr = VM->cpuStateToEnv(Call->getArgOperand(0), Call);
 
     auto *CallCpuLoop = CallInst::Create(CpuLoop, { EnvPtr }, "", Call);
@@ -479,11 +475,12 @@ bool CpuLoopExitPass::runOnModule(llvm::Module &M) {
     CallCpuLoop->setDebugLoc(Call->getDebugLoc());
 
     // Set cpu_loop_exiting to true
-    new StoreInst(ConstantInt::getTrue(BoolType), CpuLoopExitingVariable, Call);
+    auto *Store [[maybe_unused]] = new StoreInst(ConstantInt::getTrue(BoolType),
+                                                 CpuLoopExitingVariable, Call);
 
     // Return immediately
     createRet(Call);
-    auto *Unreach = cast<UnreachableInst>(&*++Call->getIterator());
+    auto *Unreach = cast<UnreachableInst>(&*(++Call->getIterator()));
     eraseFromParent(Unreach);
 
     Function *Caller = Call->getParent()->getParent();
@@ -491,66 +488,73 @@ bool CpuLoopExitPass::runOnModule(llvm::Module &M) {
     // Remove the call to cpu_loop_exit
     eraseFromParent(Call);
 
-    if (!FixedCallers.contains(Caller)) {
-      FixedCallers.insert(Caller);
+    if (FixedCallers.contains(Caller)) {
+      continue;
 
-      std::queue<Value *> WorkList;
-      WorkList.push(Caller);
+    FixedCallers.insert(Caller);
 
-      while (!WorkList.empty()) {
-        Value *F = WorkList.front();
-        WorkList.pop();
+    std::queue<Value *> WorkList;
+    WorkList.push(Caller);
 
-        for (User *RecUser : F->users()) {
-          auto *RecCall = dyn_cast<CallInst>(RecUser);
-          if (RecCall == nullptr) {
-            auto *Cast = dyn_cast<ConstantExpr>(RecUser);
-            revng_assert(Cast != nullptr, "Unexpected user");
+    while (!WorkList.empty()) {
+      Value *F = WorkList.front();
+      WorkList.pop();
+
+      for (User *RecUser : F->users()) {
+        auto *RecCall = dyn_cast<CallInst>(RecUser);
+        if (RecCall == nullptr) {
+          if (auto *Cast = dyn_cast<ConstantExpr>(RecUser)) {
             revng_assert(Cast->getOperand(0) == F && Cast->isCast());
             WorkList.push(Cast);
             continue;
+          } else if (auto *Store = dyn_cast<StoreInst>(RecUser)) {
+            // TODO(anjo): We encountered a store, what do?
+            WorkList.push(Cast);
+            continue;
+          } else {
+            revng_assert(Cast != nullptr, "Unexpected user");
           }
+        }
 
-          Function *RecCaller = RecCall->getParent()->getParent();
+        Function *RecCaller = RecCall->getParent()->getParent();
 
-          // TODO: make this more reliable than using function name
-          // If the caller is a QEMU helper function make it check
-          // cpu_loop_exiting and if it's true, make it return
+        // TODO: make this more reliable than using function name
+        // If the caller is a QEMU helper function make it check
+        // cpu_loop_exiting and if it's true, make it return
 
-          // Split BB
-          BasicBlock *OldBB = RecCall->getParent();
-          BasicBlock::iterator SplitPoint = ++RecCall->getIterator();
-          revng_assert(SplitPoint != OldBB->end());
-          BasicBlock *NewBB = OldBB->splitBasicBlock(SplitPoint);
+        // Split BB
+        BasicBlock *OldBB = RecCall->getParent();
+        BasicBlock::iterator SplitPoint = ++RecCall->getIterator();
+        revng_assert(SplitPoint != OldBB->end());
+        BasicBlock *NewBB = OldBB->splitBasicBlock(SplitPoint);
 
-          // Add a BB with a ret
-          BasicBlock *QuitBB = BasicBlock::Create(Context,
-                                                  "cpu_loop_exit_return",
-                                                  RecCaller,
-                                                  NewBB);
-          UnreachableInst *Temp = new UnreachableInst(Context, QuitBB);
-          createRet(Temp);
-          eraseFromParent(Temp);
+        // Add a BB with a ret
+        BasicBlock *QuitBB = BasicBlock::Create(Context,
+                                                "cpu_loop_exit_return",
+                                                RecCaller,
+                                                NewBB);
+        UnreachableInst *Temp = new UnreachableInst(Context, QuitBB);
+        createRet(Temp);
+        eraseFromParent(Temp);
 
-          // Check value of cpu_loop_exiting
-          auto *Branch = cast<BranchInst>(&*++(RecCall->getIterator()));
-          auto *PointeeTy = CpuLoopExitingVariable->getValueType();
-          auto *Compare = new ICmpInst(Branch,
-                                       CmpInst::ICMP_EQ,
-                                       new LoadInst(PointeeTy,
-                                                    CpuLoopExitingVariable,
-                                                    "",
-                                                    Branch),
-                                       ConstantInt::getTrue(BoolType));
+        // Check value of cpu_loop_exiting
+        auto *Branch = cast<BranchInst>(&*++(RecCall->getIterator()));
+        auto *PointeeTy = CpuLoopExitingVariable->getValueType();
+        auto *Compare = new ICmpInst(Branch,
+                                     CmpInst::ICMP_EQ,
+                                     new LoadInst(PointeeTy,
+                                                  CpuLoopExitingVariable,
+                                                  "",
+                                                  Branch),
+                                     ConstantInt::getTrue(BoolType));
 
-          BranchInst::Create(QuitBB, NewBB, Compare, Branch);
-          eraseFromParent(Branch);
+        BranchInst::Create(QuitBB, NewBB, Compare, Branch);
+        eraseFromParent(Branch);
 
-          // Add to the work list only if it hasn't been fixed already
-          if (!FixedCallers.contains(RecCaller)) {
-            FixedCallers.insert(RecCaller);
-            WorkList.push(RecCaller);
-          }
+        // Add to the work list only if it hasn't been fixed already
+        if (!FixedCallers.contains(RecCaller)) {
+          FixedCallers.insert(RecCaller);
+          WorkList.push(RecCaller);
         }
       }
     }
