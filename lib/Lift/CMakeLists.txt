@@ -9,7 +9,7 @@ revng_add_library_internal(
   CPUStateAccessAnalysisPass.cpp
   CSVOffsets.cpp
   ExternalJumpsHandler.cpp
-  #InstructionTranslator.cpp
+  InstructionTranslator.cpp
   Lift.cpp
   LiftPipe.cpp
   LinkSupportPipe.cpp

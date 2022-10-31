@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "llvm/ADT/PostOrderIterator.h"
+#include "llvm/ADT/SmallSet.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/ExecutionEngine/RuntimeDyld.h"
 #include "llvm/IR/CFG.h"
@@ -54,8 +55,7 @@
 
 #include "CodeGenerator.h"
 #include "ExternalJumpsHandler.h"
-// TODO(anjo): convert this to new libtcg
-//#include "InstructionTranslator.h"
+#include "InstructionTranslator.h"
 #include "JumpTargetManager.h"
 #include "VariableManager.h"
 
@@ -509,10 +509,14 @@ bool CpuLoopExitPass::runOnModule(llvm::Module &M) {
             continue;
           } else if (auto *Store = dyn_cast<StoreInst>(RecUser)) {
             // TODO(anjo): We encountered a store, what do?
-            WorkList.push(Cast);
+            //WorkList.push(Store);
+            continue;
+          } else if (auto *Store = dyn_cast<Constant>(RecUser)) {
             continue;
           } else {
-            revng_assert(Cast != nullptr, "Unexpected user");
+            errs() << F->getName() << "\n";
+            errs() << *(RecUser) << "\n";
+            revng_assert(false, "Unexpected user");
           }
         }
 
@@ -690,8 +694,9 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
   // Create the libtcg context
   //
   // TODO(anjo): Move to Lift.cpp?
-  LibTinyCodeDesc Desc = {};
+  LibTcgDesc Desc = {};
   auto *LibTcgContext = LibTcg.context_create(&Desc);
+  revng_assert(LibTcgContext != nullptr, "Failed to create libtcg context");
 
   //
   // Create the VariableManager
@@ -845,14 +850,13 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
   T.advance("Lifting code", true);
   Task LiftTask({}, "Lifting");
   LiftTask.advance("Initial address peeking", false);
-
-  // TODO(anjo): Convert this to new libtcg
-  //InstructionTranslator Translator(Builder,
-  //                                 Variables,
-  //                                 JumpTargets,
-  //                                 Blocks,
-  //                                 EndianessMismatch,
-  //                                 PCH.get());
+  InstructionTranslator Translator(LibTcg,
+                                   Builder,
+                                   Variables,
+                                   JumpTargets,
+                                   Blocks,
+                                   EndianessMismatch,
+                                   PCH.get());
 
   auto Segments = RawBinary.segments();
   auto SegmentIt = Segments.begin();
@@ -863,6 +867,7 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
       break;
 
   std::tie(VirtualAddress, Entry) = JumpTargets.peek();
+  errs() << "VA: " << VirtualAddress.address() << "\n";
 
   while (Entry != nullptr) {
     LiftTask.advance(VirtualAddress.toString(), true);
@@ -896,30 +901,70 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
     //  break;
     //}
 
-    if (OffsetInSegment >= SegmentIt->first.size()) {
-      for (; SegmentIt != Segments.end(); SegmentIt++)
-        if (SegmentIt->first.IsExecutable)
-          break;
-      OffsetInSegment = 0;
-    }
+    //if (OffsetInSegment >= SegmentIt->first.size()) {
+    //  for (; SegmentIt != Segments.end(); SegmentIt++)
+    //    if (SegmentIt->first.IsExecutable)
+    //      break;
+    //  OffsetInSegment = 0;
+    //}
 
     //ConsumedSize = ptc.translate(VirtualAddress.address(),
     //                             Type,
     //                             InstructionList.get());
 
-    //if (ConsumedSize == 0) {
+    // TODO(anjo): We are not using Type here
+    // TODO(anjo): Should obv use VirtualAddress here
+    // TODO(anjo): CONTHERE, I think we're reading garbage at the offset we're at in
+    // the binary for some reason. We end up decoding a jump and end up OOB.
+    // Offset 0x245 works for some reason, but not using the VirutalAddress.
+    //
+    // How does the code that gets the VirtualAddress work? Has something changed there?
+    //
+    // The model entrypoint is correct, so what's going on with VirtualAddress?
+    size_t Offset = (VirtualAddress.address() - SegmentIt->first.startAddress().address());
+    if (Offset >= SegmentIt->second.size())
+      break;
+    //errs() << "\n\n--------------------------------------\n";
+    //errs() << "Attempting to translate a segment\n";
+    //errs() << "  at:   " << SegmentIt->second.data() << "\n";
+    //errs() << "  size: " << SegmentIt->second.size() << "\n";
+    //errs() << "  addr: " << SegmentIt->first.startAddress().address() << "\n";
+    //errs() << "  offset: " << Offset << "\n";
+    //errs() << "  va: " << VirtualAddress.address() << "\n";
+    //errs() << "  entry: " << Model->EntryPoint.address() << "\n";
+    //errs() << "--------------------------------------\n";
+    auto NewInstructionList = LibTcg.translate(LibTcgContext,
+                                               SegmentIt->second.data() + Offset,
+                                               SegmentIt->second.size() - Offset,
+                                               VirtualAddress.address());
+
+    char DumpBuf[256] = {0};
+    for (size_t I = 0; I < NewInstructionList.instruction_count; ++I) {
+        LibTcg.dump_instruction_to_buffer(&NewInstructionList.list[I],
+                                          DumpBuf,
+                                          256);
+        puts(DumpBuf);
+    }
+
+    ConsumedSize = NewInstructionList.size_in_bytes;
+    OffsetInSegment += ConsumedSize;
+
+    if (ConsumedSize == 0) {
     //  Translator.emitNewPCCall(Builder, VirtualAddress, 1, nullptr);
     //  Builder.CreateCall(AbortFunction);
     //  Builder.CreateUnreachable();
 
       // Obtain a new program counter to translate
-    TranslateTask.complete();
-    LiftTask.advance("Peek new address", true);
-    //  // Obtain a new program counter to translate
-    //  std::tie(VirtualAddress, Entry) = JumpTargets.peek();
+      TranslateTask.complete();
+      LiftTask.advance("Peek new address", true);
+      std::tie(VirtualAddress, Entry) = JumpTargets.peek();
 
-    //  continue;
-    //}
+      errs() << " CONSUMED SIZE 0!!!!!!!!!!!!!!!!!\n";
+
+      continue;
+    }
+
+    VirtualAddress += ConsumedSize;
 
     //// Check whether we ended up in an unmapped page
     //MetaAddress AbortAt = MetaAddress::invalid();
@@ -930,27 +975,17 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
     //    AbortAt = NextPage;
     //}
 
-    // TODO(anjo): We are not using Type here
-    // TODO(anjo): Should obv use VirtualAddress here
-    auto NewInstructionList = LibTcg.translate(LibTcgContext,
-                                               SegmentIt->second.data() + OffsetInSegment,
-                                               SegmentIt->second.size() - OffsetInSegment,
-                                               SegmentIt->first.startAddress().address() + OffsetInSegment);
-    ConsumedSize = NewInstructionList.size_in_bytes;
-    OffsetInSegment += ConsumedSize;
-
-#if 0
     SmallSet<unsigned, 1> ToIgnore;
-    ToIgnore = Translator.preprocess(InstructionList.get());
+    // TODO(anjo): What is "btarget"
+    //ToIgnore = Translator.preprocess(InstructionList.get());
 
-    if (PTCLog.isEnabled()) {
-      std::stringstream Stream;
-      dumpTranslation(VirtualAddress, Stream, InstructionList.get());
-      PTCLog << Stream.str() << DoLog;
-    }
+    //if (PTCLog.isEnabled()) {
+    //  std::stringstream Stream;
+    //  dumpTranslation(VirtualAddress, Stream, InstructionList.get());
+    //  PTCLog << Stream.str() << DoLog;
+    //}
 
-    Variables.newFunction(InstructionList.get());
-    unsigned J = 0;
+    Variables.newFunction(&NewInstructionList);
     MDNode *MDOriginalInstr = nullptr;
     bool StopTranslation = false;
 
@@ -958,9 +993,13 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
     MetaAddress NextPC = MetaAddress::invalid();
     MetaAddress EndPC = VirtualAddress + ConsumedSize;
 
-    const auto InstructionCount = InstructionList->instruction_count;
-    //using IT = InstructionTranslator;
-    //IT::TranslationResult Result;
+    LibTcg.instruction_list_destroy(LibTcgContext, NewInstructionList);
+
+    const auto InstructionCount = NewInstructionList.instruction_count;
+    using IT = InstructionTranslator;
+    IT::TranslationResult Result;
+
+    unsigned J = 0;
 
     TranslateTask.advance("Translate to LLVM IR", true);
 
@@ -969,16 +1008,16 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
 
     // Handle the first PTC_INSTRUCTION_op_debug_insn_start
     {
-      PTCInstruction *NextInstruction = nullptr;
+      LibTcgInstruction *NextInstruction = nullptr;
       for (unsigned K = 1; K < InstructionCount; K++) {
-        PTCInstruction *I = &InstructionList->instructions[K];
-        if (I->opc == PTC_INSTRUCTION_op_debug_insn_start
-            && !ToIgnore.contains(K)) {
+        LibTcgInstruction *I = &NewInstructionList.list[K];
+        if (I->opcode == LIBTCG_op_insn_start
+            && ToIgnore.count(K) == 0) {
           NextInstruction = I;
           break;
         }
       }
-      PTCInstruction *Instruction = &InstructionList->instructions[J];
+      LibTcgInstruction *Instruction = &NewInstructionList.list[J];
       std::tie(Result,
                MDOriginalInstr,
                PC,
@@ -986,10 +1025,11 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
                                                    NextInstruction,
                                                    VirtualAddress,
                                                    EndPC,
-                                                   true,
-                                                   AbortAt);
+                                                   true);
       J++;
     }
+
+#if 0
 
     // TODO: shall we move this whole loop in InstructionTranslator?
     for (; J < InstructionCount && !StopTranslation; J++) {

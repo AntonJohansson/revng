@@ -26,6 +26,11 @@ class StructType;
 class Value;
 } // namespace llvm
 
+struct LibTcgInstructionList;
+struct LibTcgInstruction;
+struct LibTcgArgument;
+struct LibTcgTemp;
+
 class VariableManager;
 
 // TODO: rename
@@ -47,31 +52,19 @@ public:
     AllocaBuilder.SetInsertPoint(I);
   }
 
-  //llvm::Instruction *load(llvm::IRBuilder<> &Builder, unsigned TemporaryId) {
-  //  using namespace llvm;
+  llvm::Instruction *load(llvm::IRBuilder<> &Builder, LibTcgArgument *Arg) {
+    auto [IsNew, V] = getOrCreate(Arg, true);
 
-  //  auto [IsNew, V] = getOrCreate(TemporaryId, true);
+    if (V == nullptr)
+      return nullptr;
 
-  //  if (V == nullptr)
-  //    return nullptr;
-
-<<<<<<< HEAD
     if (IsNew) {
-      auto *Undef = UndefValue::get(getVariableType(V));
+      auto *Undef = llvm::UndefValue::get(V->getType()->getPointerElementType());
       Builder.CreateStore(Undef, V);
     }
 
-    return createLoadVariable(Builder, V);
+    return Builder.CreateLoad(V);
   }
-=======
-  //  if (IsNew) {
-  //    auto *Undef = UndefValue::get(V->getType()->getPointerElementType());
-  //    Builder.CreateStore(Undef, V);
-  //  }
-
-  //  return Builder.CreateLoad(V);
-  //}
->>>>>>> a16115e3 ([WIP] Update `VariableManager` to `libtcg`)
 
   /// Get or create the LLVM value associated to a PTC temporary
   ///
@@ -81,9 +74,9 @@ public:
   /// \param TemporaryId the PTC temporary identifier.
   ///
   /// \return a `Value` wrapping the requested global or local variable.
-  //llvm::Value *getOrCreate(unsigned TemporaryId) {
-  //  return getOrCreate(TemporaryId, false).second;
-  //}
+  llvm::Value *getOrCreate(LibTcgArgument *Arg) {
+    return getOrCreate(Arg, false).second;
+  }
 
   /// Return the global variable corresponding to \p Offset in the CPU state.
   ///
@@ -108,7 +101,7 @@ public:
   ///       function concept with other meanings.
   ///
   /// \param Instructions the new PTCInstructionList to use from now on.
-  //void newFunction(PTCInstructionList *Instructions);
+  void newFunction(LibTcgInstructionList *Instructions);
 
   /// Informs the VariableManager that a new basic block has begun, so it can
   /// discard basic block-level variables.
@@ -165,13 +158,8 @@ public:
                              llvm::Instruction *InsertBefore) const;
 
 private:
-<<<<<<< HEAD
-  std::pair<bool, llvm::Value *> getOrCreate(unsigned TemporaryId,
-                                             bool Reading);
-=======
-  //std::pair<bool, llvm::Value *>
-  //getOrCreate(unsigned TemporaryId, bool Reading);
->>>>>>> a16115e3 ([WIP] Update `VariableManager` to `libtcg`)
+  std::pair<bool, llvm::Value *>
+  getOrCreate(LibTcgArgument *Arg, bool Reading);
 
   llvm::Value *loadFromCPUStateOffset(llvm::IRBuilder<> &Builder,
                                       unsigned LoadSize,
@@ -192,13 +180,13 @@ private:
 private:
   llvm::Module &TheModule;
   llvm::IRBuilder<> AllocaBuilder;
-  using TemporariesMap = std::map<unsigned int, llvm::AllocaInst *>;
+  using TemporariesMap = std::map<LibTcgTemp *, llvm::AllocaInst *>;
   using GlobalsMap = std::map<intptr_t, llvm::GlobalVariable *>;
   GlobalsMap CPUStateGlobals;
   GlobalsMap OtherGlobals;
   TemporariesMap Temporaries;
   TemporariesMap LocalTemporaries;
-  //PTCInstructionList *Instructions;
+  LibTcgInstructionList *Instructions;
 
   llvm::StructType *CPUStateType;
   const llvm::DataLayout *ModuleLayout;

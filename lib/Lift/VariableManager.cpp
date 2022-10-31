@@ -27,6 +27,8 @@
 
 #include "VariableManager.h"
 
+#include "qemu/libtcg/libtcg.h"
+
 using namespace llvm;
 
 // TODO: rename
@@ -410,7 +412,8 @@ void VariableManager::finalize() {
       Builder.CreateBr(ReturnBB);
 
       // Add the case to the switch
-      Switch->addCase(Builder.getInt32(P.first), SetRegisterBB);
+      // TODO(anjo): TMP
+      Switch->addCase(Builder.getInt32(0), SetRegisterBB);
     }
   }
 
@@ -421,11 +424,11 @@ void VariableManager::finalize() {
 
 // TODO: `newFunction` reflects the tcg terminology but in this context is
 //       highly misleading
-//void VariableManager::newFunction(PTCInstructionList *Instructions) {
-//  LocalTemporaries.clear();
-//  this->Instructions = Instructions;
-//  newBasicBlock();
-//}
+void VariableManager::newFunction(LibTcgInstructionList *Instructions) {
+  LocalTemporaries.clear();
+  this->Instructions = Instructions;
+  newBasicBlock();
+}
 
 bool VariableManager::isEnv(Value *TheValue) {
   auto *Load = dyn_cast<LoadInst>(TheValue);
@@ -516,73 +519,125 @@ VariableManager::getByCPUStateOffsetInternal(intptr_t Offset,
   }
 }
 
-//std::pair<bool, Value *> VariableManager::getOrCreate(unsigned TemporaryId,
-//                                                      bool Reading) {
-//  revng_assert(Instructions != nullptr);
-//
-//  PTCTemp *Temporary = ptc_temp_get(Instructions, TemporaryId);
-//  Type *VariableType = Temporary->type == PTC_TYPE_I32 ?
-//                         AllocaBuilder.getInt32Ty() :
-//                         AllocaBuilder.getInt64Ty();
-//
-//  if (ptc_temp_is_global(Instructions, TemporaryId)) {
-//    // Basically we use fixed_reg to detect "env"
-//    if (Temporary->fixed_reg == 0) {
-//      Value *Result = getByCPUStateOffset(EnvOffset + Temporary->mem_offset,
-//                                          Temporary->name);
-//      revng_assert(Result != nullptr);
-//      return { false, Result };
-//    } else {
-//      GlobalsMap::iterator It = OtherGlobals.find(TemporaryId);
-//      if (It != OtherGlobals.end()) {
-//        return { false, It->second };
-//      } else {
-//        // TODO: what do we have here, apart from env?
-//        auto InitialValue = ConstantInt::get(VariableType, 0);
-//        StringRef Name(Temporary->name);
-//        GlobalVariable *Result = nullptr;
-//
-//        if (Name == "env") {
-//          revng_assert(Env != nullptr);
-//          Result = Env;
-//        } else {
-//          Result = new GlobalVariable(TheModule,
-//                                      VariableType,
-//                                      false,
-//                                      GlobalValue::CommonLinkage,
-//                                      InitialValue,
-//                                      Name);
-//        }
-//
-//        OtherGlobals[TemporaryId] = Result;
-//        return { false, Result };
-//      }
-//    }
-//  } else if (Temporary->temp_local) {
-//    auto It = LocalTemporaries.find(TemporaryId);
-//    if (It != LocalTemporaries.end()) {
-//      return { false, It->second };
-//    } else {
-//      AllocaInst *NewTemporary = AllocaBuilder.CreateAlloca(VariableType);
-//      LocalTemporaries[TemporaryId] = NewTemporary;
-//      return { true, NewTemporary };
-//    }
-//  } else {
-//    auto It = Temporaries.find(TemporaryId);
-//    if (It != Temporaries.end()) {
-//      return { false, It->second };
-//    } else {
-//      // Can't read a temporary if it has never been written, we're probably
-//      // translating rubbish
-//      if (Reading)
-//        return { false, nullptr };
-//
-//      AllocaInst *NewTemporary = AllocaBuilder.CreateAlloca(VariableType);
-//      Temporaries[TemporaryId] = NewTemporary;
-//      return { true, NewTemporary };
-//    }
-//  }
-//}
+std::pair<bool, Value *>
+VariableManager::getOrCreate(LibTcgArgument *Arg, bool Reading) {
+  revng_assert(Instructions != nullptr);
+
+  //PTCTemp *Temporary = ptc_temp_get(Instructions, TemporaryId);
+  Type *VariableType = Arg->temp->type == LIBTCG_TYPE_I32 ?
+                         AllocaBuilder.getInt32Ty() :
+                         AllocaBuilder.getInt64Ty();
+
+  // TODO(anjo): I guess we map TCG args to LLVM values here?
+  //             Where are constants handled?
+  switch (Arg->kind) {
+  case LIBTCG_ARG_TEMP:
+    switch (Arg->temp->kind) {
+    case LIBTCG_TEMP_NORMAL: {
+      auto It = Temporaries.find(Arg->temp);
+      if (It != Temporaries.end()) {
+        return { false, It->second };
+      } else {
+        // Can't read a temporary if it has never been written, we're probably
+        // translating rubbish
+        if (Reading)
+          return { false, nullptr };
+
+        AllocaInst *NewTemporary = AllocaBuilder.CreateAlloca(VariableType);
+        Temporaries[Arg->temp] = NewTemporary;
+        return { true, NewTemporary };
+      }
+    };
+    case LIBTCG_TEMP_LOCAL: {
+      // TODO(anjo): CONTHERE We want to map tempraries to LLVM values,
+      // make sure temporaries are pointer stable and unique or whatever
+      // We are currently translating this code and InstructionTranslator!
+      auto It = LocalTemporaries.find(Arg->temp);
+      if (It != LocalTemporaries.end()) {
+        return { false, It->second };
+      } else {
+        AllocaInst *NewTemporary = AllocaBuilder.CreateAlloca(VariableType);
+        LocalTemporaries[Arg->temp] = NewTemporary;
+        return { true, NewTemporary };
+      }
+    };
+    case LIBTCG_TEMP_GLOBAL: {
+      Value *Result = getByCPUStateOffset(EnvOffset + Arg->temp->mem_offset,
+                                          Arg->temp->name);
+      revng_assert(Result != nullptr);
+      return { false, Result };
+    };
+    case LIBTCG_TEMP_FIXED: {
+      // TODO(anjo): Is this path actually taken? When is env used as an arg?
+      revng_unreachable("unhandled libtcg fixed kind");
+    } break;
+    default:
+        revng_unreachable("unhandled libtcg temp kind");
+    }
+    break;
+  default:
+    revng_unreachable("unhandled libtcg arg kind");
+  }
+
+
+  // if (ptc_temp_is_global(Instructions, TemporaryId)) {
+    // Basically we use fixed_reg to detect "env"
+    //if (Temporary->fixed_reg == 0) {
+    //  Value *Result = getByCPUStateOffset(EnvOffset + Temporary->mem_offset,
+    //                                      Temporary->name);
+    //  revng_assert(Result != nullptr);
+    //  return { false, Result };
+    //} else {
+    //  GlobalsMap::iterator It = OtherGlobals.find(TemporaryId);
+    //  if (It != OtherGlobals.end()) {
+    //    return { false, It->second };
+    //  } else {
+    //    // TODO: what do we have here, apart from env?
+    //    auto InitialValue = ConstantInt::get(VariableType, 0);
+    //    StringRef Name(Temporary->name);
+    //    GlobalVariable *Result = nullptr;
+
+    //    if (Name == "env") {
+    //      revng_assert(Env != nullptr);
+    //      Result = Env;
+    //    } else {
+    //      Result = new GlobalVariable(TheModule,
+    //                                  VariableType,
+    //                                  false,
+    //                                  GlobalValue::CommonLinkage,
+    //                                  InitialValue,
+    //                                  Name);
+    //    }
+
+    //    OtherGlobals[TemporaryId] = Result;
+    //    return { false, Result };
+    //  }
+    //}
+  // } else if (Temporary->temp_local) {
+    //auto It = LocalTemporaries.find(TemporaryId);
+    //if (It != LocalTemporaries.end()) {
+    //  return { false, It->second };
+    //} else {
+    //  AllocaInst *NewTemporary = AllocaBuilder.CreateAlloca(VariableType);
+    //  LocalTemporaries[TemporaryId] = NewTemporary;
+    //  return { true, NewTemporary };
+    //}
+  // } else {
+    //auto It = Temporaries.find(TemporaryId);
+    //if (It != Temporaries.end()) {
+    //  return { false, It->second };
+    //} else {
+    //  // Can't read a temporary if it has never been written, we're probably
+    //  // translating rubbish
+    //  if (Reading)
+    //    return { false, nullptr };
+
+    //  AllocaInst *NewTemporary = AllocaBuilder.CreateAlloca(VariableType);
+    //  Temporaries[TemporaryId] = NewTemporary;
+    //  return { true, NewTemporary };
+    //}
+  //}
+}
 
 Value *VariableManager::computeEnvAddress(Type *TargetType,
                                           Instruction *InsertBefore,
