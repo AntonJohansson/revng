@@ -569,8 +569,20 @@ VariableManager::getOrCreate(LibTcgArgument *Arg, bool Reading) {
     };
     case LIBTCG_TEMP_FIXED: {
       // TODO(anjo): Is this path actually taken? When is env used as an arg?
-      revng_unreachable("unhandled libtcg fixed kind");
-    } break;
+      revng_assert(std::string(Arg->temp->name) == "env");
+      revng_assert(Env != nullptr);
+      return { false, Env };
+    };
+    case LIBTCG_TEMP_CONST: {
+      auto It = LocalTemporaries.find(Arg->temp);
+      if (It != LocalTemporaries.end()) {
+        return { false, It->second };
+      } else {
+        AllocaInst *NewTemporary = AllocaBuilder.CreateAlloca(VariableType);
+        LocalTemporaries[Arg->temp] = NewTemporary;
+        return { true, NewTemporary };
+      }
+    };
     default:
         revng_unreachable("unhandled libtcg temp kind");
     }

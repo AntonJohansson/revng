@@ -96,8 +96,8 @@ public:
   /// \param NextPC the PC associated to instruction after \p Instr.
   ///
   /// \return see InstructionTranslator::TranslationResult.
-  //TranslationResult
-  //translate(LibTcgInstruction *Instr, MetaAddress PC, MetaAddress NextPC);
+  TranslationResult
+  translate(LibTcgInstruction *Instr, MetaAddress PC, MetaAddress NextPC);
 
   /// Translate a call to an helper
   ///
@@ -124,7 +124,7 @@ public:
 private:
   llvm::ErrorOr<std::vector<llvm::Value *>>
   translateOpcode(LibTcgOpcode Opcode,
-                  std::vector<uint64_t> ConstArguments,
+                  std::vector<LibTcgArgument> ConstArguments,
                   std::vector<llvm::Value *> InArguments);
 
 private:

@@ -408,16 +408,20 @@ static void purgeNoReturn(Function *F) {
 }
 
 static ReturnInst *createRet(Instruction *Position) {
+  //errs() << "Instruction: " << *Position << "\n";
   Function *F = Position->getParent()->getParent();
+  //errs() << "function: " << F->getName() << "\n";
   purgeNoReturn(F);
 
   Type *ReturnType = F->getFunctionType()->getReturnType();
+  //errs() << "return: " << *ReturnType << "\n";
   if (ReturnType->isVoidTy()) {
     return ReturnInst::Create(F->getParent()->getContext(), nullptr, Position);
   } else if (ReturnType->isIntegerTy()) {
     auto *Zero = ConstantInt::get(static_cast<IntegerType *>(ReturnType), 0);
     return ReturnInst::Create(F->getParent()->getContext(), Zero, Position);
   } else {
+    // TODO(anjo): We trigger this but only sometimes
     revng_abort("Return type not supported");
   }
 
@@ -442,6 +446,10 @@ bool CpuLoopExitPass::runOnModule(llvm::Module &M) {
   // Nothing to do here
   if (CpuLoopExit == nullptr)
     return false;
+
+  for (User *U : CpuLoopExit->users()) {
+    errs() << U << "    " << *U << "\n";
+  }
 
   revng_assert(VM->hasEnv());
 
@@ -538,6 +546,7 @@ bool CpuLoopExitPass::runOnModule(llvm::Module &M) {
                                                 RecCaller,
                                                 NewBB);
         UnreachableInst *Temp = new UnreachableInst(Context, QuitBB);
+        // TODO(anjo): Sometimes we crash here but not always
         createRet(Temp);
         eraseFromParent(Temp);
 
@@ -721,17 +730,18 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
 
   {
     legacy::PassManager PM;
-    PM.add(new CpuLoopExitPass(&Variables));
-    PM.run(*TheModule);
+    // TODO(anjo): There is something weird going on with this pass,
+    // it crashes but only occasionally
+    //PM.add(new CpuLoopExitPass(&Variables));
+    //PM.run(*TheModule);
   }
 
   std::set<Function *> CpuLoopExitingUsers;
-  GlobalVariable *CpuLoopExiting = TheModule->getGlobalVariable("cpu_loop_"
-                                                                "exiting");
-  revng_assert(CpuLoopExiting != nullptr);
-  for (User *U : CpuLoopExiting->users())
-    if (auto *I = dyn_cast<Instruction>(U))
-      CpuLoopExitingUsers.insert(I->getParent()->getParent());
+  //Value *CpuLoopExiting = TheModule->getGlobalVariable("cpu_loop_exiting");
+  //revng_assert(CpuLoopExiting != nullptr);
+  //for (User *U : CpuLoopExiting->users())
+  //  if (auto *I = dyn_cast<Instruction>(U))
+  //    CpuLoopExitingUsers.insert(I->getParent()->getParent());
 
   //
   // Create well-known CSVs
@@ -888,18 +898,19 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
     //
     //PTCCodeType Type = PTC_CODE_REGULAR;
 
-    //switch (VirtualAddress.type()) {
-    //case MetaAddressType::Invalid:
-    //  revng_abort();
+    switch (VirtualAddress.type()) {
+    case MetaAddressType::Invalid:
+      revng_abort();
 
-    //case MetaAddressType::Code_arm_thumb:
-    //  Type = PTC_CODE_ARM_THUMB;
-    //  break;
+    case MetaAddressType::Code_arm_thumb:
+      //Type = PTC_CODE_ARM_THUMB;
+      revng_abort();
+      break;
 
-    //default:
-    //  Type = PTC_CODE_REGULAR;
-    //  break;
-    //}
+    default:
+      //Type = PTC_CODE_REGULAR;
+      break;
+    }
 
     //if (OffsetInSegment >= SegmentIt->first.size()) {
     //  for (; SegmentIt != Segments.end(); SegmentIt++)
@@ -911,6 +922,12 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
     //ConsumedSize = ptc.translate(VirtualAddress.address(),
     //                             Type,
     //                             InstructionList.get());
+
+    errs() << "\n\n--------------------------------------\n";
+    errs() << "Attempting to translate a segment\n";
+    errs() << "  at:   " << SegmentIt->second.data() << "\n";
+    errs() << "  size: " << SegmentIt->second.size() << "\n";
+    errs() << "  addr: " << SegmentIt->first.startAddress().address() << "\n";
 
     // TODO(anjo): We are not using Type here
     // TODO(anjo): Should obv use VirtualAddress here
@@ -924,19 +941,15 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
     size_t Offset = (VirtualAddress.address() - SegmentIt->first.startAddress().address());
     if (Offset >= SegmentIt->second.size())
       break;
-    //errs() << "\n\n--------------------------------------\n";
-    //errs() << "Attempting to translate a segment\n";
-    //errs() << "  at:   " << SegmentIt->second.data() << "\n";
-    //errs() << "  size: " << SegmentIt->second.size() << "\n";
-    //errs() << "  addr: " << SegmentIt->first.startAddress().address() << "\n";
-    //errs() << "  offset: " << Offset << "\n";
-    //errs() << "  va: " << VirtualAddress.address() << "\n";
-    //errs() << "  entry: " << Model->EntryPoint.address() << "\n";
-    //errs() << "--------------------------------------\n";
+    errs() << "  offset: " << Offset << "\n";
+    errs() << "  va: " << VirtualAddress.address() << "\n";
+    errs() << "  entry: " << Model->EntryPoint.address() << "\n";
+    errs() << "--------------------------------------\n";
     auto NewInstructionList = LibTcg.translate(LibTcgContext,
                                                SegmentIt->second.data() + Offset,
                                                SegmentIt->second.size() - Offset,
                                                VirtualAddress.address());
+    errs() << "--------------------------------------\n";
 
     char DumpBuf[256] = {0};
     for (size_t I = 0; I < NewInstructionList.instruction_count; ++I) {
@@ -993,8 +1006,6 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
     MetaAddress NextPC = MetaAddress::invalid();
     MetaAddress EndPC = VirtualAddress + ConsumedSize;
 
-    LibTcg.instruction_list_destroy(LibTcgContext, NewInstructionList);
-
     const auto InstructionCount = NewInstructionList.instruction_count;
     using IT = InstructionTranslator;
     IT::TranslationResult Result;
@@ -1006,7 +1017,7 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
     Task TranslateToLLVMTask(InstructionCount + 1, "Translate to LLVM IR");
     TranslateToLLVMTask.advance("", true);
 
-    // Handle the first PTC_INSTRUCTION_op_debug_insn_start
+    // Handle the first LIBTCG_op_insn_start
     {
       LibTcgInstruction *NextInstruction = nullptr;
       for (unsigned K = 1; K < InstructionCount; K++) {
@@ -1029,7 +1040,10 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
       J++;
     }
 
-#if 0
+    errs() << &Result << "\n";
+
+    // CONTHERE(anjo): Do we need exit_tb or no?, otherwise keep translating heer
+    // Also uncomment the above
 
     // TODO: shall we move this whole loop in InstructionTranslator?
     for (; J < InstructionCount && !StopTranslation; J++) {
@@ -1037,23 +1051,23 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
       if (ToIgnore.contains(J))
         continue;
 
-      PTCInstruction Instruction = InstructionList->instructions[J];
-      PTCOpcode Opcode = Instruction.opc;
+      LibTcgInstruction *Instruction = &NewInstructionList.list[J];
+      auto Opcode = Instruction->opcode;
 
       Blocks.clear();
       Blocks.push_back(Builder.GetInsertBlock());
 
       switch (Opcode) {
-      case PTC_INSTRUCTION_op_discard:
+      case LIBTCG_op_discard:
         // Instructions we don't even consider
         break;
-      case PTC_INSTRUCTION_op_debug_insn_start: {
+      case LIBTCG_op_insn_start: {
         // Find next instruction, if there is one
-        PTCInstruction *NextInstruction = nullptr;
+        LibTcgInstruction *NextInstruction = nullptr;
         for (unsigned K = J + 1; K < InstructionCount; K++) {
-          PTCInstruction *I = &InstructionList->instructions[K];
-          if (I->opc == PTC_INSTRUCTION_op_debug_insn_start
-              && !ToIgnore.contains(K)) {
+          LibTcgInstruction *I = &NewInstructionList.list[K];
+          if (I->opcode == LIBTCG_op_insn_start
+              && ToIgnore.count(K) == 0) {
             NextInstruction = I;
             break;
           }
@@ -1062,29 +1076,27 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
         std::tie(Result,
                  MDOriginalInstr,
                  PC,
-                 NextPC) = Translator.newInstruction(&Instruction,
+                 NextPC) = Translator.newInstruction(Instruction,
                                                      NextInstruction,
                                                      VirtualAddress,
                                                      EndPC,
-                                                     false,
-                                                     AbortAt);
+                                                     false);
       } break;
-      case PTC_INSTRUCTION_op_call: {
-        Result = Translator.translateCall(&Instruction);
+      case LIBTCG_op_call: {
+        Result = Translator.translateCall(Instruction);
 
         // Sometimes libtinycode terminates a basic block with a call, in this
         // case force a fallthrough
-        auto &IL = InstructionList;
-        if (J == IL->instruction_count - 1) {
-          BasicBlock *Target = JumpTargets.registerJT(EndPC,
-                                                      JTReason::PostHelper);
-          Builder.CreateBr(notNull(Target));
-        }
+        //if (J == NewInstructionList.instruction_count - 1) {
+        //  BasicBlock *Target = JumpTargets.registerJT(EndPC,
+        //                                              JTReason::PostHelper);
+        //  Builder.CreateBr(notNull(Target));
+        //}
 
       } break;
 
       default:
-        Result = Translator.translate(&Instruction, PC, NextPC);
+        Result = Translator.translate(Instruction, PC, NextPC);
         break;
       }
 
@@ -1104,13 +1116,14 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
 
       // Create a new metadata referencing the PTC instruction we have just
       // translated
-      MDNode *MDPTCInstr = nullptr;
+      MDNode *MDLibTcgInstr = nullptr;
       if (RecordPTC) {
-        std::stringstream PTCStringStream;
-        dumpInstruction(PTCStringStream, InstructionList.get(), J);
-        std::string PTCString = PTCStringStream.str() + "\n";
-        MDString *MDPTCString = MDString::get(Context, PTCString);
-        MDPTCInstr = MDNode::getDistinct(Context, MDPTCString);
+        char DumpBuf[256] = {0};
+        LibTcg.dump_instruction_to_buffer(&NewInstructionList.list[J], DumpBuf, 256);
+
+        std::string LibTcgString = std::string(DumpBuf, 256) + "\n";
+        MDString *MDLibTcgString = MDString::get(Context, LibTcgString);
+        MDLibTcgInstr = MDNode::getDistinct(Context, MDLibTcgString);
       }
 
       // Set metadata for all the new instructions
@@ -1119,8 +1132,8 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
         while (I != Block->begin() && !(--I)->hasMetadata()) {
           if (MDOriginalInstr != nullptr)
             I->setMetadata(OriginalInstrMDKind, MDOriginalInstr);
-          if (MDPTCInstr != nullptr)
-            I->setMetadata(LibTcgInstrMDKind, MDPTCInstr);
+          if (MDLibTcgInstr != nullptr)
+            I->setMetadata(LibTcgInstrMDKind, MDLibTcgInstr);
         }
       }
 
@@ -1129,6 +1142,9 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
     TranslateToLLVMTask.complete();
 
     TranslateTask.advance("Finalization", true);
+    LibTcg.instruction_list_destroy(LibTcgContext, NewInstructionList);
+
+    errs() << "Builder: " << *TheModule << "\n";
 
     // We might have a leftover block, probably due to the block created after
     // the last call to exit_tb
@@ -1146,7 +1162,6 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
     TranslateTask.complete();
     LiftTask.advance("Peek new address", true);
     std::tie(VirtualAddress, Entry) = JumpTargets.peek();
-#endif
   } // End translations loop
 
   LiftTask.complete();

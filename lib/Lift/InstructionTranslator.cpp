@@ -751,56 +751,53 @@ IT::TranslationResult IT::translateCall(LibTcgInstruction *Instr) {
   return Success;
 }
 
-//IT::TranslationResult
-//IT::translate(PTCInstruction *Instr, MetaAddress PC, MetaAddress NextPC) {
-//  const PTC::Instruction TheInstruction(Instr);
-//
-//  std::vector<Value *> InArgs;
-//  for (uint64_t TemporaryId : TheInstruction.InArguments) {
-//    auto *Load = Variables.load(Builder, TemporaryId);
-//    if (Load == nullptr)
-//      return Abort;
-//    InArgs.push_back(Load);
-//  }
-//
-//  auto ConstArgs = TheInstruction.ConstArguments;
-//  LastPC = PC;
-//  auto Result = translateOpcode(TheInstruction.opcode(),
-//                                ConstArgs.toVector(),
-//                                InArgs);
-//
-//  // Check if there was an error while translating the instruction
-//  if (!Result)
-//    return Abort;
-//
-//  size_t OutSize = TheInstruction.OutArguments.size();
-//  revng_assert(Result->size() == OutSize);
-//
-//  // TODO: use ZipIterator here
-//  for (unsigned I = 0; I < Result->size(); I++) {
-//    auto *Destination = Variables.getOrCreate(TheInstruction.OutArguments[I]);
-//    if (Destination == nullptr)
-//      return Abort;
-//
-//    auto *Store = Builder.CreateStore(Result.get()[I], Destination);
-//
-//    if (PCH->affectsPC(Store)) {
-//      // This is a PC-related store
-//      PCH->handleStore(Builder, Store);
-//    } else {
-//      // If we're writing somewhere an immediate, register it for exploration
-//      if (auto *Constant = dyn_cast<ConstantInt>(Store->getValueOperand())) {
-//        MetaAddress Address = JumpTargets.fromPC(Constant->getLimitedValue());
-//        if (Address.isValid() and PC != Address and JumpTargets.isPC(Address)
-//            and not JumpTargets.hasJT(Address)) {
-//          JumpTargets.registerSimpleLiteral(Address);
-//        }
-//      }
-//    }
-//  }
-//
-//  return Success;
-//}
+IT::TranslationResult
+IT::translate(LibTcgInstruction *Instr, MetaAddress PC, MetaAddress NextPC) {
+  std::vector<Value *> InArgs;
+  for (unsigned I = 0; I < Instr->nb_iargs; ++I) {
+    auto *Load = Variables.load(Builder, &Instr->input_args[I]);
+    if (Load == nullptr)
+      return Abort;
+    InArgs.push_back(Load);
+  }
+
+  LastPC = PC;
+  std::vector<LibTcgArgument> ConstArgs(Instr->constant_args, Instr->constant_args + Instr->nb_cargs);
+  auto Result = translateOpcode(Instr->opcode,
+                                ConstArgs,
+                                InArgs);
+
+  // Check if there was an error while translating the instruction
+  if (!Result)
+    return Abort;
+
+  revng_assert(Result->size() == Instr->nb_oargs);
+
+  // TODO: use ZipIterator here
+  for (unsigned I = 0; I < Result->size(); I++) {
+    auto *Destination = Variables.getOrCreate(&Instr->output_args[I]);
+    if (Destination == nullptr)
+      return Abort;
+
+    auto *Store = Builder.CreateStore(Result.get()[I], Destination);
+
+    if (PCH->affectsPC(Store)) {
+      // This is a PC-related store
+      PCH->handleStore(Builder, Store);
+    } else {
+      // If we're writing somewhere an immediate, register it for exploration
+      if (auto *Constant = dyn_cast<ConstantInt>(Store->getValueOperand())) {
+        MetaAddress Address = JumpTargets.fromPC(Constant->getLimitedValue());
+        if (Address.isValid() and PC != Address and JumpTargets.isPC(Address)
+            and not JumpTargets.hasJT(Address)) {
+          JumpTargets.registerSimpleLiteral(Address);
+        }
+      }
+    }
+  }
+
+  return Success;
+}
 
 void IT::registerDirectJumps() {
 
@@ -817,7 +814,7 @@ void IT::registerDirectJumps() {
 
 ErrorOr<std::vector<Value *>>
 IT::translateOpcode(LibTcgOpcode Opcode,
-                    std::vector<uint64_t> ConstArguments,
+                    std::vector<LibTcgArgument> ConstArguments,
                     std::vector<Value *> InArguments) {
   LLVMContext &Context = TheModule.getContext();
   unsigned RegisterSize = getRegisterSize(Opcode);
@@ -843,8 +840,9 @@ IT::translateOpcode(LibTcgOpcode Opcode,
     return v{ Builder.CreateTrunc(InArguments[0], RegisterType) };
   case LIBTCG_op_setcond_i32:
   case LIBTCG_op_setcond_i64: {
+    revng_assert(ConstArguments[0].kind == LIBTCG_ARG_COND);
     Value *Compare = createICmp(Builder,
-                                static_cast<LibTcgCond>(ConstArguments[0]),
+                                ConstArguments[0].cond,
                                 InArguments[0],
                                 InArguments[1]);
     // TODO: convert single-bit registers to i1
@@ -852,8 +850,9 @@ IT::translateOpcode(LibTcgOpcode Opcode,
   }
   case LIBTCG_op_movcond_i32: // Resist the fallthrough temptation
   case LIBTCG_op_movcond_i64: {
+    revng_assert(ConstArguments[0].kind == LIBTCG_ARG_COND);
     Value *Compare = createICmp(Builder,
-                                static_cast<LibTcgCond>(ConstArguments[0]),
+                                ConstArguments[0].cond,
                                 InArguments[0],
                                 InArguments[1]);
     Value *Select = Builder.CreateSelect(Compare,
@@ -865,28 +864,25 @@ IT::translateOpcode(LibTcgOpcode Opcode,
   case LIBTCG_op_qemu_ld_i64:
   case LIBTCG_op_qemu_st_i32:
   case LIBTCG_op_qemu_st_i64: {
-    // CONTHERE
-    PTCLoadStoreArg MemoryAccess;
-    MemoryAccess = ptc.parse_load_store_arg(ConstArguments[0]);
-
-    // What are we supposed to do in this case?
-    revng_assert(MemoryAccess.access_type != PTC_MEMORY_ACCESS_UNKNOWN);
+    revng_assert(ConstArguments[0].kind == LIBTCG_ARG_MEM_OP_INDEX);
+    LibTcgMemOp MemoryOp = ConstArguments[0].mem_op_index.op;
 
     unsigned Alignment = 1;
 
     // Load size
     IntegerType *MemoryType = nullptr;
-    switch (ptc_get_memory_access_size(MemoryAccess.type)) {
-    case PTC_MO_8:
+    auto MemoryOpSize = static_cast<LibTcgMemOp>(MemoryOp & LIBTCG_MO_SIZE);
+    switch (MemoryOpSize) {
+    case LIBTCG_MO_8:
       MemoryType = Builder.getInt8Ty();
       break;
-    case PTC_MO_16:
+    case LIBTCG_MO_16:
       MemoryType = Builder.getInt16Ty();
       break;
-    case PTC_MO_32:
+    case LIBTCG_MO_32:
       MemoryType = Builder.getInt32Ty();
       break;
-    case PTC_MO_64:
+    case LIBTCG_MO_64:
       MemoryType = Builder.getInt64Ty();
       break;
     default:
@@ -902,11 +898,12 @@ IT::translateOpcode(LibTcgOpcode Opcode,
                                                 Intrinsic::bswap,
                                                 { MemoryType });
 
-    bool SignExtend = ptc_is_sign_extended_load(MemoryAccess.type);
+    // Is the memory op a sign extended load?
+    bool SignExtend = (MemoryOp & LIBTCG_MO_SIGN) != 0;
 
     Value *Pointer = nullptr;
     if (Opcode == LIBTCG_op_qemu_ld_i32
-        || Opcode == LIBTCG_op_qemu_ld_i64) {
+        or Opcode == LIBTCG_op_qemu_ld_i64) {
 
       Pointer = Builder.CreateIntToPtr(InArguments[0],
                                        MemoryType->getPointerTo());
@@ -924,7 +921,7 @@ IT::translateOpcode(LibTcgOpcode Opcode,
         return v{ Builder.CreateZExt(Loaded, RegisterType) };
 
     } else if (Opcode == LIBTCG_op_qemu_st_i32
-               || Opcode == LIBTCG_op_qemu_st_i64) {
+               or Opcode == LIBTCG_op_qemu_st_i64) {
 
       Pointer = Builder.CreateIntToPtr(InArguments[1],
                                        MemoryType->getPointerTo());
@@ -953,7 +950,7 @@ IT::translateOpcode(LibTcgOpcode Opcode,
   case LIBTCG_op_ld32s_i64:
   case LIBTCG_op_ld_i64: {
     Value *Base = dyn_cast<LoadInst>(InArguments[0])->getPointerOperand();
-    if (Base == nullptr || !Variables.isEnv(Base)) {
+    if (Base == nullptr or !Variables.isEnv(Base)) {
       // TODO: emit warning
       return std::errc::invalid_argument;
     }
@@ -1007,9 +1004,10 @@ IT::translateOpcode(LibTcgOpcode Opcode,
       revng_unreachable("Unexpected opcode");
     }
 
+    revng_assert(ConstArguments[0].kind == LIBTCG_ARG_CONSTANT);
     Value *Result = Variables.loadFromEnvOffset(Builder,
                                                 LoadSize,
-                                                ConstArguments[0]);
+                                                ConstArguments[0].constant);
     revng_assert(Result != nullptr);
 
     // Zero/sign extend in the target dimension
@@ -1047,14 +1045,15 @@ IT::translateOpcode(LibTcgOpcode Opcode,
     }
 
     Value *Base = dyn_cast<LoadInst>(InArguments[1])->getPointerOperand();
-    if (Base == nullptr || !Variables.isEnv(Base)) {
+    if (Base == nullptr or !Variables.isEnv(Base)) {
       // TODO: emit warning
       return std::errc::invalid_argument;
     }
 
+    revng_assert(ConstArguments[0].kind == LIBTCG_ARG_CONSTANT);
     auto Result = Variables.storeToEnvOffset(Builder,
                                              StoreSize,
-                                             ConstArguments[0],
+                                             ConstArguments[0].constant,
                                              InArguments[0]);
     PCH->handleStore(Builder, *Result);
 
@@ -1100,11 +1099,11 @@ IT::translateOpcode(LibTcgOpcode Opcode,
     Instruction::BinaryOps DivisionOp, RemainderOp;
 
     if (Opcode == LIBTCG_op_div2_i32
-        || Opcode == LIBTCG_op_div2_i64) {
+        or Opcode == LIBTCG_op_div2_i64) {
       DivisionOp = Instruction::SDiv;
       RemainderOp = Instruction::SRem;
     } else if (Opcode == LIBTCG_op_divu2_i32
-               || Opcode == LIBTCG_op_divu2_i64) {
+               or Opcode == LIBTCG_op_divu2_i64) {
       DivisionOp = Instruction::UDiv;
       RemainderOp = Instruction::URem;
     } else {
@@ -1129,11 +1128,11 @@ IT::translateOpcode(LibTcgOpcode Opcode,
 
     Instruction::BinaryOps FirstShiftOp, SecondShiftOp;
     if (Opcode == LIBTCG_op_rotl_i32
-        || Opcode == LIBTCG_op_rotl_i64) {
+        or Opcode == LIBTCG_op_rotl_i64) {
       FirstShiftOp = Instruction::Shl;
       SecondShiftOp = Instruction::LShr;
     } else if (Opcode == LIBTCG_op_rotr_i32
-               || Opcode == LIBTCG_op_rotr_i64) {
+               or Opcode == LIBTCG_op_rotr_i64) {
       FirstShiftOp = Instruction::LShr;
       SecondShiftOp = Instruction::Shl;
     } else {
@@ -1152,11 +1151,13 @@ IT::translateOpcode(LibTcgOpcode Opcode,
   }
   case LIBTCG_op_deposit_i32:
   case LIBTCG_op_deposit_i64: {
-    unsigned Position = ConstArguments[0];
+    revng_assert(ConstArguments[0].kind == LIBTCG_ARG_CONSTANT);
+    auto Position = ConstArguments[0].constant;
     if (Position == RegisterSize)
       return v{ InArguments[0] };
 
-    unsigned Length = ConstArguments[1];
+    revng_assert(ConstArguments[1].kind == LIBTCG_ARG_CONSTANT);
+    auto Length = ConstArguments[1].constant;
     uint64_t Bits = 0;
 
     // Thou shall not << 32
@@ -1306,8 +1307,10 @@ IT::translateOpcode(LibTcgOpcode Opcode,
     return v{ Builder.CreateZExt(Swapped, RegisterType) };
   }
   case LIBTCG_op_set_label: {
-    unsigned LabelId = ptc.get_arg_label_id(ConstArguments[0]);
+    revng_assert(ConstArguments[0].kind == LIBTCG_ARG_LABEL);
+    auto LabelId = ConstArguments[0].label->id;
 
+    // TODO(anjo): Use Twine here
     std::stringstream LabelSS;
     LabelSS << "bb." << JumpTargets.nameForAddress(LastPC);
     LabelSS << "_L" << std::dec << LabelId;
@@ -1344,8 +1347,10 @@ IT::translateOpcode(LibTcgOpcode Opcode,
   case LIBTCG_op_brcond_i64: {
     // We take the last constant arguments, which is the LabelId both in
     // conditional and unconditional jumps
-    unsigned LabelId = ptc.get_arg_label_id(ConstArguments.back());
+    revng_assert(ConstArguments.back().kind == LIBTCG_ARG_LABEL);
+    auto LabelId = ConstArguments.back().label->id;
 
+    // TODO(anjo): Use Twine here
     std::stringstream LabelSS;
     LabelSS << "bb." << JumpTargets.nameForAddress(LastPC);
     LabelSS << "_L" << std::dec << LabelId;
@@ -1369,10 +1374,11 @@ IT::translateOpcode(LibTcgOpcode Opcode,
       // Unconditional jump
       Builder.CreateBr(Target);
     } else if (Opcode == LIBTCG_op_brcond_i32
-               || Opcode == LIBTCG_op_brcond_i64) {
+               or Opcode == LIBTCG_op_brcond_i64) {
       // Conditional jump
+      revng_assert(ConstArguments[0].kind == LIBTCG_ARG_COND);
       Value *Compare = createICmp(Builder,
-                                  ConstArguments[0],
+                                  ConstArguments[0].cond,
                                   InArguments[0],
                                   InArguments[1]);
       Builder.CreateCondBr(Compare, Target, Fallthrough);
@@ -1445,11 +1451,11 @@ IT::translateOpcode(LibTcgOpcode Opcode,
     Value *SecondOp = nullptr;
 
     if (Opcode == LIBTCG_op_mulu2_i32
-        || Opcode == LIBTCG_op_mulu2_i64) {
+        or Opcode == LIBTCG_op_mulu2_i64) {
       FirstOp = Builder.CreateZExt(InArguments[0], DestinationType);
       SecondOp = Builder.CreateZExt(InArguments[1], DestinationType);
     } else if (Opcode == LIBTCG_op_muls2_i32
-               || Opcode == LIBTCG_op_muls2_i64) {
+               or Opcode == LIBTCG_op_muls2_i64) {
       FirstOp = Builder.CreateSExt(InArguments[0], DestinationType);
       SecondOp = Builder.CreateSExt(InArguments[1], DestinationType);
     } else {
