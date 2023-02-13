@@ -9,7 +9,8 @@
 #include "revng/Support/ResourceFinder.h"
 
 #include "CodeGenerator.h"
-#include "PTCInterface.h"
+#include "qemu/libtcg/libtcg.h"
+#include <dlfcn.h>
 
 using namespace llvm::cl;
 
@@ -32,26 +33,14 @@ char LiftPass::ID;
 using Register = llvm::RegisterPass<LiftPass>;
 static Register X("lift", "Lift Pass", true, true);
 
-/// The interface with the PTC library.
-PTCInterface ptc = {};
+struct ExternalFilePaths {
+  std::string LibTcg;
+  std::string LibHelpers;
+  std::string EarlyLinked;
+};
 
-static std::string LibTinycodePath;
-static std::string LibHelpersPath;
-static std::string EarlyLinkedPath;
-
-// When LibraryPointer is destroyed, the destructor calls
-// LibraryDestructor::operator()(LibraryPointer::get()).
-// The problem is that LibraryDestructor::operator() does not take arguments,
-// while the destructor tries to pass a void * argument, so it does not match.
-// However, LibraryDestructor is an alias for
-// std::intgral_constant<decltype(&dlclose), &dlclose >, which has an implicit
-// conversion operator to value_type, which unwraps the &dlclose from the
-// std::integral_constant, making it callable.
-using LibraryDestructor = std::integral_constant<int (*)(void *) noexcept,
-                                                 &dlclose>;
-using LibraryPointer = std::unique_ptr<void, LibraryDestructor>;
-
-static void findFiles(model::Architecture::Values Architecture) {
+static ExternalFilePaths
+findExternalFilePaths(const model::Architecture::Values Architecture) {
   using namespace revng;
 
   std::string ArchName = model::Architecture::getQEMUName(Architecture).str();
@@ -80,7 +69,7 @@ bool LiftPass::runOnModule(llvm::Module &M) {
   const auto &ModelWrapper = getAnalysis<LoadModelWrapperPass>().get();
   const TupleTree<model::Binary> &Model = ModelWrapper.getReadOnlyModel();
 
-  const auto Paths = findExternalFilePaths(Model->Architecture);
+  const auto Paths = findExternalFilePaths(Model->Architecture());
 
   // Look for the library in the system's paths
   void *LibraryHandle = dlopen(Paths.LibTcg.c_str(), RTLD_LAZY | RTLD_NODELETE);

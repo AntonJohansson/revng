@@ -474,8 +474,10 @@ bool CpuLoopExitPass::runOnModule(llvm::Module &M) {
   revng_assert(CpuLoop != nullptr);
 
   std::queue<User *> CpuLoopExitUsers;
-  for (User *TheUser : CpuLoopExit->users())
-    CpuLoopExitUsers.push(TheUser);
+  for (User *U : CpuLoopExit->users()) {
+    CpuLoopExitUsers.push(U);
+    errs() << *cast<Instruction>(U)->getParent() << "\n";
+  }
 
   while (!CpuLoopExitUsers.empty()) {
     auto *Call = cast<CallInst>(CpuLoopExitUsers.front());
@@ -498,7 +500,8 @@ bool CpuLoopExitPass::runOnModule(llvm::Module &M) {
 
     // Return immediately
     createRet(Call);
-    auto *Unreach = cast<UnreachableInst>(&*++Call->getIterator());
+    Instruction &NextInst = *(++Call->getIterator());
+    auto *Unreach = cast<UnreachableInst>(&NextInst);
     eraseFromParent(Unreach);
 
     Function *Caller = Call->getParent()->getParent();
@@ -516,13 +519,16 @@ bool CpuLoopExitPass::runOnModule(llvm::Module &M) {
         Value *F = WorkList.front();
         WorkList.pop();
 
+        errs() << "starting userloop\n";
         for (User *RecUser : F->users()) {
           auto *RecCall = dyn_cast<CallInst>(RecUser);
           if (RecCall == nullptr) {
             auto *Cast = dyn_cast<ConstantExpr>(RecUser);
-            revng_assert(Cast != nullptr, "Unexpected user");
-            revng_assert(Cast->getOperand(0) == F && Cast->isCast());
-            WorkList.push(Cast);
+            errs() << "|" << *RecUser << "|\n";
+            //revng_assert(Cast != nullptr, "Unexpected user");
+            //revng_assert(Cast->getOperand(0) == F && Cast->isCast());
+            if (Cast)
+                WorkList.push(Cast);
             continue;
           }
 
@@ -698,7 +704,7 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
   // Create the libtcg context
   //
   // TODO(anjo): Move to Lift.cpp?
-  LibTinyCodeDesc Desc = {};
+  LibTcgDesc Desc = {};
   auto *LibTcgContext = LibTcg.context_create(&Desc);
 
   //
@@ -853,7 +859,7 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
   size_t OffsetInSegment = 0;
 
   for (; SegmentIt != Segments.end(); SegmentIt++)
-    if (SegmentIt->first.IsExecutable)
+    if (SegmentIt->first.IsExecutable())
       break;
 
   std::tie(VirtualAddress, Entry) = JumpTargets.peek();
@@ -887,7 +893,7 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
 
     if (OffsetInSegment >= SegmentIt->first.size()) {
       for (; SegmentIt != Segments.end(); SegmentIt++)
-        if (SegmentIt->first.IsExecutable)
+        if (SegmentIt->first.IsExecutable())
           break;
       OffsetInSegment = 0;
     }
@@ -900,6 +906,8 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
                                                SegmentIt->first.startAddress().address() + OffsetInSegment);
     ConsumedSize = NewInstructionList.size_in_bytes;
     OffsetInSegment += ConsumedSize;
+
+    errs() << "wow\n";
 
 #if 0
     SmallSet<unsigned, 1> ToIgnore;
