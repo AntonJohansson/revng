@@ -72,9 +72,9 @@ static cl::opt<bool> RecordPTC("record-ptc",
 static Logger<> PTCLog("ptc");
 static Logger<> Log("lift");
 
-template<typename T, typename... ArgTypes>
+template <typename T, typename... ArgTypes>
 inline std::array<T, sizeof...(ArgTypes)> make_array(ArgTypes &&...Args) {
-  return { { std::forward<ArgTypes>(Args)... } };
+  return {{std::forward<ArgTypes>(Args)...}};
 }
 
 /// Wrap a value around a temporary opaque function
@@ -88,7 +88,9 @@ private:
 public:
   OpaqueIdentity(Module *M) : M(M) {}
 
-  ~OpaqueIdentity() { revng_assert(Map.size() == 0); }
+  ~OpaqueIdentity() {
+    revng_assert(Map.size() == 0);
+  }
 
   void drop() {
     SmallVector<CallInst *, 16> ToErase;
@@ -114,7 +116,7 @@ public:
     Function *F = nullptr;
     auto It = Map.find(ResultType);
     if (It == Map.end()) {
-      auto *FT = FunctionType::get(ResultType, { ResultType }, false);
+      auto *FT = FunctionType::get(ResultType, {ResultType}, false);
       F = Function::Create(FT, GlobalValue::ExternalLinkage, "id", *M);
       F->setOnlyReadsMemory();
       Map[ResultType] = F;
@@ -122,7 +124,7 @@ public:
       F = It->second;
     }
 
-    return Builder.CreateCall(F, { V });
+    return Builder.CreateCall(F, {V});
   }
 
   Instruction *wrap(Instruction *I) {
@@ -150,14 +152,11 @@ static std::unique_ptr<Module> parseIR(StringRef Path, LLVMContext &Context) {
 CodeGenerator::CodeGenerator(const RawBinaryView &RawBinary,
                              llvm::Module *TheModule,
                              const TupleTree<model::Binary> &Model,
-                             std::string Helpers,
-                             std::string EarlyLinked,
-                             model::Architecture::Values TargetArchitecture) :
-  RawBinary(RawBinary),
-  TheModule(TheModule),
-  Context(TheModule->getContext()),
-  Model(Model),
-  TargetArchitecture(TargetArchitecture) {
+                             std::string Helpers, std::string EarlyLinked,
+                             model::Architecture::Values TargetArchitecture)
+    : RawBinary(RawBinary), TheModule(TheModule),
+      Context(TheModule->getContext()), Model(Model),
+      TargetArchitecture(TargetArchitecture) {
 
   OriginalInstrMDKind = Context.getMDKindID("oi");
   LibTcgInstrMDKind = Context.getMDKindID("pi");
@@ -175,8 +174,8 @@ CodeGenerator::CodeGenerator(const RawBinaryView &RawBinary,
 
     FunctionTags::QEMU.addTo(&F);
 
-    if (F.hasFnAttribute(Attribute::NoReturn)
-        or F.getSection() == "revng_exceptional")
+    if (F.hasFnAttribute(Attribute::NoReturn) or
+        F.getSection() == "revng_exceptional")
       FunctionTags::Exceptional.addTo(&F);
   }
 
@@ -185,12 +184,9 @@ CodeGenerator::CodeGenerator(const RawBinaryView &RawBinary,
     FunctionTags::QEMU.addTo(&F);
 
   auto *Uint8Ty = Type::getInt8Ty(Context);
-  auto *ElfHeaderHelper = new GlobalVariable(*TheModule,
-                                             Uint8Ty,
-                                             true,
-                                             GlobalValue::ExternalLinkage,
-                                             ConstantInt::get(Uint8Ty, 0),
-                                             "elfheaderhelper");
+  auto *ElfHeaderHelper = new GlobalVariable(
+      *TheModule, Uint8Ty, true, GlobalValue::ExternalLinkage,
+      ConstantInt::get(Uint8Ty, 0), "elfheaderhelper");
   ElfHeaderHelper->setAlignment(MaybeAlign(1));
   ElfHeaderHelper->setSection(".elfheaderhelper");
 
@@ -231,8 +227,7 @@ static BasicBlock *replaceFunction(Function *ToReplace) {
   for (auto [Kind, MD] : SavedMetadata)
     ToReplace->setMetadata(Kind, MD);
 
-  return BasicBlock::Create(ToReplace->getParent()->getContext(),
-                            "",
+  return BasicBlock::Create(ToReplace->getParent()->getContext(), "",
                             ToReplace);
 }
 
@@ -266,8 +261,8 @@ public:
 
   CpuLoopFunctionPass() : llvm::ModulePass(ID), ExceptionIndexOffset(0) {}
 
-  CpuLoopFunctionPass(intptr_t ExceptionIndexOffset) :
-    llvm::ModulePass(ID), ExceptionIndexOffset(ExceptionIndexOffset) {}
+  CpuLoopFunctionPass(intptr_t ExceptionIndexOffset)
+      : llvm::ModulePass(ID), ExceptionIndexOffset(ExceptionIndexOffset) {}
 
   void getAnalysisUsage(llvm::AnalysisUsage &AU) const override;
 
@@ -283,9 +278,9 @@ void CpuLoopFunctionPass::getAnalysisUsage(llvm::AnalysisUsage &AU) const {
   AU.addRequired<LoopInfoWrapperPass>();
 }
 
-template<class Range, class UnaryPredicate>
+template <class Range, class UnaryPredicate>
 auto findUnique(Range &&TheRange, UnaryPredicate Predicate)
-  -> decltype(*TheRange.begin()) {
+    -> decltype(*TheRange.begin()) {
 
   const auto Begin = TheRange.begin();
   const auto End = TheRange.end();
@@ -298,7 +293,7 @@ auto findUnique(Range &&TheRange, UnaryPredicate Predicate)
   return *Result;
 }
 
-template<class Range>
+template <class Range>
 auto findUnique(Range &&TheRange) -> decltype(*TheRange.begin()) {
 
   const auto Begin = TheRange.begin();
@@ -363,8 +358,8 @@ bool CpuLoopFunctionPass::runOnModule(Module &M) {
   using CI = ConstantInt;
   auto Offset = CI::get(IntPtrTy, ExceptionIndexOffset);
   Value *ExceptionIndexIntPtr = Builder.CreateAdd(CPUIntPtr, Offset);
-  Value *ExceptionIndexPtr = Builder.CreateIntToPtr(ExceptionIndexIntPtr,
-                                                    TargetType->getPointerTo());
+  Value *ExceptionIndexPtr =
+      Builder.CreateIntToPtr(ExceptionIndexIntPtr, TargetType->getPointerTo());
   Value *ExceptionIndex = Builder.CreateLoad(TargetType, ExceptionIndexPtr);
   Call->replaceAllUsesWith(ExceptionIndex);
   eraseFromParent(Call);
@@ -408,20 +403,16 @@ static void purgeNoReturn(Function *F) {
 }
 
 static ReturnInst *createRet(Instruction *Position) {
-  //errs() << "Instruction: " << *Position << "\n";
   Function *F = Position->getParent()->getParent();
-  //errs() << "function: " << F->getName() << "\n";
   purgeNoReturn(F);
 
   Type *ReturnType = F->getFunctionType()->getReturnType();
-  //errs() << "return: " << *ReturnType << "\n";
   if (ReturnType->isVoidTy()) {
     return ReturnInst::Create(F->getParent()->getContext(), nullptr, Position);
-  } else if (ReturnType->isIntegerTy()) {
-    auto *Zero = ConstantInt::get(static_cast<IntegerType *>(ReturnType), 0);
-    return ReturnInst::Create(F->getParent()->getContext(), Zero, Position);
+  } else if (ReturnType->isIntegerTy() or ReturnType->isPointerTy()) {
+    auto *Null = Constant::getNullValue(ReturnType);
+    return ReturnInst::Create(F->getParent()->getContext(), Null, Position);
   } else {
-    // TODO(anjo): We trigger this but only sometimes
     revng_abort("Return type not supported");
   }
 
@@ -458,12 +449,9 @@ bool CpuLoopExitPass::runOnModule(llvm::Module &M) {
   IntegerType *BoolType = Type::getInt1Ty(Context);
   std::set<Function *> FixedCallers;
   GlobalVariable *CpuLoopExitingVariable = nullptr;
-  CpuLoopExitingVariable = new GlobalVariable(M,
-                                              BoolType,
-                                              false,
-                                              GlobalValue::CommonLinkage,
-                                              ConstantInt::getFalse(BoolType),
-                                              StringRef("cpu_loop_exiting"));
+  CpuLoopExitingVariable = new GlobalVariable(
+      M, BoolType, false, GlobalValue::CommonLinkage,
+      ConstantInt::getFalse(BoolType), StringRef("cpu_loop_exiting"));
 
   Function *CpuLoop = M.getFunction("cpu_loop");
   revng_assert(CpuLoop != nullptr);
@@ -475,7 +463,7 @@ bool CpuLoopExitPass::runOnModule(llvm::Module &M) {
     // Call cpu_loop
     auto *EnvPtr = VM->cpuStateToEnv(Call->getArgOperand(0), Call);
 
-    auto *CallCpuLoop = CallInst::Create(CpuLoop, { EnvPtr }, "", Call);
+    auto *CallCpuLoop = CallInst::Create(CpuLoop, {EnvPtr}, "", Call);
 
     // In recent versions of LLVM you can no longer inject a CallInst in a
     // Function with debug location if the call itself has not a debug location
@@ -498,6 +486,7 @@ bool CpuLoopExitPass::runOnModule(llvm::Module &M) {
 
     if (FixedCallers.contains(Caller)) {
       continue;
+    }
 
     FixedCallers.insert(Caller);
 
@@ -517,7 +506,7 @@ bool CpuLoopExitPass::runOnModule(llvm::Module &M) {
             continue;
           } else if (auto *Store = dyn_cast<StoreInst>(RecUser)) {
             // TODO(anjo): We encountered a store, what do?
-            //WorkList.push(Store);
+            // WorkList.push(Store);
             continue;
           } else if (auto *Store = dyn_cast<Constant>(RecUser)) {
             continue;
@@ -541,10 +530,8 @@ bool CpuLoopExitPass::runOnModule(llvm::Module &M) {
         BasicBlock *NewBB = OldBB->splitBasicBlock(SplitPoint);
 
         // Add a BB with a ret
-        BasicBlock *QuitBB = BasicBlock::Create(Context,
-                                                "cpu_loop_exit_return",
-                                                RecCaller,
-                                                NewBB);
+        BasicBlock *QuitBB = BasicBlock::Create(Context, "cpu_loop_exit_return",
+                                                RecCaller, NewBB);
         UnreachableInst *Temp = new UnreachableInst(Context, QuitBB);
         // TODO(anjo): Sometimes we crash here but not always
         createRet(Temp);
@@ -553,13 +540,10 @@ bool CpuLoopExitPass::runOnModule(llvm::Module &M) {
         // Check value of cpu_loop_exiting
         auto *Branch = cast<BranchInst>(&*++(RecCall->getIterator()));
         auto *PointeeTy = CpuLoopExitingVariable->getValueType();
-        auto *Compare = new ICmpInst(Branch,
-                                     CmpInst::ICMP_EQ,
-                                     new LoadInst(PointeeTy,
-                                                  CpuLoopExitingVariable,
-                                                  "",
-                                                  Branch),
-                                     ConstantInt::getTrue(BoolType));
+        auto *Compare = new ICmpInst(
+            Branch, CmpInst::ICMP_EQ,
+            new LoadInst(PointeeTy, CpuLoopExitingVariable, "", Branch),
+            ConstantInt::getTrue(BoolType));
 
         BranchInst::Create(QuitBB, NewBB, Compare, Branch);
         eraseFromParent(Branch);
@@ -576,15 +560,16 @@ bool CpuLoopExitPass::runOnModule(llvm::Module &M) {
   return true;
 }
 
-void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> RawVirtualAddress) {
+void CodeGenerator::translate(const LibTcgInterface &LibTcg,
+                              std::optional<uint64_t> RawVirtualAddress) {
   using FT = FunctionType;
 
   Task T(12, "Translation");
 
   // Declare the abort function
   auto *AbortTy = FunctionType::get(Type::getVoidTy(Context), false);
-  FunctionCallee AbortFunction = TheModule->getOrInsertFunction("abort",
-                                                                AbortTy);
+  FunctionCallee AbortFunction =
+      TheModule->getOrInsertFunction("abort", AbortTy);
   {
     auto *Abort = cast<Function>(skipCasts(AbortFunction.getCallee()));
     FunctionTags::Exceptional.addTo(Abort);
@@ -603,33 +588,23 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
   eraseFromParent(HelpersModule->getFunction("main"));
 
   // From syscall.c
-  new GlobalVariable(*TheModule,
-                     Type::getInt32Ty(Context),
-                     false,
-                     GlobalValue::CommonLinkage,
-                     ConstantInt::get(Type::getInt32Ty(Context), 0),
-                     StringRef("do_strace"));
+  new GlobalVariable(
+      *TheModule, Type::getInt32Ty(Context), false, GlobalValue::CommonLinkage,
+      ConstantInt::get(Type::getInt32Ty(Context), 0), StringRef("do_strace"));
 
   //
   // Handle some specific QEMU functions as no-ops or abort
   //
 
   // Transform in no op
-  auto NoOpFunctionNames = make_array<const char *>("cpu_dump_state",
-                                                    "cpu_exit",
-                                                    "end_exclusive"
-                                                    "fprintf",
-                                                    "mmap_lock",
-                                                    "mmap_unlock",
-                                                    "pthread_cond_broadcast",
-                                                    "pthread_mutex_unlock",
-                                                    "pthread_mutex_lock",
-                                                    "pthread_cond_wait",
-                                                    "pthread_cond_signal",
-                                                    "process_pending_signals",
-                                                    "qemu_log_mask",
-                                                    "qemu_thread_atexit_init",
-                                                    "start_exclusive");
+  auto NoOpFunctionNames = make_array<const char *>(
+      "cpu_dump_state", "cpu_exit",
+      "end_exclusive"
+      "fprintf",
+      "mmap_lock", "mmap_unlock", "pthread_cond_broadcast",
+      "pthread_mutex_unlock", "pthread_mutex_lock", "pthread_cond_wait",
+      "pthread_cond_signal", "process_pending_signals", "qemu_log_mask",
+      "qemu_thread_atexit_init", "start_exclusive");
   for (auto Name : NoOpFunctionNames)
     replaceFunctionWithRet(HelpersModule->getFunction(Name), 0);
 
@@ -637,18 +612,12 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
 
   // do_arm_semihosting: we don't care about semihosting
   // EmulateAll: requires access to the opcode
-  auto AbortFunctionNames = make_array<const char *>("cpu_restore_state",
-                                                     "cpu_mips_exec",
-                                                     "gdb_handlesig",
-                                                     "queue_signal",
-                                                     // syscall.c
-                                                     "do_ioctl_dm",
-                                                     "print_syscall",
-                                                     "print_syscall_ret",
-                                                     // ARM cpu_loop
-                                                     "cpu_abort",
-                                                     "do_arm_semihosting",
-                                                     "EmulateAll");
+  auto AbortFunctionNames = make_array<const char *>(
+      "cpu_restore_state", "cpu_mips_exec", "gdb_handlesig", "queue_signal",
+      // syscall.c
+      "do_ioctl_dm", "print_syscall", "print_syscall_ret",
+      // ARM cpu_loop
+      "cpu_abort", "do_arm_semihosting", "EmulateAll");
   for (auto Name : AbortFunctionNames) {
     Function *TheFunction = HelpersModule->getFunction(Name);
     if (TheFunction != nullptr) {
@@ -673,8 +642,8 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
 
   std::vector<std::string> HelperFunctions;
   for (Function &F : HelpersModule->functions())
-    if (F.hasName() and F.getName() != "target_set_brk"
-        and F.getName() != "syscall_init")
+    if (F.hasName() and F.getName() != "target_set_brk" and
+        F.getName() != "syscall_init")
       HelperFunctions.push_back(F.getName().str());
 
   //
@@ -719,11 +688,11 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
   // TODO: this not very robust. We should have a function with a sensible name
   //       taking as argument ${ARCH}CPU so that we can easily identify the
   //       struct.
-  std::string CPUStructName = (Twine("struct.") + ptc.cpu_struct_name).str();
-  auto *CPUStruct = StructType::getTypeByName(TheModule->getContext(),
-                                              CPUStructName);
+  auto *CPUStruct =
+      StructType::getTypeByName(TheModule->getContext(), "struct.ArchCPU");
   revng_assert(CPUStruct != nullptr);
-  VariableManager Variables(*TheModule, TargetIsLittleEndian, CPUStruct, LibTcg.env_ptr(LibTcgContext));
+  VariableManager Variables(*TheModule, TargetIsLittleEndian, CPUStruct,
+                            LibTcg.env_offset, LibTcg.env_ptr(LibTcgContext));
   auto CreateCPUStateAccessAnalysisPass = [&Variables]() {
     return new CPUStateAccessAnalysisPass(&Variables, true);
   };
@@ -732,16 +701,18 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
     legacy::PassManager PM;
     // TODO(anjo): There is something weird going on with this pass,
     // it crashes but only occasionally
-    //PM.add(new CpuLoopExitPass(&Variables));
-    //PM.run(*TheModule);
+    // CONTHERE: Still have this problem
+    PM.add(new CpuLoopExitPass(&Variables));
+    PM.run(*TheModule);
   }
 
   std::set<Function *> CpuLoopExitingUsers;
-  //Value *CpuLoopExiting = TheModule->getGlobalVariable("cpu_loop_exiting");
-  //revng_assert(CpuLoopExiting != nullptr);
-  //for (User *U : CpuLoopExiting->users())
-  //  if (auto *I = dyn_cast<Instruction>(U))
-  //    CpuLoopExitingUsers.insert(I->getParent()->getParent());
+  GlobalVariable *CpuLoopExiting =
+      TheModule->getGlobalVariable("cpu_loop_exiting");
+  revng_assert(CpuLoopExiting != nullptr);
+  for (User *U : CpuLoopExiting->users())
+    if (auto *I = dyn_cast<Instruction>(U))
+      CpuLoopExitingUsers.insert(I->getParent()->getParent());
 
   //
   // Create well-known CSVs
@@ -751,8 +722,9 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
   GlobalVariable *SPReg = Variables.getByEnvOffset(LibTcg.sp, SPName).first;
 
   using PCHOwner = std::unique_ptr<ProgramCounterHandler>;
-  auto Factory = [&Variables, &LibTcg](PCAffectingCSV::Values CSVID,
-                                       llvm::StringRef Name) -> GlobalVariable * {
+  auto Factory = [&Variables,
+                  &LibTcg](PCAffectingCSV::Values CSVID,
+                           llvm::StringRef Name) -> GlobalVariable * {
     intptr_t Offset = 0;
 
     switch (CSVID) {
@@ -772,20 +744,15 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
   };
 
   auto Architecture = toLLVMArchitecture(Model->Architecture());
-  PCHOwner PCH = ProgramCounterHandler::create(Architecture,
-                                               TheModule,
-                                               Factory);
+  PCHOwner PCH =
+      ProgramCounterHandler::create(Architecture, TheModule, Factory);
 
   IRBuilder<> Builder(Context);
 
   // Create main function
-  auto *MainType = FT::get(Builder.getVoidTy(),
-                           { SPReg->getValueType() },
-                           false);
-  auto *MainFunction = Function::Create(MainType,
-                                        Function::ExternalLinkage,
-                                        "root",
-                                        TheModule);
+  auto *MainType = FT::get(Builder.getVoidTy(), {SPReg->getValueType()}, false);
+  auto *MainFunction =
+      Function::Create(MainType, Function::ExternalLinkage, "root", TheModule);
   FunctionTags::Root.addTo(MainFunction);
 
   // Create the first basic block and create a placeholder for variable
@@ -809,16 +776,14 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
   T.advance("Link early-linked.c", true);
   {
     Linker TheLinker(*TheModule);
-    bool Result = TheLinker.linkInModule(std::move(EarlyLinkedModule),
-                                         Linker::None);
+    bool Result =
+        TheLinker.linkInModule(std::move(EarlyLinkedModule), Linker::None);
     revng_assert(!Result, "Linking failed");
   }
 
   // Create an instance of JumpTargetManager
-  JumpTargetManager JumpTargets(MainFunction,
-                                PCH.get(),
-                                CreateCPUStateAccessAnalysisPass,
-                                Model,
+  JumpTargetManager JumpTargets(MainFunction, PCH.get(),
+                                CreateCPUStateAccessAnalysisPass, Model,
                                 RawBinary);
 
   MetaAddress VirtualAddress = MetaAddress::invalid();
@@ -860,309 +825,282 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
   T.advance("Lifting code", true);
   Task LiftTask({}, "Lifting");
   LiftTask.advance("Initial address peeking", false);
-  InstructionTranslator Translator(LibTcg,
-                                   Builder,
-                                   Variables,
-                                   JumpTargets,
-                                   Blocks,
-                                   EndianessMismatch,
-                                   PCH.get());
+  InstructionTranslator Translator(LibTcg, Builder, Variables, JumpTargets,
+                                   Blocks, EndianessMismatch, PCH.get());
 
-  auto Segments = RawBinary.segments();
-  auto SegmentIt = Segments.begin();
   size_t OffsetInSegment = 0;
-
-  for (; SegmentIt != Segments.end(); SegmentIt++)
-    if (SegmentIt->first.IsExecutable)
-      break;
 
   std::tie(VirtualAddress, Entry) = JumpTargets.peek();
   errs() << "VA: " << VirtualAddress.address() << "\n";
 
-  while (Entry != nullptr) {
-    LiftTask.advance(VirtualAddress.toString(), true);
-
-    Task TranslateTask(3, "Translate");
-    TranslateTask.advance("Lift to PTC", true);
-
-    Builder.SetInsertPoint(Entry);
-
-    // TODO: what if create a new instance of an InstructionTranslator here?
-    //Translator.reset();
-
-    // TODO: rename this type
-    size_t ConsumedSize = 0;
-
-    //
-    // TODO(anjo): We don't handle THUMB in libtcg yet!
-    //
-    //PTCCodeType Type = PTC_CODE_REGULAR;
-
-    switch (VirtualAddress.type()) {
-    case MetaAddressType::Invalid:
-      revng_abort();
-
-    case MetaAddressType::Code_arm_thumb:
-      //Type = PTC_CODE_ARM_THUMB;
-      revng_abort();
-      break;
-
-    default:
-      //Type = PTC_CODE_REGULAR;
-      break;
-    }
-
-    //if (OffsetInSegment >= SegmentIt->first.size()) {
-    //  for (; SegmentIt != Segments.end(); SegmentIt++)
-    //    if (SegmentIt->first.IsExecutable)
-    //      break;
-    //  OffsetInSegment = 0;
-    //}
-
-    //ConsumedSize = ptc.translate(VirtualAddress.address(),
-    //                             Type,
-    //                             InstructionList.get());
-
-    errs() << "\n\n--------------------------------------\n";
-    errs() << "Attempting to translate a segment\n";
-    errs() << "  at:   " << SegmentIt->second.data() << "\n";
-    errs() << "  size: " << SegmentIt->second.size() << "\n";
-    errs() << "  addr: " << SegmentIt->first.startAddress().address() << "\n";
-
-    // TODO(anjo): We are not using Type here
-    // TODO(anjo): Should obv use VirtualAddress here
-    // TODO(anjo): CONTHERE, I think we're reading garbage at the offset we're at in
-    // the binary for some reason. We end up decoding a jump and end up OOB.
-    // Offset 0x245 works for some reason, but not using the VirutalAddress.
-    //
-    // How does the code that gets the VirtualAddress work? Has something changed there?
-    //
-    // The model entrypoint is correct, so what's going on with VirtualAddress?
-    size_t Offset = (VirtualAddress.address() - SegmentIt->first.startAddress().address());
-    if (Offset >= SegmentIt->second.size())
-      break;
-    errs() << "  offset: " << Offset << "\n";
-    errs() << "  va: " << VirtualAddress.address() << "\n";
-    errs() << "  entry: " << Model->EntryPoint.address() << "\n";
-    errs() << "--------------------------------------\n";
-    auto NewInstructionList = LibTcg.translate(LibTcgContext,
-                                               SegmentIt->second.data() + Offset,
-                                               SegmentIt->second.size() - Offset,
-                                               VirtualAddress.address());
-    errs() << "--------------------------------------\n";
-
-    char DumpBuf[256] = {0};
-    for (size_t I = 0; I < NewInstructionList.instruction_count; ++I) {
-        LibTcg.dump_instruction_to_buffer(&NewInstructionList.list[I],
-                                          DumpBuf,
-                                          256);
-        puts(DumpBuf);
-    }
-
-    ConsumedSize = NewInstructionList.size_in_bytes;
-    OffsetInSegment += ConsumedSize;
-
-    if (ConsumedSize == 0) {
-    //  Translator.emitNewPCCall(Builder, VirtualAddress, 1, nullptr);
-    //  Builder.CreateCall(AbortFunction);
-    //  Builder.CreateUnreachable();
-
-      // Obtain a new program counter to translate
-      TranslateTask.complete();
-      LiftTask.advance("Peek new address", true);
-      std::tie(VirtualAddress, Entry) = JumpTargets.peek();
-
-      errs() << " CONSUMED SIZE 0!!!!!!!!!!!!!!!!!\n";
-
+  for (auto &[Segment, SegmentData] : RawBinary.segments()) {
+    if (!Segment.IsExecutable())
       continue;
-    }
+    while (Entry != nullptr) {
+      LiftTask.advance(VirtualAddress.toString(), true);
 
-    VirtualAddress += ConsumedSize;
+      Task TranslateTask(3, "Translate");
+      TranslateTask.advance("Lift to PTC", true);
 
-    //// Check whether we ended up in an unmapped page
-    //MetaAddress AbortAt = MetaAddress::invalid();
-    //MetaAddress LastByte = VirtualAddress.toGeneric() + (ConsumedSize - 1);
-    //if (VirtualAddress.pageStart() != LastByte.pageStart()) {
-    //  MetaAddress NextPage = VirtualAddress.nextPageStart();
-    //  if (NoMoreCodeBoundaries.count(NextPage) != 0)
-    //    AbortAt = NextPage;
-    //}
+      Builder.SetInsertPoint(Entry);
 
-    SmallSet<unsigned, 1> ToIgnore;
-    // TODO(anjo): What is "btarget"
-    //ToIgnore = Translator.preprocess(InstructionList.get());
+      // TODO: what if create a new instance of an InstructionTranslator here?
+      // Translator.reset();
 
-    //if (PTCLog.isEnabled()) {
-    //  std::stringstream Stream;
-    //  dumpTranslation(VirtualAddress, Stream, InstructionList.get());
-    //  PTCLog << Stream.str() << DoLog;
-    //}
+      // TODO: rename this type
+      size_t ConsumedSize = 0;
 
-    Variables.newFunction(&NewInstructionList);
-    MDNode *MDOriginalInstr = nullptr;
-    bool StopTranslation = false;
+      //
+      // TODO(anjo): We don't handle THUMB in libtcg yet!
+      //
+      // PTCCodeType Type = PTC_CODE_REGULAR;
+      uint32_t TranslateFlags = 0;
 
-    MetaAddress PC = VirtualAddress;
-    MetaAddress NextPC = MetaAddress::invalid();
-    MetaAddress EndPC = VirtualAddress + ConsumedSize;
+      switch (VirtualAddress.type()) {
+      case MetaAddressType::Invalid:
+        revng_abort();
 
-    const auto InstructionCount = NewInstructionList.instruction_count;
-    using IT = InstructionTranslator;
-    IT::TranslationResult Result;
-
-    unsigned J = 0;
-
-    TranslateTask.advance("Translate to LLVM IR", true);
-
-    Task TranslateToLLVMTask(InstructionCount + 1, "Translate to LLVM IR");
-    TranslateToLLVMTask.advance("", true);
-
-    // Handle the first LIBTCG_op_insn_start
-    {
-      LibTcgInstruction *NextInstruction = nullptr;
-      for (unsigned K = 1; K < InstructionCount; K++) {
-        LibTcgInstruction *I = &NewInstructionList.list[K];
-        if (I->opcode == LIBTCG_op_insn_start
-            && ToIgnore.count(K) == 0) {
-          NextInstruction = I;
-          break;
-        }
-      }
-      LibTcgInstruction *Instruction = &NewInstructionList.list[J];
-      std::tie(Result,
-               MDOriginalInstr,
-               PC,
-               NextPC) = Translator.newInstruction(Instruction,
-                                                   NextInstruction,
-                                                   VirtualAddress,
-                                                   EndPC,
-                                                   true);
-      J++;
-    }
-
-    errs() << &Result << "\n";
-
-    // CONTHERE(anjo): Do we need exit_tb or no?, otherwise keep translating heer
-    // Also uncomment the above
-
-    // TODO: shall we move this whole loop in InstructionTranslator?
-    for (; J < InstructionCount && !StopTranslation; J++) {
-      TranslateToLLVMTask.advance("", true);
-      if (ToIgnore.contains(J))
-        continue;
-
-      LibTcgInstruction *Instruction = &NewInstructionList.list[J];
-      auto Opcode = Instruction->opcode;
-
-      Blocks.clear();
-      Blocks.push_back(Builder.GetInsertBlock());
-
-      switch (Opcode) {
-      case LIBTCG_op_discard:
-        // Instructions we don't even consider
+      case MetaAddressType::Code_arm_thumb:
+        TranslateFlags |= LIBTCG_TRANSLATE_ARM_THUMB;
         break;
-      case LIBTCG_op_insn_start: {
-        // Find next instruction, if there is one
+
+      default:
+        TranslateFlags = 0;
+        break;
+      }
+
+      if (OffsetInSegment >= Segment.size()) {
+        OffsetInSegment = 0;
+        continue;
+      }
+
+      // ConsumedSize = ptc.translate(VirtualAddress.address(),
+      //                              Type,
+      //                              InstructionList.get());
+
+      errs() << "\n\n--------------------------------------\n";
+      errs() << "Attempting to translate a segment\n";
+      errs() << "  at:   " << SegmentData.data() << "\n";
+      errs() << "  size: " << SegmentData.size() << "\n";
+      errs() << "  addr: " << Segment.startAddress().address() << "\n";
+
+      // TODO(anjo): We are not using Type here
+      // TODO(anjo): Should obv use VirtualAddress here
+      // TODO(anjo): CONTHERE, I think we're reading garbage at the offset we're
+      // at in the binary for some reason. We end up decoding a jump and end up
+      // OOB. Offset 0x245 works for some reason, but not using the
+      // VirutalAddress.
+      //
+      // How does the code that gets the VirtualAddress work? Has something
+      // changed there?
+      //
+      // The model entrypoint is correct, so what's going on with
+      // VirtualAddress?
+      size_t Offset =
+          (VirtualAddress.address() - Segment.startAddress().address());
+      if (Offset >= SegmentData.size()) {
+        assert(false);
+        break;
+      }
+      errs() << "  offset: " << Offset << "\n";
+      errs() << "  va: " << VirtualAddress.address() << "\n";
+      errs() << "  entry: " << Model->EntryPoint().address() << "\n";
+      errs() << "--------------------------------------\n";
+      auto NewInstructionList =
+          LibTcg.translate(LibTcgContext, SegmentData.data() + Offset,
+                           SegmentData.size() - Offset,
+                           VirtualAddress.address(), TranslateFlags);
+      errs() << "--------------------------------------\n";
+      errs() << ((uint32_t *)(SegmentData.data() + Offset))[0] << "\n";
+      errs() << "--------------------------------------\n";
+
+      errs() << "[DUMPBUF]-----------------------------------------------------"
+                "----\n";
+      char DumpBuf[256] = {0};
+      for (size_t I = 0; I < NewInstructionList.instruction_count; ++I) {
+        LibTcg.dump_instruction_to_buffer(&NewInstructionList.list[I], DumpBuf,
+                                          256);
+        // puts(DumpBuf);
+        errs() << DumpBuf << "\n";
+      }
+      errs() << "---------------------------------------------------------\n";
+
+      ConsumedSize = NewInstructionList.size_in_bytes;
+      OffsetInSegment += ConsumedSize;
+
+      if (ConsumedSize == 0) {
+        revng_abort();
+      }
+
+      //// Check whether we ended up in an unmapped page
+      // MetaAddress AbortAt = MetaAddress::invalid();
+      // MetaAddress LastByte = VirtualAddress.toGeneric() + (ConsumedSize - 1);
+      // if (VirtualAddress.pageStart() != LastByte.pageStart()) {
+      //   MetaAddress NextPage = VirtualAddress.nextPageStart();
+      //   if (NoMoreCodeBoundaries.count(NextPage) != 0)
+      //     AbortAt = NextPage;
+      // }
+
+      SmallSet<unsigned, 1> ToIgnore;
+      // TODO(anjo): What is "btarget"
+      // ToIgnore = Translator.preprocess(InstructionList.get());
+
+      // if (PTCLog.isEnabled()) {
+      //   std::stringstream Stream;
+      //   dumpTranslation(VirtualAddress, Stream, InstructionList.get());
+      //   PTCLog << Stream.str() << DoLog;
+      // }
+
+      Variables.newFunction(&NewInstructionList);
+      MDNode *MDOriginalInstr = nullptr;
+      bool StopTranslation = false;
+
+      MetaAddress PC = VirtualAddress;
+      MetaAddress NextPC = MetaAddress::invalid();
+      MetaAddress EndPC = VirtualAddress + ConsumedSize;
+
+      const auto InstructionCount = NewInstructionList.instruction_count;
+      using IT = InstructionTranslator;
+      IT::TranslationResult Result;
+
+      unsigned J = 0;
+
+      // Handle the first LIBTCG_op_insn_start
+      {
         LibTcgInstruction *NextInstruction = nullptr;
-        for (unsigned K = J + 1; K < InstructionCount; K++) {
+        for (unsigned K = 1; K < InstructionCount; K++) {
           LibTcgInstruction *I = &NewInstructionList.list[K];
-          if (I->opcode == LIBTCG_op_insn_start
-              && ToIgnore.count(K) == 0) {
+          if (I->opcode == LIBTCG_op_insn_start && ToIgnore.count(K) == 0) {
             NextInstruction = I;
             break;
           }
         }
-
-        std::tie(Result,
-                 MDOriginalInstr,
-                 PC,
-                 NextPC) = Translator.newInstruction(Instruction,
-                                                     NextInstruction,
-                                                     VirtualAddress,
-                                                     EndPC,
-                                                     false);
-      } break;
-      case LIBTCG_op_call: {
-        Result = Translator.translateCall(Instruction);
-
-        // Sometimes libtinycode terminates a basic block with a call, in this
-        // case force a fallthrough
-        //if (J == NewInstructionList.instruction_count - 1) {
-        //  BasicBlock *Target = JumpTargets.registerJT(EndPC,
-        //                                              JTReason::PostHelper);
-        //  Builder.CreateBr(notNull(Target));
-        //}
-
-      } break;
-
-      default:
-        Result = Translator.translate(Instruction, PC, NextPC);
-        break;
+        LibTcgInstruction *Instruction = &NewInstructionList.list[J];
+        std::tie(Result, MDOriginalInstr, PC, NextPC) =
+            Translator.newInstruction(Instruction, NextInstruction,
+                                      VirtualAddress, EndPC, true);
+        J++;
       }
 
-      switch (Result) {
-      case IT::Success:
-        // No-op
-        break;
-      case IT::Abort:
-        Builder.CreateCall(AbortFunction);
-        Builder.CreateUnreachable();
-        StopTranslation = true;
-        break;
-      case IT::Stop:
-        StopTranslation = true;
-        break;
-      }
+      // CONTHERE(anjo): Do we need exit_tb or no?, otherwise keep translating
+      // heer Also uncomment the above
 
-      // Create a new metadata referencing the PTC instruction we have just
-      // translated
-      MDNode *MDLibTcgInstr = nullptr;
-      if (RecordPTC) {
-        char DumpBuf[256] = {0};
-        LibTcg.dump_instruction_to_buffer(&NewInstructionList.list[J], DumpBuf, 256);
+      // TODO: shall we move this whole loop in InstructionTranslator?
+      for (; J < InstructionCount && !StopTranslation; J++) {
+        if (ToIgnore.count(J) != 0)
+          continue;
 
-        std::string LibTcgString = std::string(DumpBuf, 256) + "\n";
-        MDString *MDLibTcgString = MDString::get(Context, LibTcgString);
-        MDLibTcgInstr = MDNode::getDistinct(Context, MDLibTcgString);
-      }
+        LibTcgInstruction *Instruction = &NewInstructionList.list[J];
+        auto Opcode = Instruction->opcode;
 
-      // Set metadata for all the new instructions
-      for (BasicBlock *Block : Blocks) {
-        BasicBlock::iterator I = Block->end();
-        while (I != Block->begin() && !(--I)->hasMetadata()) {
-          if (MDOriginalInstr != nullptr)
-            I->setMetadata(OriginalInstrMDKind, MDOriginalInstr);
-          if (MDLibTcgInstr != nullptr)
-            I->setMetadata(LibTcgInstrMDKind, MDLibTcgInstr);
+        Blocks.clear();
+        Blocks.push_back(Builder.GetInsertBlock());
+
+        switch (Opcode) {
+        case LIBTCG_op_discard:
+          // Instructions we don't even consider
+          break;
+        case LIBTCG_op_insn_start: {
+          // Find next instruction, if there is one
+          LibTcgInstruction *NextInstruction = nullptr;
+          for (unsigned K = J + 1; K < InstructionCount; K++) {
+            LibTcgInstruction *I = &NewInstructionList.list[K];
+            if (I->opcode == LIBTCG_op_insn_start && ToIgnore.count(K) == 0) {
+              NextInstruction = I;
+              break;
+            }
+          }
+
+          std::tie(Result, MDOriginalInstr, PC, NextPC) =
+              Translator.newInstruction(Instruction, NextInstruction,
+                                        VirtualAddress, EndPC, false);
+        } break;
+        case LIBTCG_op_call: {
+          Result = Translator.translateCall(Instruction);
+          revng_assert(Result == IT::Success);
+
+          // Sometimes libtinycode terminates a basic block with a call, in this
+          // case force a fallthrough
+          if (J == NewInstructionList.instruction_count - 1) {
+            BasicBlock *Target =
+                JumpTargets.registerJT(EndPC, JTReason::PostHelper);
+            Builder.CreateBr(notNull(Target));
+          }
+
+        } break;
+
+        default:
+          Result = Translator.translate(Instruction, PC, NextPC);
+          break;
         }
+
+        switch (Result) {
+        case IT::Success:
+          // No-op
+          break;
+        case IT::Abort:
+          Builder.CreateCall(AbortFunction);
+          Builder.CreateUnreachable();
+          StopTranslation = true;
+          break;
+        case IT::Stop:
+          StopTranslation = true;
+          break;
+        }
+
+        // Create a new metadata referencing the PTC instruction we have just
+        // translated
+        MDNode *MDLibTcgInstr = nullptr;
+        if (RecordPTC) {
+          char DumpBuf[256] = {0};
+          LibTcg.dump_instruction_to_buffer(&NewInstructionList.list[J],
+                                            DumpBuf, 256);
+
+          std::string LibTcgString = std::string(DumpBuf, 256) + "\n";
+          MDString *MDLibTcgString = MDString::get(Context, LibTcgString);
+          MDLibTcgInstr = MDNode::getDistinct(Context, MDLibTcgString);
+        }
+
+        // Set metadata for all the new instructions
+        for (BasicBlock *Block : Blocks) {
+          BasicBlock::iterator I = Block->end();
+          while (I != Block->begin() && !(--I)->hasMetadata()) {
+            if (MDOriginalInstr != nullptr)
+              I->setMetadata(OriginalInstrMDKind, MDOriginalInstr);
+            if (MDLibTcgInstr != nullptr)
+              I->setMetadata(LibTcgInstrMDKind, MDLibTcgInstr);
+          }
+        }
+
+      } // End loop over instructions
+
+      TranslateTask.complete();
+      TranslateTask.advance("Finalization", true);
+      LibTcg.instruction_list_destroy(LibTcgContext, NewInstructionList);
+
+      errs() << *MainFunction << "\n";
+      errs() << "////////////\n";
+
+      // We might have a leftover block, probably due to the block created after
+      // the last call to exit_tb
+      auto *LastBlock = Builder.GetInsertBlock();
+      errs() << *LastBlock << "\n";
+      if (LastBlock->empty()) {
+        eraseFromParent(LastBlock);
+      } else if (!LastBlock->rbegin()->isTerminator()) {
+        // Something went wrong, probably a mistranslation
+        errs() << *LastBlock->rbegin() << "\n";
+        errs() << "MISTRANSLATION??\n";
+        Builder.CreateUnreachable();
       }
 
-    } // End loop over instructions
-
-    TranslateToLLVMTask.complete();
-
-    TranslateTask.advance("Finalization", true);
-    LibTcg.instruction_list_destroy(LibTcgContext, NewInstructionList);
-
-    errs() << "Builder: " << *TheModule << "\n";
-
-    // We might have a leftover block, probably due to the block created after
-    // the last call to exit_tb
-    auto *LastBlock = Builder.GetInsertBlock();
-    if (LastBlock->empty())
-      eraseFromParent(LastBlock);
-    else if (!LastBlock->rbegin()->isTerminator()) {
-      // Something went wrong, probably a mistranslation
-      Builder.CreateUnreachable();
-    }
-
-    Translator.registerDirectJumps();
-
-    // Obtain a new program counter to translate
-    TranslateTask.complete();
-    LiftTask.advance("Peek new address", true);
-    std::tie(VirtualAddress, Entry) = JumpTargets.peek();
-  } // End translations loop
+      Translator.registerDirectJumps();
+      // Obtain a new program counter to translate
+      TranslateTask.complete();
+      LiftTask.advance("Peek new address", true);
+      std::tie(VirtualAddress, Entry) = JumpTargets.peek();
+    } // End translations loop
+  }
 
   LiftTask.complete();
 
@@ -1170,7 +1108,6 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
   // might be nice to move out of this translate function.
   LibTcg.context_destroy(LibTcgContext);
 
-#if 0
   OI.drop();
 
   // Reorder basic blocks in RPOT
@@ -1220,8 +1157,7 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
           WorkList.push(UCE);
     } else if (auto *Call = dyn_cast<CallInst>(U)) {
       if (Call->getParent()->getParent() == MainFunction) {
-        new StoreInst(ConstantInt::getFalse(BoolType),
-                      CpuLoopExiting,
+        new StoreInst(ConstantInt::getFalse(BoolType), CpuLoopExiting,
                       Call->getNextNode());
       }
     }
@@ -1238,9 +1174,9 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
     revng_assert(InitEnv->getFunctionType()->getNumParams() == 1);
     auto *CPUStateType = InitEnv->getFunctionType()->getParamType(0);
     Instruction *InsertBefore = InitEnvInsertPoint;
-    auto *AddressComputation = Variables.computeEnvAddress(CPUStateType,
-                                                           InsertBefore);
-    CallInst::Create(InitEnv, { AddressComputation }, "", InsertBefore);
+    auto *AddressComputation =
+        Variables.computeEnvAddress(CPUStateType, InsertBefore);
+    CallInst::Create(InitEnv, {AddressComputation}, "", InsertBefore);
   }
 
   Variables.setDataLayout(&TheModule->getDataLayout());
@@ -1280,12 +1216,9 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg, Optional<uint64_t> 
   JumpTargets.createJTReasonMD();
 
   T.advance("Finalization", true);
-  ExternalJumpsHandler JumpOutHandler(*Model,
-                                      JumpTargets.dispatcher(),
-                                      *MainFunction,
-                                      PCH.get());
+  ExternalJumpsHandler JumpOutHandler(*Model, JumpTargets.dispatcher(),
+                                      *MainFunction, PCH.get());
   JumpOutHandler.createExternalJumpsHandler();
 
   Variables.finalize();
-#endif
 }

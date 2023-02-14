@@ -27,8 +27,6 @@
 
 #include "VariableManager.h"
 
-#include "qemu/libtcg/libtcg.h"
-
 using namespace llvm;
 
 // TODO: rename
@@ -154,18 +152,18 @@ getTypeAtOffset(const DataLayout *TheLayout, Type *VarType, intptr_t Offset) {
 VariableManager::VariableManager(Module &M,
                                  bool TargetIsLittleEndian,
                                  StructType *CPUStruct,
-                                 unsigned EnvOffset,
-                                 uint8_t *LibTcgEnvAddress) :
+                                 unsigned LibTcgEnvOffset,
+                                 uint8_t *LibTcgEnvPtr) :
   TheModule(M),
   AllocaBuilder(getContext(&M)),
   CPUStateType(CPUStruct),
   ModuleLayout(&TheModule.getDataLayout()),
-  EnvOffset(EnvOffset),
+  LibTcgEnvOffset(LibTcgEnvOffset),
+  LibTcgEnvPtr(LibTcgEnvPtr),
   Env(nullptr),
-  TargetIsLittleEndian(TargetIsLittleEndian),
-  LibTcgEnvAddress(LibTcgEnvAddress) {
+  TargetIsLittleEndian(TargetIsLittleEndian) {
 
-  revng_assert(LibTcgEnvAddress != nullptr);
+  revng_assert(LibTcgEnvPtr != nullptr);
 
   IntegerType *IntPtrTy = AllocaBuilder.getIntPtrTy(*ModuleLayout);
   Env = cast<GlobalVariable>(TheModule.getOrInsertGlobal("env", IntPtrTy));
@@ -495,7 +493,7 @@ VariableManager::getByCPUStateOffsetInternal(intptr_t Offset,
 
     // TODO: offset could be negative, we could segfault here
     auto *InitialValue = fromBytes(cast<IntegerType>(VariableType),
-                                   LibTcgEnvAddress - EnvOffset + Offset);
+                                   LibTcgEnvPtr - LibTcgEnvOffset + Offset);
 
     auto *NewVariable = new GlobalVariable(TheModule,
                                            VariableType,
@@ -562,7 +560,7 @@ VariableManager::getOrCreate(LibTcgArgument *Arg, bool Reading) {
       }
     };
     case LIBTCG_TEMP_GLOBAL: {
-      Value *Result = getByCPUStateOffset(EnvOffset + Arg->temp->mem_offset,
+      Value *Result = getByCPUStateOffset(LibTcgEnvOffset + Arg->temp->mem_offset,
                                           Arg->temp->name);
       revng_assert(Result != nullptr);
       return { false, Result };
@@ -675,6 +673,6 @@ Value *VariableManager::cpuStateToEnv(Value *CPUState,
   auto *OpaquePointer = PointerType::get(TheModule.getContext(), 0);
   auto *IntPtrTy = Builder.getIntPtrTy(TheModule.getDataLayout());
   Value *CPUIntPtr = Builder.CreatePtrToInt(CPUState, IntPtrTy);
-  Value *EnvIntPtr = Builder.CreateAdd(CPUIntPtr, CI::get(IntPtrTy, EnvOffset));
+  Value *EnvIntPtr = Builder.CreateAdd(CPUIntPtr, CI::get(IntPtrTy, LibTcgEnvOffset));
   return Builder.CreateIntToPtr(EnvIntPtr, OpaquePointer);
 }

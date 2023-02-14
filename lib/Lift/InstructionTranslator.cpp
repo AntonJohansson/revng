@@ -204,12 +204,6 @@ using IT = InstructionTranslator;
 //
 //} // namespace PTC
 
-/// Converts a libtcg condition into an LLVM predicate
-///
-/// \param Condition the input libtcg condition.
-///
-/// \return the corresponding LLVM predicate.
-
 static uint64_t pc(LibTcgInstruction *Instr) {
   revng_assert(Instr->opcode == LIBTCG_op_insn_start);
   uint64_t PC = Instr->constant_args[0].constant;
@@ -217,6 +211,12 @@ static uint64_t pc(LibTcgInstruction *Instr) {
     PC |= Instr->constant_args[1].constant << 32;
   return PC;
 }
+
+/// Converts a libtcg condition into an LLVM predicate
+///
+/// \param Condition the input libtcg condition.
+///
+/// \return the corresponding LLVM predicate.
 
 static CmpInst::Predicate conditionToPredicate(LibTcgCond Condition) {
   switch (Condition) {
@@ -324,7 +324,7 @@ static uint64_t getMaxValue(unsigned Bits) {
 /// Maps an opcode the corresponding input and output register size.
 ///
 /// \return the size, in bits, of the registers used by the opcode.
-static unsigned getRegisterSize(LibTcgOpcode Opcode) {
+static unsigned getRegisterSize(const LibTcgInterface &LibTcg, LibTcgOpcode Opcode) {
   switch (Opcode) {
   case LIBTCG_op_add2_i32:
   case LIBTCG_op_add_i32:
@@ -362,8 +362,10 @@ static unsigned getRegisterSize(LibTcgOpcode Opcode) {
   case LIBTCG_op_not_i32:
   case LIBTCG_op_orc_i32:
   case LIBTCG_op_or_i32:
-  case LIBTCG_op_qemu_ld_i32:
-  case LIBTCG_op_qemu_st_i32:
+  case LIBTCG_op_qemu_ld_a32_i32:
+  case LIBTCG_op_qemu_ld_a64_i32:
+  case LIBTCG_op_qemu_st_a32_i32:
+  case LIBTCG_op_qemu_st_a64_i32:
   case LIBTCG_op_rem_i32:
   case LIBTCG_op_remu_i32:
   case LIBTCG_op_rotl_i32:
@@ -396,6 +398,8 @@ static unsigned getRegisterSize(LibTcgOpcode Opcode) {
   case LIBTCG_op_eqv_i64:
   case LIBTCG_op_ext16s_i64:
   case LIBTCG_op_ext16u_i64:
+  case LIBTCG_op_ext_i32_i64:
+  case LIBTCG_op_extu_i32_i64:
   case LIBTCG_op_ext32s_i64:
   case LIBTCG_op_ext32u_i64:
   case LIBTCG_op_ext8s_i64:
@@ -420,8 +424,10 @@ static unsigned getRegisterSize(LibTcgOpcode Opcode) {
   case LIBTCG_op_not_i64:
   case LIBTCG_op_orc_i64:
   case LIBTCG_op_or_i64:
-  case LIBTCG_op_qemu_ld_i64:
-  case LIBTCG_op_qemu_st_i64:
+  case LIBTCG_op_qemu_ld_a32_i64:
+  case LIBTCG_op_qemu_ld_a64_i64:
+  case LIBTCG_op_qemu_st_a32_i64:
+  case LIBTCG_op_qemu_st_a64_i64:
   case LIBTCG_op_rem_i64:
   case LIBTCG_op_remu_i64:
   case LIBTCG_op_rotl_i64:
@@ -444,6 +450,7 @@ static unsigned getRegisterSize(LibTcgOpcode Opcode) {
   case LIBTCG_op_discard:
   case LIBTCG_op_exit_tb:
   case LIBTCG_op_goto_tb:
+  case LIBTCG_op_goto_ptr:
   case LIBTCG_op_set_label:
     return 0;
   default:
@@ -706,9 +713,8 @@ IT::newInstruction(LibTcgInstruction *Instr,
 IT::TranslationResult IT::translateCall(LibTcgInstruction *Instr) {
   std::vector<Value *> InArgs;
 
-  // TODO(anjo): CONTHERE
-  for (uint8_t i = 0; i < Instr->nb_iargs; ++i) {
-    auto *Load = Variables.load(Builder, &Instr->input_args[i]);
+  for (uint8_t I = 0; I < Instr->nb_iargs; ++I) {
+    auto *Load = Variables.load(Builder, &Instr->input_args[I]);
     if (Load == nullptr)
       return Abort;
     InArgs.push_back(Load);
@@ -761,8 +767,28 @@ IT::translate(LibTcgInstruction *Instr, MetaAddress PC, MetaAddress NextPC) {
     InArgs.push_back(Load);
   }
 
+  // TODO(anjo): Remove this, constant args to eg add are not passed as const but const temps
+  std::vector<LibTcgArgument> ConstArgs;
+  {
+    unsigned RegisterSize = getRegisterSize(LibTcg, Instr->opcode);
+    Type *RegisterType = nullptr;
+    if (RegisterSize == 32)
+      RegisterType = Builder.getInt32Ty();
+    else if (RegisterSize == 64 or RegisterSize == 0)
+      RegisterType = Builder.getInt64Ty();
+    else if (RegisterSize != 0)
+      revng_unreachable("Unexpected register size");
+
+    for (unsigned I = 0; I < Instr->nb_cargs; ++I) {
+      if (Instr->constant_args[I].kind == LIBTCG_ARG_CONSTANT) {
+        InArgs.push_back(ConstantInt::get(RegisterType, Instr->constant_args[I].constant));
+      } else {
+        ConstArgs.push_back(Instr->constant_args[I]);
+      }
+    }
+    //  return v{ ConstantInt::get(RegisterType, ConstArguments[0]) };
+  }
   LastPC = PC;
-  std::vector<LibTcgArgument> ConstArgs(Instr->constant_args, Instr->constant_args + Instr->nb_cargs);
   auto Result = translateOpcode(Instr->opcode,
                                 ConstArgs,
                                 InArgs);
@@ -817,7 +843,7 @@ IT::translateOpcode(LibTcgOpcode Opcode,
                     std::vector<LibTcgArgument> ConstArguments,
                     std::vector<Value *> InArguments) {
   LLVMContext &Context = TheModule.getContext();
-  unsigned RegisterSize = getRegisterSize(Opcode);
+  unsigned RegisterSize = getRegisterSize(LibTcg, Opcode);
   Type *RegisterType = nullptr;
   if (RegisterSize == 32)
     RegisterType = Builder.getInt32Ty();
@@ -837,7 +863,11 @@ IT::translateOpcode(LibTcgOpcode Opcode,
     return v{ ConstantInt::get(RegisterType, 0) };
   case LIBTCG_op_mov_i32:
   case LIBTCG_op_mov_i64:
-    return v{ Builder.CreateTrunc(InArguments[0], RegisterType) };
+    if (auto Constant = dyn_cast<ConstantInt>(InArguments[0])) {
+      return v{ Constant };
+    } else {
+      return v{ Builder.CreateTrunc(InArguments[0], RegisterType) };
+    }
   case LIBTCG_op_setcond_i32:
   case LIBTCG_op_setcond_i64: {
     revng_assert(ConstArguments[0].kind == LIBTCG_ARG_COND);
@@ -860,10 +890,14 @@ IT::translateOpcode(LibTcgOpcode Opcode,
                                          InArguments[3]);
     return v{ Select };
   }
-  case LIBTCG_op_qemu_ld_i32:
-  case LIBTCG_op_qemu_ld_i64:
-  case LIBTCG_op_qemu_st_i32:
-  case LIBTCG_op_qemu_st_i64: {
+  case LIBTCG_op_qemu_ld_a32_i32:
+  case LIBTCG_op_qemu_ld_a64_i32:
+  case LIBTCG_op_qemu_ld_a32_i64:
+  case LIBTCG_op_qemu_ld_a64_i64:
+  case LIBTCG_op_qemu_st_a32_i32:
+  case LIBTCG_op_qemu_st_a64_i32:
+  case LIBTCG_op_qemu_st_a32_i64:
+  case LIBTCG_op_qemu_st_a64_i64: {
     revng_assert(ConstArguments[0].kind == LIBTCG_ARG_MEM_OP_INDEX);
     LibTcgMemOp MemoryOp = ConstArguments[0].mem_op_index.op;
 
@@ -902,8 +936,10 @@ IT::translateOpcode(LibTcgOpcode Opcode,
     bool SignExtend = (MemoryOp & LIBTCG_MO_SIGN) != 0;
 
     Value *Pointer = nullptr;
-    if (Opcode == LIBTCG_op_qemu_ld_i32
-        or Opcode == LIBTCG_op_qemu_ld_i64) {
+    if (Opcode == LIBTCG_op_qemu_ld_a32_i32 or
+        Opcode == LIBTCG_op_qemu_ld_a64_i32 or
+        Opcode == LIBTCG_op_qemu_ld_a32_i64 or
+        Opcode == LIBTCG_op_qemu_ld_a64_i64) {
 
       Pointer = Builder.CreateIntToPtr(InArguments[0],
                                        MemoryType->getPointerTo());
@@ -920,8 +956,10 @@ IT::translateOpcode(LibTcgOpcode Opcode,
       else
         return v{ Builder.CreateZExt(Loaded, RegisterType) };
 
-    } else if (Opcode == LIBTCG_op_qemu_st_i32
-               or Opcode == LIBTCG_op_qemu_st_i64) {
+    } else if (Opcode == LIBTCG_op_qemu_st_a32_i32 or
+               Opcode == LIBTCG_op_qemu_st_a64_i32 or
+               Opcode == LIBTCG_op_qemu_st_a32_i64 or
+               Opcode == LIBTCG_op_qemu_st_a64_i64) {
 
       Pointer = Builder.CreateIntToPtr(InArguments[1],
                                        MemoryType->getPointerTo());
@@ -1004,10 +1042,10 @@ IT::translateOpcode(LibTcgOpcode Opcode,
       revng_unreachable("Unexpected opcode");
     }
 
-    revng_assert(ConstArguments[0].kind == LIBTCG_ARG_CONSTANT);
+    revng_assert(isa<ConstantInt>(InArguments[1]));
     Value *Result = Variables.loadFromEnvOffset(Builder,
                                                 LoadSize,
-                                                ConstArguments[0].constant);
+                                                cast<ConstantInt>(InArguments[1])->getLimitedValue());
     revng_assert(Result != nullptr);
 
     // Zero/sign extend in the target dimension
@@ -1050,10 +1088,10 @@ IT::translateOpcode(LibTcgOpcode Opcode,
       return std::errc::invalid_argument;
     }
 
-    revng_assert(ConstArguments[0].kind == LIBTCG_ARG_CONSTANT);
+    revng_assert(isa<ConstantInt>(InArguments[2]));
     auto Result = Variables.storeToEnvOffset(Builder,
                                              StoreSize,
-                                             ConstArguments[0].constant,
+                                             cast<ConstantInt>(InArguments[2])->getLimitedValue(),
                                              InArguments[0]);
     PCH->handleStore(Builder, *Result);
 
@@ -1151,13 +1189,13 @@ IT::translateOpcode(LibTcgOpcode Opcode,
   }
   case LIBTCG_op_deposit_i32:
   case LIBTCG_op_deposit_i64: {
-    revng_assert(ConstArguments[0].kind == LIBTCG_ARG_CONSTANT);
-    auto Position = ConstArguments[0].constant;
+    revng_assert(isa<ConstantInt>(InArguments[2]));
+    auto Position = cast<ConstantInt>(InArguments[2])->getLimitedValue();
     if (Position == RegisterSize)
       return v{ InArguments[0] };
 
-    revng_assert(ConstArguments[1].kind == LIBTCG_ARG_CONSTANT);
-    auto Length = ConstArguments[1].constant;
+    revng_assert(isa<ConstantInt>(InArguments[3]));
+    auto Length = cast<ConstantInt>(InArguments[3])->getLimitedValue();
     uint64_t Bits = 0;
 
     // Thou shall not << 32
@@ -1184,7 +1222,9 @@ IT::translateOpcode(LibTcgOpcode Opcode,
   case LIBTCG_op_ext32s_i64:
   case LIBTCG_op_ext8u_i64:
   case LIBTCG_op_ext16u_i64:
-  case LIBTCG_op_ext32u_i64: {
+  case LIBTCG_op_ext32u_i64:
+  case LIBTCG_op_ext_i32_i64:
+  case LIBTCG_op_extu_i32_i64: {
     Type *SourceType = nullptr;
     switch (Opcode) {
     case LIBTCG_op_ext8s_i32:
@@ -1201,6 +1241,8 @@ IT::translateOpcode(LibTcgOpcode Opcode,
       break;
     case LIBTCG_op_ext32s_i64:
     case LIBTCG_op_ext32u_i64:
+    case LIBTCG_op_ext_i32_i64:
+    case LIBTCG_op_extu_i32_i64:
       SourceType = Builder.getInt32Ty();
       break;
     default:
@@ -1215,12 +1257,14 @@ IT::translateOpcode(LibTcgOpcode Opcode,
     case LIBTCG_op_ext16s_i32:
     case LIBTCG_op_ext16s_i64:
     case LIBTCG_op_ext32s_i64:
+    case LIBTCG_op_ext_i32_i64:
       return v{ Builder.CreateSExt(Truncated, RegisterType) };
     case LIBTCG_op_ext8u_i32:
     case LIBTCG_op_ext8u_i64:
     case LIBTCG_op_ext16u_i32:
     case LIBTCG_op_ext16u_i64:
     case LIBTCG_op_ext32u_i64:
+    case LIBTCG_op_extu_i32_i64:
       return v{ Builder.CreateZExt(Truncated, RegisterType) };
     default:
       revng_unreachable("Unexpected opcode");
@@ -1407,6 +1451,7 @@ IT::translateOpcode(LibTcgOpcode Opcode,
     return v{};
   }
   case LIBTCG_op_goto_tb:
+  case LIBTCG_op_goto_ptr:
     // Nothing to do here
     return v{};
   case LIBTCG_op_add2_i32:

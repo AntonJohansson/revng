@@ -207,7 +207,7 @@ private:
     // We don't use select here, SCEV can't handle it
     // NewType = ARM + IsThumb * (Thumb - ARM)
     auto *NewType = B.CreateAdd(ArmCode,
-                                B.CreateMul(B.CreateTrunc(IsThumb, TypeType),
+                                B.CreateMul(B.CreateZExt(IsThumb, TypeType),
                                             B.CreateSub(ThumbCode, ArmCode)));
     return NewType;
   }

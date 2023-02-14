@@ -530,6 +530,10 @@ void JumpTargetManager::findCodePointers(MetaAddress StartVirtualAddress,
     if (Value.isInvalid())
       continue;
 
+    uint64_t addr = (StartVirtualAddress + (Cursor - Start)).address();
+    if (addr & 3)
+      continue;
+
     BasicBlock *Result = registerJT(Value, JTReason::GlobalData);
 
     if (Result != nullptr)

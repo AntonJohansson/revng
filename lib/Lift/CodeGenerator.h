@@ -46,7 +46,7 @@ public:
   /// Creates an LLVM function for the code in the specified memory area.
   ///
   /// \param VirtualAddress the address from where the translation should start.
-  void translate(const LibTcgInterface &LibTcg, llvm::Optional<uint64_t> RawVirtualAddress);
+  void translate(const LibTcgInterface &LibTcg, std::optional<uint64_t> RawVirtualAddress);
 
 private:
   const RawBinaryView &RawBinary;

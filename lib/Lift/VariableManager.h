@@ -16,6 +16,8 @@
 
 #include "CPUStateAccessAnalysisPass.h"
 
+#include "qemu/libtcg/libtcg.h"
+
 namespace llvm {
 class AllocaInst;
 class BasicBlock;
@@ -45,8 +47,8 @@ public:
   VariableManager(llvm::Module &M,
                   bool TargetIsLittleEndian,
                   llvm::StructType *CPUStruct,
-                  unsigned EnvOffset,
-                  uint8_t *LibTcgEnvAddress);
+                  unsigned LibTcgEnvOffset,
+                  uint8_t *LibTcgEnvPtr);
 
   void setAllocaInsertPoint(llvm::Instruction *I) {
     AllocaBuilder.SetInsertPoint(I);
@@ -59,11 +61,18 @@ public:
       return nullptr;
 
     if (IsNew) {
-      auto *Undef = llvm::UndefValue::get(V->getType()->getPointerElementType());
-      Builder.CreateStore(Undef, V);
+      if (Arg->kind == LIBTCG_ARG_TEMP and Arg->temp->kind == LIBTCG_TEMP_CONST) {
+        // TODO(anjo): This is a bit redundant, we're already doing this in getOrCreate
+        auto Ty = (Arg->temp->type == LIBTCG_TYPE_I64) ? Builder.getInt64Ty() : Builder.getInt32Ty();
+        auto *Undef = llvm::ConstantInt::get(Ty, Arg->temp->val);
+        Builder.CreateStore(Undef, V);
+      } else {
+        auto *Undef = llvm::UndefValue::get(getVariableType(V));
+        Builder.CreateStore(Undef, V);
+      }
     }
 
-    return Builder.CreateLoad(V);
+    return createLoadVariable(Builder, V);
   }
 
   /// Get or create the LLVM value associated to a PTC temporary
@@ -88,7 +97,7 @@ public:
   ///         the third byte of a 32-bit integer it will 2.
   std::pair<llvm::GlobalVariable *, unsigned>
   getByEnvOffset(intptr_t Offset, std::string Name = "") {
-    return getByCPUStateOffsetInternal(EnvOffset + Offset, Name);
+    return getByCPUStateOffsetInternal(LibTcgEnvOffset + Offset, Name);
   }
 
   /// Notify VariableManager to reset all the "function"-specific information
@@ -128,14 +137,14 @@ public:
   llvm::Value *loadFromEnvOffset(llvm::IRBuilder<> &Builder,
                                  unsigned LoadSize,
                                  unsigned Offset) {
-    return loadFromCPUStateOffset(Builder, LoadSize, EnvOffset + Offset);
+    return loadFromCPUStateOffset(Builder, LoadSize, LibTcgEnvOffset + Offset);
   }
 
   std::optional<llvm::StoreInst *> storeToEnvOffset(llvm::IRBuilder<> &Builder,
                                                     unsigned StoreSize,
                                                     unsigned Offset,
                                                     llvm::Value *ToStore) {
-    unsigned ActualOffset = EnvOffset + Offset;
+    unsigned ActualOffset = LibTcgEnvOffset + Offset;
     return storeToCPUStateOffset(Builder, StoreSize, ActualOffset, ToStore);
   }
 
@@ -190,9 +199,9 @@ private:
 
   llvm::StructType *CPUStateType;
   const llvm::DataLayout *ModuleLayout;
-  unsigned EnvOffset;
+  unsigned LibTcgEnvOffset;
+  uint8_t *LibTcgEnvPtr;
 
   llvm::GlobalVariable *Env;
   bool TargetIsLittleEndian;
-  uint8_t *LibTcgEnvAddress;
 };
