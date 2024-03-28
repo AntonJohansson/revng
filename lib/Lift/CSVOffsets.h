@@ -7,6 +7,7 @@
 #include <set>
 
 #include "revng/Support/Assert.h"
+#include "revng/Support/Debug.h"
 
 template<bool StaticallyEnabled>
 class Logger;
@@ -140,7 +141,11 @@ public:
   }
 
   void insert(int64_t O) { Offsets.insert(O); }
+
   void combine(const CSVOffsets &Other) {
+    if (Other.Offsets.size() == 0) {
+        dbg << "ZERO\n";
+    }
     Kind K0 = OffsetKind;
     Kind K1 = Other.OffsetKind;
     // For equal kinds just merge the offsets

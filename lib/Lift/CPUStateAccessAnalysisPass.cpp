@@ -698,8 +698,9 @@ public:
         // NOTE(anjo): We ignore undef values here to not
         // crash on switch statements with unreachable
         // branches.
-        if (isa<UndefValue>(OpUse))
+        if (isa<UndefValue>(OpUse)){
           continue;
+        }
         Sources.push_back(&OpUse);
       }
     } else {
@@ -764,6 +765,8 @@ public:
           const auto *FCall = dyn_cast<const CallInst>(RealCall);
           revng_log(CSVAccessLog,
                     "CallInst: " << FCall << " : " << dumpToString(FCall));
+
+          abort();
 
           if (FCall) {
             // If this call has already been decorated with LoadMDKind or
@@ -995,6 +998,10 @@ public:
     SrcCallSiteOffsetsPtrs.reserve(NumSrcs);
     NonRootOffsetsPtrs.reserve(NumSrcs);
     for (const Use *U : Item.sources()) {
+      errs() << "USE:  " << *(U->get()) << "\n";
+      errs() << "USER: " << *(U->getUser()) << "\n";
+      bool Found = OffsetMap.find(U->get()) != OffsetMap.end();
+      errs() << "FOUND: " << Found << "\n";
       const CallSiteOffsetMap &CallSiteOffsets = OffsetMap.at(U->get());
       revng_assert(not CallSiteOffsets.empty());
       const CSVOffsets *NonRootOffsets = nullptr;
@@ -1012,6 +1019,12 @@ public:
 
       // The order of iteration on NonRootOffsets is the same as the order
       // of iteration on Item.sources()
+      if (NonRootOffsets) {
+          errs() << "NONROOT: " << NonRootOffsets->isUnknown() << "\n";
+          for (auto &O : *NonRootOffsets) {
+              errs() << O << " \n";
+          }
+      }
       NonRootOffsetsPtrs.push_back(NonRootOffsets);
     }
     revng_assert(NumSrcs == SrcCallSiteOffsetsPtrs.size());
@@ -1104,12 +1117,19 @@ public:
         CSVOffsets::Kind ResKind;
         SmallVector<optional<CSVOffsets>, 4> UpdatedOffsetTuple(NumSrcs);
         revng_assert(not UpdatedOffsetTuple[0].has_value());
+
+    for (size_t O = 1; O < OffsetTuple.size(); O++) {
+      bool Unknown  = OffsetTuple[O]->isUnknown();
+      errs() << "OFFSETTUPBLE: " << O << ": " << Unknown << "\n";
+    }
+
         std::tie(Valid,
                  ResKind) = T::checkOffsetTupleIsValid(OffsetTuple,
                                                        I,
                                                        UpdatedOffsetTuple);
         revng_assert(UpdatedOffsetTuple.size() == OffsetTuple.size());
         if (not Valid) {
+          errs() << "ZERO? " << CSVOffsets(ResKind).size() << "\n";
           insertOrCombine(V, C, CSVOffsets(ResKind), OffsetMap);
           continue;
         }
@@ -1197,10 +1217,14 @@ private:
     }
 
     if (O0->isUnknown() or O1->isUnknown()) {
-      if (O0->isOnlyInPtr() or O1->isOnlyInPtr())
+      if (O0->isOnlyInPtr() or O1->isOnlyInPtr()) {
+        errs() << "OFFSET-VALID: 1\n";
         return { false, CSVOffsets::Kind::UnknownInPtr };
-      if (O0->isInOutPtr() or O1->isInOutPtr())
+      }
+      if (O0->isInOutPtr() or O1->isInOutPtr()) {
+        errs() << "OFFSET-VALID: 2\n";
         return { false, CSVOffsets::Kind::OutAndUnknownInPtr };
+      }
       return { false, CSVOffsets::Kind::Unknown };
     }
 
@@ -1208,10 +1232,14 @@ private:
       bool Num0 = O0->isNumeric();
       if (Num0 or O1->isNumeric()) {
         CSVOffsets::Kind ResKind = Num0 ? O1->getKind() : O0->getKind();
-        if (O0->isUnknownInPtr() or O1->isUnknownInPtr())
+        if (O0->isUnknownInPtr() or O1->isUnknownInPtr()) {
+          errs() << "OFFSET-VALID: 3\n";
           return { false, ResKind };
-        else
+        }
+        else {
+          errs() << "OFFSET-VALID: 4\n";
           return { true, ResKind };
+        }
       }
     }
     revng_abort();
@@ -1258,8 +1286,10 @@ private:
     revng_assert(NOperands > 1);
     CSVOffsets::Kind GEPOp0Kind = OffsetTuple[0]->getKind();
     if (CSVOffsets::isUnknownInPtr(GEPOp0Kind)
-        or CSVOffsets::isUnknown(GEPOp0Kind))
+        or CSVOffsets::isUnknown(GEPOp0Kind)) {
+        errs() << "GEP TUPLE VALID: 1\n";
       return { false, GEPOp0Kind };
+    }
 
     auto *GEP = cast<GetElementPtrInst>(I);
     Type *PointeeTy = GEP->getSourceElementType();
@@ -1312,6 +1342,7 @@ private:
                   if (IdxIt + 1 != IdxEnd) {
                     // I cannot fold structs with unknown index.
                     // Early exit.
+                      errs() << "GEP TUPLE VALID: 2\n";
                     return { false, CSVOffsets::makeUnknown(GEPOp0Kind) };
                   } else {
                     revng_assert(not LastTypeOffsets.empty());
@@ -1361,8 +1392,10 @@ private:
 
     for (size_t O = 1; O < NOperands; O++) {
       revng_assert(not OffsetTuple[O]->isPtr());
-      if (OffsetTuple[O]->isUnknown())
+      if (OffsetTuple[O]->isUnknown()) {
+          errs() << "GEP TUPLE VALID: 3\n";
         return { false, CSVOffsets::makeUnknown(GEPOp0Kind) };
+      }
     }
     return { true, GEPOp0Kind };
   }
@@ -2346,6 +2379,7 @@ void CPUSAOA::computeAggregatedOffsets() {
         }
         // Finally insert them or combine them
         CallSiteOffsetMap::iterator CallOffsetIt;
+
         std::tie(CallOffsetIt,
                  Inserted) = CallSiteOffsets.insert({ Call, *New });
         if (not Inserted)
@@ -2353,6 +2387,11 @@ void CPUSAOA::computeAggregatedOffsets() {
       }
     }
   }
+
+  for (auto const &[k,v] : CallSiteOffsets) {
+      errs() << "AFTER: " << *k << " - " << v.size() << "\n";
+  }
+
 }
 
 bool CPUSAOA::run() {
@@ -2383,6 +2422,8 @@ bool CPUSAOA::run() {
     TaintLog << "== Stores ==\n";
     for (Instruction *LoadOrStore : TaintedAccesses.TaintedStores) {
       TaintLog << "INSTRUCTION: " << LoadOrStore << DoLog;
+      TaintLog << "NAME: " << cast<Function>(LoadOrStore->getParent()->getParent())->getName() << DoLog;
+      TaintLog << "POINTER: " << dumpToString(LoadOrStore->getOperand(1)) << DoLog;
       TaintLog << dumpToString(LoadOrStore) << DoLog;
       TaintLog.indent(4);
       for (const auto &CSO : StoreCallSiteOffsets.at(LoadOrStore)) {
@@ -3249,6 +3290,7 @@ bool CPUStateAccessAnalysis::run() {
                                       CallSiteLoadOffset,
                                       CallSiteStoreOffset);
   bool Found = AccessOffsetAnalysis.run();
+
 
   if (Found) {
     QuickMetadata QMD(M.getContext());

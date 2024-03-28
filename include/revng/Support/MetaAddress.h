@@ -66,7 +66,10 @@ enum Values : uint16_t {
   Code_aarch64,
 
   /// The address of a z/Architecture (s390x) basic block
-  Code_systemz
+  Code_systemz,
+
+  /// The address of a hexagon basic block
+  Code_hexagon
 };
 
 inline constexpr bool isValid(Values V) {
@@ -82,6 +85,7 @@ inline constexpr bool isValid(Values V) {
   case Code_arm_thumb:
   case Code_aarch64:
   case Code_systemz:
+  case Code_hexagon:
     return true;
   default:
     return false;
@@ -112,6 +116,8 @@ inline constexpr const char *toString(Values V) {
     return "Code_aarch64";
   case Code_systemz:
     return "Code_systemz";
+  case Code_hexagon:
+    return "Code_hexagon";
   }
 
   revng_abort();
@@ -138,6 +144,8 @@ inline constexpr Values fromString(llvm::StringRef String) {
     return Code_aarch64;
   } else if (String == "Code_systemz") {
     return Code_systemz;
+  } else if (String == "Code_hexagon") {
+    return Code_hexagon;
   } else {
     return Invalid;
   }
@@ -162,6 +170,8 @@ inline constexpr const std::optional<llvm::Triple::ArchType> arch(Values V) {
     return { llvm::Triple::aarch64 };
   case Code_systemz:
     return { llvm::Triple::systemz };
+  case Code_hexagon:
+    return { llvm::Triple::hexagon };
   case Invalid:
   case Generic32:
   case Generic64:
@@ -178,6 +188,7 @@ inline constexpr Values genericFromArch(llvm::Triple::ArchType Arch) {
   case llvm::Triple::arm:
   case llvm::Triple::mips:
   case llvm::Triple::mipsel:
+  case llvm::Triple::hexagon:
     return Generic32;
   case llvm::Triple::x86_64:
   case llvm::Triple::aarch64:
@@ -205,6 +216,7 @@ inline constexpr Values toGeneric(Values Type) {
   case Code_mips:
   case Code_mipsel:
   case Code_arm:
+  case Code_hexagon:
     return Generic32;
 
   case Code_x86_64:
@@ -233,6 +245,8 @@ inline constexpr Values defaultCodeFromArch(llvm::Triple::ArchType Arch) {
     return Code_aarch64;
   case llvm::Triple::systemz:
     return Code_systemz;
+  case llvm::Triple::hexagon:
+    return Code_hexagon;
   default:
     revng_abort("Unsupported architecture");
   }
@@ -257,6 +271,7 @@ inline constexpr unsigned alignment(Values Type) {
   case Code_mipsel:
   case Code_arm:
   case Code_aarch64:
+  case Code_hexagon: // TODO(anjo):
     return 4;
   }
 
@@ -274,6 +289,7 @@ inline constexpr unsigned bitSize(Values Type) {
   case Code_mips:
   case Code_mipsel:
   case Code_arm:
+  case Code_hexagon:
     return 32;
   case Generic64:
   case Code_x86_64:
@@ -309,6 +325,7 @@ inline constexpr bool isCode(Values Type) {
   case Code_x86_64:
   case Code_systemz:
   case Code_aarch64:
+  case Code_hexagon:
     return true;
   }
 
@@ -332,6 +349,8 @@ inline constexpr bool isCode(Values Type, llvm::Triple::ArchType Arch) {
     return Type == Code_aarch64;
   case llvm::Triple::systemz:
     return Type == Code_systemz;
+  case llvm::Triple::hexagon:
+    return Type == Code_hexagon;
   default:
     revng_abort("Unsupported architecture");
   }
@@ -351,6 +370,7 @@ inline constexpr bool isGeneric(Values Type) {
   case Code_x86_64:
   case Code_systemz:
   case Code_aarch64:
+  case Code_hexagon:
     return false;
 
   case Generic32:
@@ -370,6 +390,7 @@ inline constexpr bool isDefaultCode(Values Type) {
   case Code_x86_64:
   case Code_systemz:
   case Code_aarch64:
+  case Code_hexagon:
     return true;
 
   case Invalid:
@@ -396,6 +417,7 @@ inline constexpr llvm::StringRef getLLVMCPUFeatures(Values Type) {
   case Code_x86_64:
   case Code_systemz:
   case Code_aarch64:
+  case Code_hexagon:
     return "";
   }
 
@@ -775,6 +797,7 @@ public:
     case MetaAddressType::Code_mipsel:
     case MetaAddressType::Code_arm:
     case MetaAddressType::Code_aarch64:
+    case MetaAddressType::Code_hexagon:
       return Address;
 
     case MetaAddressType::Generic32:
@@ -884,7 +907,7 @@ private:
       return *this == invalid();
     }
 
-    if (static_cast<uint16_t>(Type) > MetaAddressType::Code_systemz)
+    if (static_cast<uint16_t>(Type) > MetaAddressType::Code_hexagon)
       return false;
 
     // Check alignment

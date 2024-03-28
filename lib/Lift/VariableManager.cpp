@@ -411,7 +411,7 @@ void VariableManager::finalize() {
 
       // Add the case to the switch
       // TODO(anjo): TMP
-      Switch->addCase(Builder.getInt32(0), SetRegisterBB);
+      Switch->addCase(Builder.getInt32(P.first), SetRegisterBB);
     }
   }
 
@@ -531,7 +531,7 @@ VariableManager::getOrCreate(LibTcgArgument *Arg, bool Reading) {
   switch (Arg->kind) {
   case LIBTCG_ARG_TEMP:
     switch (Arg->temp->kind) {
-    case LIBTCG_TEMP_NORMAL: {
+    case LIBTCG_TEMP_TB: {
       auto It = Temporaries.find(Arg->temp);
       if (It != Temporaries.end()) {
         return { false, It->second };
@@ -546,7 +546,7 @@ VariableManager::getOrCreate(LibTcgArgument *Arg, bool Reading) {
         return { true, NewTemporary };
       }
     };
-    case LIBTCG_TEMP_LOCAL: {
+    case LIBTCG_TEMP_EBB: {
       // TODO(anjo): CONTHERE We want to map tempraries to LLVM values,
       // make sure temporaries are pointer stable and unique or whatever
       // We are currently translating this code and InstructionTranslator!
@@ -567,6 +567,7 @@ VariableManager::getOrCreate(LibTcgArgument *Arg, bool Reading) {
     };
     case LIBTCG_TEMP_FIXED: {
       // TODO(anjo): Is this path actually taken? When is env used as an arg?
+      errs() << "NAME: " << Arg->temp->name << "\n";
       revng_assert(std::string(Arg->temp->name) == "env");
       revng_assert(Env != nullptr);
       return { false, Env };

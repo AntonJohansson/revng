@@ -438,10 +438,6 @@ bool CpuLoopExitPass::runOnModule(llvm::Module &M) {
   if (CpuLoopExit == nullptr)
     return false;
 
-  for (User *U : CpuLoopExit->users()) {
-    errs() << U << "    " << *U << "\n";
-  }
-
   revng_assert(VM->hasEnv());
 
   purgeNoReturn(CpuLoopExit);
@@ -621,9 +617,10 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg,
   for (auto Name : AbortFunctionNames) {
     Function *TheFunction = HelpersModule->getFunction(Name);
     if (TheFunction != nullptr) {
-      revng_assert(HelpersModule->getFunction("abort") != nullptr);
+      auto *Abort = HelpersModule->getFunction("abort");
+      revng_assert(Abort != nullptr);
       BasicBlock *NewBody = replaceFunction(TheFunction);
-      CallInst::Create(HelpersModule->getFunction("abort"), {}, NewBody);
+      CallInst::Create(Abort, {}, NewBody);
       new UnreachableInst(Context, NewBody);
     }
   }
@@ -699,12 +696,12 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg,
 
   {
     legacy::PassManager PM;
-    // TODO(anjo): There is something weird going on with this pass,
-    // it crashes but only occasionally
-    // CONTHERE: Still have this problem
     PM.add(new CpuLoopExitPass(&Variables));
     PM.run(*TheModule);
   }
+
+  //errs() << "MODULE:\n";
+  //errs() << *TheModule << "\n";
 
   std::set<Function *> CpuLoopExitingUsers;
   GlobalVariable *CpuLoopExiting =
@@ -831,7 +828,6 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg,
   size_t OffsetInSegment = 0;
 
   std::tie(VirtualAddress, Entry) = JumpTargets.peek();
-  errs() << "VA: " << VirtualAddress.address() << "\n";
 
   for (auto &[Segment, SegmentData] : RawBinary.segments()) {
     if (!Segment.IsExecutable())
@@ -873,10 +869,6 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg,
         OffsetInSegment = 0;
         continue;
       }
-
-      // ConsumedSize = ptc.translate(VirtualAddress.address(),
-      //                              Type,
-      //                              InstructionList.get());
 
       errs() << "\n\n--------------------------------------\n";
       errs() << "Attempting to translate a segment\n";
@@ -982,9 +974,6 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg,
         J++;
       }
 
-      // CONTHERE(anjo): Do we need exit_tb or no?, otherwise keep translating
-      // heer Also uncomment the above
-
       // TODO: shall we move this whole loop in InstructionTranslator?
       for (; J < InstructionCount && !StopTranslation; J++) {
         if (ToIgnore.count(J) != 0)
@@ -1016,19 +1005,9 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg,
                                         VirtualAddress, EndPC, false);
         } break;
         case LIBTCG_op_call: {
+          // TODO(anjo): Move to default
           Result = Translator.translateCall(Instruction);
-          revng_assert(Result == IT::Success);
-
-          // Sometimes libtinycode terminates a basic block with a call, in this
-          // case force a fallthrough
-          if (J == NewInstructionList.instruction_count - 1) {
-            BasicBlock *Target =
-                JumpTargets.registerJT(EndPC, JTReason::PostHelper);
-            Builder.CreateBr(notNull(Target));
-          }
-
         } break;
-
         default:
           Result = Translator.translate(Instruction, PC, NextPC);
           break;
@@ -1078,13 +1057,13 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg,
       TranslateTask.advance("Finalization", true);
       LibTcg.instruction_list_destroy(LibTcgContext, NewInstructionList);
 
-      errs() << *MainFunction << "\n";
-      errs() << "////////////\n";
+      //errs() << *MainFunction << "\n";
+      //errs() << "////////////\n";
 
       // We might have a leftover block, probably due to the block created after
       // the last call to exit_tb
       auto *LastBlock = Builder.GetInsertBlock();
-      errs() << *LastBlock << "\n";
+      //errs() << *LastBlock << "\n";
       if (LastBlock->empty()) {
         eraseFromParent(LastBlock);
       } else if (!LastBlock->rbegin()->isTerminator()) {
