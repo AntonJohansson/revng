@@ -362,8 +362,18 @@ Function *RootAnalyzer::createTemporaryRoot(Function *TheFunction,
 
   // Detach all the unreachable basic blocks, so they don't get copied
   llvm::DenseSet<BasicBlock *> UnreachableBBs = JTM.computeUnreachable();
-  for (BasicBlock *UnreachableBB : UnreachableBBs)
+  for (BasicBlock *UnreachableBB : UnreachableBBs) {
     UnreachableBB->removeFromParent();
+  }
+
+  for (auto &BB : *TheFunction) {
+    auto T = BB.getTerminator();
+    if (T == nullptr) {
+      errs() << "-------------\n";
+      errs() << BB << "\n";
+      errs() << "HASTERM: " << (int)(T != nullptr) << "\n";
+    }
+  }
 
   // Clone the function
   OptimizedFunction = CloneFunction(TheFunction, OldToNew);

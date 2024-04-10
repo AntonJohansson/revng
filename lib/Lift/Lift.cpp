@@ -6,6 +6,7 @@
 
 #include "revng/Lift/Lift.h"
 #include "revng/Support/ResourceFinder.h"
+#include "revng/Support/Debug.h"
 
 #include "CodeGenerator.h"
 #include "qemu/libtcg/libtcg.h"
@@ -74,7 +75,7 @@ bool LiftPass::runOnModule(llvm::Module &M) {
 
   // Look for the library in the system's paths
   T.advance("dlopen libtcg", false);
-  void *LibraryHandle = dlopen(Paths.LibTcg.c_str(), RTLD_LAZY | RTLD_NODELETE);
+  void *LibraryHandle = dlopen(Paths.LibTcg.c_str(), RTLD_LAZY);
   if (LibraryHandle == nullptr) {
     fprintf(stderr, "Couldn't load the libtcg library: %s\n", dlerror());
     return EXIT_FAILURE;

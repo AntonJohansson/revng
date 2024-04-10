@@ -65,11 +65,11 @@ using std::make_pair;
 using std::string;
 
 // Register all the arguments
-static cl::opt<bool> RecordPTC("record-ptc",
-                               cl::desc("create metadata for PTC"),
+static cl::opt<bool> RecordTCG("record-tcg",
+                               cl::desc("create metadata for TCG"),
                                cl::cat(MainCategory));
 
-static Logger<> PTCLog("ptc");
+static Logger<> LibTcgLog("libtcg");
 static Logger<> Log("lift");
 
 template <typename T, typename... ArgTypes>
@@ -250,6 +250,8 @@ static void replaceFunctionWithRet(Function *ToReplace, uint64_t Result) {
   }
 
   ReturnInst::Create(ToReplace->getParent()->getContext(), ResultValue, Body);
+  errs() << "RET\n";
+  errs() << *Body << "\n";
 }
 
 class CpuLoopFunctionPass : public llvm::ModulePass {
@@ -413,6 +415,7 @@ static ReturnInst *createRet(Instruction *Position) {
     auto *Null = Constant::getNullValue(ReturnType);
     return ReturnInst::Create(F->getParent()->getContext(), Null, Position);
   } else {
+    errs() << "RETURNTYPE: " << *ReturnType << "\n";
     revng_abort("Return type not supported");
   }
 
@@ -432,8 +435,29 @@ static ReturnInst *createRet(Instruction *Position) {
 /// the call.
 bool CpuLoopExitPass::runOnModule(llvm::Module &M) {
   LLVMContext &Context = M.getContext();
-  Function *CpuLoopExit = M.getFunction("cpu_loop_exit");
+  Function *CpuLoopExitRestore = M.getFunction("cpu_loop_exit_restore");
 
+
+  // Replace uses of cpu_loop_exit_restore with cpu_loop_exit, some targets
+  // e.g. mips only use cpu_loop_exit_restore
+  if (CpuLoopExitRestore != nullptr) {
+    Function *CpuLoopExit = cast<Function>(M.getOrInsertFunction("cpu_loop_exit", Type::getVoidTy(Context), CpuLoopExitRestore->getArg(0)->getType()).getCallee());
+    SmallVector<Value *, 8> ToErase;
+    for (User *U : CpuLoopExitRestore->users()) {
+      auto *Call = cast<CallInst>(U);
+      Value *CpuStateArg = Call->getArgOperand(0);
+      IRBuilder<> Builder(Call);
+      Value *NewCall = Builder.CreateCall(CpuLoopExit, {CpuStateArg});
+      Call->replaceAllUsesWith(NewCall);
+      ToErase.push_back(Call);
+    }
+
+    for (auto &V : ToErase) {
+      eraseFromParent(V);
+    }
+  }
+
+  Function *CpuLoopExit = M.getFunction("cpu_loop_exit");
   // Nothing to do here
   if (CpuLoopExit == nullptr)
     return false;
@@ -507,8 +531,6 @@ bool CpuLoopExitPass::runOnModule(llvm::Module &M) {
           } else if (auto *Store = dyn_cast<Constant>(RecUser)) {
             continue;
           } else {
-            errs() << F->getName() << "\n";
-            errs() << *(RecUser) << "\n";
             revng_assert(false, "Unexpected user");
           }
         }
@@ -571,6 +593,18 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg,
     FunctionTags::Exceptional.addTo(Abort);
   }
 
+  // tcg_allowed is a global in qemu defined in accel/tcg/... indicating
+  // wheter or not TCG is used as a backend or not. Some helpers/code may
+  // branch on this global. As we do not include accel/tcg/... code in the
+  // helpers module we get an undefined reference during linking.
+  //
+  // Here we set the constant to 1 to avoid undefined refnerences but also
+  // ensure all code correctly assumes we are using TCG.
+  if (auto *TcgAllowed = HelpersModule->getGlobalVariable("tcg_allowed")) {
+      auto *Uint8Ty = Type::getInt8Ty(Context);
+      TcgAllowed->setInitializer(ConstantInt::get(Uint8Ty, 1));
+  }
+
   // Prepare the helper modules by transforming the cpu_loop function and
   // running SROA
   T.advance("Prepare helpers module", true);
@@ -600,9 +634,32 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg,
       "mmap_lock", "mmap_unlock", "pthread_cond_broadcast",
       "pthread_mutex_unlock", "pthread_mutex_lock", "pthread_cond_wait",
       "pthread_cond_signal", "process_pending_signals", "qemu_log_mask",
-      "qemu_thread_atexit_init", "start_exclusive");
-  for (auto Name : NoOpFunctionNames)
+      "qemu_log", "qemu_loglevel_mask", "qemu_thread_atexit_init",
+      "_nocheck__trace_user_do_sigreturn",
+      "_nocheck__trace_user_do_rt_sigreturn",
+      "start_exclusive");
+  for (auto Name : NoOpFunctionNames) {
+    errs() << "Name: " << Name << " " << HelpersModule->getFunction(Name) << "\n";;
     replaceFunctionWithRet(HelpersModule->getFunction(Name), 0);
+    auto *F = HelpersModule->getFunction(Name);
+    if (F) {
+      errs() << *F << "\n";
+    }
+  }
+
+  {
+    auto *F = HelpersModule->getFunction("qemu_log");
+    if (F) {
+      SmallVector<Value *, 8> ToErase;
+      for (auto *U : F->users()) {
+        auto *Call = cast<CallInst>(U);
+        ToErase.push_back(Call);
+      }
+      for (auto *V : ToErase) {
+        eraseFromParent(V);
+      }
+    }
+  }
 
   // Transform in abort
 
@@ -612,6 +669,7 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg,
       "cpu_restore_state", "cpu_mips_exec", "gdb_handlesig", "queue_signal",
       // syscall.c
       "do_ioctl_dm", "print_syscall", "print_syscall_ret",
+      "safe_syscall_base",
       // ARM cpu_loop
       "cpu_abort", "do_arm_semihosting", "EmulateAll");
   for (auto Name : AbortFunctionNames) {
@@ -699,9 +757,6 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg,
     PM.add(new CpuLoopExitPass(&Variables));
     PM.run(*TheModule);
   }
-
-  //errs() << "MODULE:\n";
-  //errs() << *TheModule << "\n";
 
   std::set<Function *> CpuLoopExitingUsers;
   GlobalVariable *CpuLoopExiting =
@@ -825,261 +880,207 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg,
   InstructionTranslator Translator(LibTcg, Builder, Variables, JumpTargets,
                                    Blocks, EndianessMismatch, PCH.get());
 
-  size_t OffsetInSegment = 0;
-
   std::tie(VirtualAddress, Entry) = JumpTargets.peek();
 
-  for (auto &[Segment, SegmentData] : RawBinary.segments()) {
-    if (!Segment.IsExecutable())
-      continue;
-    while (Entry != nullptr) {
-      LiftTask.advance(VirtualAddress.toString(), true);
+  model::Segment Segment;
+  llvm::ArrayRef<uint8_t> SegmentData;
+  auto MaybeData = RawBinary.getExecutableSegmentFromAddress(VirtualAddress);
+  revng_assert(MaybeData);
+  std::tie(Segment, SegmentData) = *MaybeData;
 
-      Task TranslateTask(3, "Translate");
-      TranslateTask.advance("Lift to PTC", true);
+  while (Entry != nullptr) {
 
-      Builder.SetInsertPoint(Entry);
+    // Make sure VirtualAddress points to an executable segment, otherwise
+    // look it up
+    if (!Segment.contains(VirtualAddress)) {
+      auto MaybeData = RawBinary.getExecutableSegmentFromAddress(VirtualAddress);
+      revng_assert(MaybeData);
+      std::tie(Segment, SegmentData) = *MaybeData;
+    }
 
-      // TODO: what if create a new instance of an InstructionTranslator here?
-      // Translator.reset();
+    LiftTask.advance(VirtualAddress.toString(), true);
 
-      // TODO: rename this type
-      size_t ConsumedSize = 0;
+    Task TranslateTask(3, "Translate");
+    TranslateTask.advance("Lift to PTC", true);
 
-      //
-      // TODO(anjo): We don't handle THUMB in libtcg yet!
-      //
-      // PTCCodeType Type = PTC_CODE_REGULAR;
-      uint32_t TranslateFlags = 0;
+    Builder.SetInsertPoint(Entry);
 
-      switch (VirtualAddress.type()) {
-      case MetaAddressType::Invalid:
-        revng_abort();
+    // TODO: what if create a new instance of an InstructionTranslator here?
+    Translator.reset();
 
-      case MetaAddressType::Code_arm_thumb:
-        TranslateFlags |= LIBTCG_TRANSLATE_ARM_THUMB;
-        break;
+    uint32_t TranslateFlags = 0;
+    if (VirtualAddress.type() ==  MetaAddressType::Code_arm_thumb) {
+      TranslateFlags |= LIBTCG_TRANSLATE_ARM_THUMB;
+    }
 
-      default:
-        TranslateFlags = 0;
-        break;
-      }
+    size_t Offset = (VirtualAddress.address()
+                     - Segment.startAddress().address());
+    if (Offset >= SegmentData.size()) {
+      revng_abort();
+      break;
+    }
+    auto NewInstructionList =
+      LibTcg.translate(LibTcgContext, SegmentData.data(),
+                       Segment.startAddress().address(),
+                       SegmentData.size(),
+                       VirtualAddress.address(),
+                       TranslateFlags);
 
-      if (OffsetInSegment >= Segment.size()) {
-        OffsetInSegment = 0;
-        continue;
-      }
+    // TODO: rename this type
+    const size_t ConsumedSize = NewInstructionList.size_in_bytes;
+    revng_assert(ConsumedSize > 0);
 
-      errs() << "\n\n--------------------------------------\n";
-      errs() << "Attempting to translate a segment\n";
-      errs() << "  at:   " << SegmentData.data() << "\n";
-      errs() << "  size: " << SegmentData.size() << "\n";
-      errs() << "  addr: " << Segment.startAddress().address() << "\n";
+    SmallSet<unsigned, 1> ToIgnore;
+    // Handles writes to btarget, represents branching for microblaze/mips/cris
+    ToIgnore = Translator.preprocess(NewInstructionList);
 
-      // TODO(anjo): We are not using Type here
-      // TODO(anjo): Should obv use VirtualAddress here
-      // TODO(anjo): CONTHERE, I think we're reading garbage at the offset we're
-      // at in the binary for some reason. We end up decoding a jump and end up
-      // OOB. Offset 0x245 works for some reason, but not using the
-      // VirutalAddress.
-      //
-      // How does the code that gets the VirtualAddress work? Has something
-      // changed there?
-      //
-      // The model entrypoint is correct, so what's going on with
-      // VirtualAddress?
-      size_t Offset =
-          (VirtualAddress.address() - Segment.startAddress().address());
-      if (Offset >= SegmentData.size()) {
-        assert(false);
-        break;
-      }
-      errs() << "  offset: " << Offset << "\n";
-      errs() << "  va: " << VirtualAddress.address() << "\n";
-      errs() << "  entry: " << Model->EntryPoint().address() << "\n";
-      errs() << "--------------------------------------\n";
-      auto NewInstructionList =
-          LibTcg.translate(LibTcgContext, SegmentData.data() + Offset,
-                           SegmentData.size() - Offset,
-                           VirtualAddress.address(), TranslateFlags);
-      errs() << "--------------------------------------\n";
-      errs() << ((uint32_t *)(SegmentData.data() + Offset))[0] << "\n";
-      errs() << "--------------------------------------\n";
-
-      errs() << "[DUMPBUF]-----------------------------------------------------"
-                "----\n";
-      char DumpBuf[256] = {0};
+    if (LibTcgLog.isEnabled()) {
+      static std::array<char, 128> DumpBuf{0};
+      LibTcgLog << "[Translation starting from "
+                << std::hex << VirtualAddress.address() << "]\n";
       for (size_t I = 0; I < NewInstructionList.instruction_count; ++I) {
-        LibTcg.dump_instruction_to_buffer(&NewInstructionList.list[I], DumpBuf,
-                                          256);
-        // puts(DumpBuf);
-        errs() << DumpBuf << "\n";
+        LibTcg.dump_instruction_to_buffer(&NewInstructionList.list[I],
+                                          DumpBuf.data(),
+                                          DumpBuf.size());
+        LibTcgLog << DumpBuf.data() << DoLog;
       }
-      errs() << "---------------------------------------------------------\n";
+    }
 
-      ConsumedSize = NewInstructionList.size_in_bytes;
-      OffsetInSegment += ConsumedSize;
+    Variables.newTranslationBlock(&NewInstructionList);
+    MDNode *MDOriginalInstr = nullptr;
+    bool StopTranslation = false;
 
-      if (ConsumedSize == 0) {
-        revng_abort();
+    MetaAddress PC = VirtualAddress;
+    MetaAddress NextPC = MetaAddress::invalid();
+    MetaAddress EndPC = VirtualAddress + ConsumedSize;
+
+    const auto InstructionCount = NewInstructionList.instruction_count;
+    using IT = InstructionTranslator;
+    IT::TranslationResult Result;
+
+    unsigned J = 0;
+
+    // Handle the first LIBTCG_op_insn_start
+    {
+      LibTcgInstruction *NextInstruction = nullptr;
+      for (unsigned K = 1; K < InstructionCount; K++) {
+        LibTcgInstruction *I = &NewInstructionList.list[K];
+        if (I->opcode == LIBTCG_op_insn_start && ToIgnore.count(K) == 0) {
+          NextInstruction = I;
+          break;
+        }
       }
+      LibTcgInstruction *Instruction = &NewInstructionList.list[J];
+      std::tie(Result, MDOriginalInstr, PC, NextPC) =
+        Translator.newInstruction(Instruction, NextInstruction,
+                                  VirtualAddress, EndPC, true);
+      J++;
+    }
 
-      //// Check whether we ended up in an unmapped page
-      // MetaAddress AbortAt = MetaAddress::invalid();
-      // MetaAddress LastByte = VirtualAddress.toGeneric() + (ConsumedSize - 1);
-      // if (VirtualAddress.pageStart() != LastByte.pageStart()) {
-      //   MetaAddress NextPage = VirtualAddress.nextPageStart();
-      //   if (NoMoreCodeBoundaries.count(NextPage) != 0)
-      //     AbortAt = NextPage;
-      // }
+    // TODO: shall we move this whole loop in InstructionTranslator?
+    for (; J < InstructionCount && !StopTranslation; J++) {
+      if (ToIgnore.count(J) != 0)
+        continue;
 
-      SmallSet<unsigned, 1> ToIgnore;
-      // TODO(anjo): What is "btarget"
-      // ToIgnore = Translator.preprocess(InstructionList.get());
+      LibTcgInstruction *Instruction = &NewInstructionList.list[J];
+      auto Opcode = Instruction->opcode;
 
-      // if (PTCLog.isEnabled()) {
-      //   std::stringstream Stream;
-      //   dumpTranslation(VirtualAddress, Stream, InstructionList.get());
-      //   PTCLog << Stream.str() << DoLog;
-      // }
+      Blocks.clear();
+      Blocks.push_back(Builder.GetInsertBlock());
 
-      Variables.newFunction(&NewInstructionList);
-      MDNode *MDOriginalInstr = nullptr;
-      bool StopTranslation = false;
-
-      MetaAddress PC = VirtualAddress;
-      MetaAddress NextPC = MetaAddress::invalid();
-      MetaAddress EndPC = VirtualAddress + ConsumedSize;
-
-      const auto InstructionCount = NewInstructionList.instruction_count;
-      using IT = InstructionTranslator;
-      IT::TranslationResult Result;
-
-      unsigned J = 0;
-
-      // Handle the first LIBTCG_op_insn_start
-      {
+      switch (Opcode) {
+      case LIBTCG_op_discard:
+        // Instructions we don't even consider
+        break;
+      case LIBTCG_op_insn_start: {
+        // Find next instruction, if there is one
         LibTcgInstruction *NextInstruction = nullptr;
-        for (unsigned K = 1; K < InstructionCount; K++) {
+        for (unsigned K = J + 1; K < InstructionCount; K++) {
           LibTcgInstruction *I = &NewInstructionList.list[K];
           if (I->opcode == LIBTCG_op_insn_start && ToIgnore.count(K) == 0) {
             NextInstruction = I;
             break;
           }
         }
-        LibTcgInstruction *Instruction = &NewInstructionList.list[J];
+
         std::tie(Result, MDOriginalInstr, PC, NextPC) =
-            Translator.newInstruction(Instruction, NextInstruction,
-                                      VirtualAddress, EndPC, true);
-        J++;
+          Translator.newInstruction(Instruction, NextInstruction,
+                                    VirtualAddress, EndPC, false);
+      } break;
+      case LIBTCG_op_call: {
+        // TODO(anjo): Move to default
+        Result = Translator.translateCall(Instruction);
+      } break;
+      default:
+        Result = Translator.translate(Instruction, PC, NextPC);
+        break;
       }
 
-      // TODO: shall we move this whole loop in InstructionTranslator?
-      for (; J < InstructionCount && !StopTranslation; J++) {
-        if (ToIgnore.count(J) != 0)
-          continue;
-
-        LibTcgInstruction *Instruction = &NewInstructionList.list[J];
-        auto Opcode = Instruction->opcode;
-
-        Blocks.clear();
-        Blocks.push_back(Builder.GetInsertBlock());
-
-        switch (Opcode) {
-        case LIBTCG_op_discard:
-          // Instructions we don't even consider
-          break;
-        case LIBTCG_op_insn_start: {
-          // Find next instruction, if there is one
-          LibTcgInstruction *NextInstruction = nullptr;
-          for (unsigned K = J + 1; K < InstructionCount; K++) {
-            LibTcgInstruction *I = &NewInstructionList.list[K];
-            if (I->opcode == LIBTCG_op_insn_start && ToIgnore.count(K) == 0) {
-              NextInstruction = I;
-              break;
-            }
-          }
-
-          std::tie(Result, MDOriginalInstr, PC, NextPC) =
-              Translator.newInstruction(Instruction, NextInstruction,
-                                        VirtualAddress, EndPC, false);
-        } break;
-        case LIBTCG_op_call: {
-          // TODO(anjo): Move to default
-          Result = Translator.translateCall(Instruction);
-        } break;
-        default:
-          Result = Translator.translate(Instruction, PC, NextPC);
-          break;
-        }
-
-        switch (Result) {
-        case IT::Success:
-          // No-op
-          break;
-        case IT::Abort:
-          Builder.CreateCall(AbortFunction);
-          Builder.CreateUnreachable();
-          StopTranslation = true;
-          break;
-        case IT::Stop:
-          StopTranslation = true;
-          break;
-        }
-
-        // Create a new metadata referencing the PTC instruction we have just
-        // translated
-        MDNode *MDLibTcgInstr = nullptr;
-        if (RecordPTC) {
-          char DumpBuf[256] = {0};
-          LibTcg.dump_instruction_to_buffer(&NewInstructionList.list[J],
-                                            DumpBuf, 256);
-
-          std::string LibTcgString = std::string(DumpBuf, 256) + "\n";
-          MDString *MDLibTcgString = MDString::get(Context, LibTcgString);
-          MDLibTcgInstr = MDNode::getDistinct(Context, MDLibTcgString);
-        }
-
-        // Set metadata for all the new instructions
-        for (BasicBlock *Block : Blocks) {
-          BasicBlock::iterator I = Block->end();
-          while (I != Block->begin() && !(--I)->hasMetadata()) {
-            if (MDOriginalInstr != nullptr)
-              I->setMetadata(OriginalInstrMDKind, MDOriginalInstr);
-            if (MDLibTcgInstr != nullptr)
-              I->setMetadata(LibTcgInstrMDKind, MDLibTcgInstr);
-          }
-        }
-
-      } // End loop over instructions
-
-      TranslateTask.complete();
-      TranslateTask.advance("Finalization", true);
-      LibTcg.instruction_list_destroy(LibTcgContext, NewInstructionList);
-
-      //errs() << *MainFunction << "\n";
-      //errs() << "////////////\n";
-
-      // We might have a leftover block, probably due to the block created after
-      // the last call to exit_tb
-      auto *LastBlock = Builder.GetInsertBlock();
-      //errs() << *LastBlock << "\n";
-      if (LastBlock->empty()) {
-        eraseFromParent(LastBlock);
-      } else if (!LastBlock->rbegin()->isTerminator()) {
-        // Something went wrong, probably a mistranslation
-        errs() << *LastBlock->rbegin() << "\n";
-        errs() << "MISTRANSLATION??\n";
+      switch (Result) {
+      case IT::Success:
+        // No-op
+        break;
+      case IT::Abort:
+        Builder.CreateCall(AbortFunction);
         Builder.CreateUnreachable();
+        StopTranslation = true;
+        break;
+      case IT::Stop:
+        StopTranslation = true;
+        break;
       }
 
-      Translator.registerDirectJumps();
-      // Obtain a new program counter to translate
-      TranslateTask.complete();
-      LiftTask.advance("Peek new address", true);
-      std::tie(VirtualAddress, Entry) = JumpTargets.peek();
-    } // End translations loop
-  }
+      // Create a new metadata referencing the TCG instruction we have just
+      // translated
+      MDNode *MDLibTcgInstr = nullptr;
+      if (RecordTCG) {
+        static std::array<char, 128> DumpBuf{0};
+        LibTcg.dump_instruction_to_buffer(&NewInstructionList.list[J],
+                                          DumpBuf.data(), DumpBuf.size());
+
+        // Eh not very nice to strlen in construction of the StringRef,
+        // maybe we can get the length from the LibTcg call above?
+        StringRef Str{DumpBuf.data()};
+        MDString *MDLibTcgString = MDString::get(Context, Str);
+        MDLibTcgInstr = MDNode::getDistinct(Context, MDLibTcgString);
+      }
+
+      // Set metadata for all the new instructions
+      for (BasicBlock *Block : Blocks) {
+        BasicBlock::iterator I = Block->end();
+        while (I != Block->begin() && !(--I)->hasMetadata()) {
+          if (MDOriginalInstr != nullptr)
+            I->setMetadata(OriginalInstrMDKind, MDOriginalInstr);
+          if (MDLibTcgInstr != nullptr)
+            I->setMetadata(LibTcgInstrMDKind, MDLibTcgInstr);
+        }
+      }
+
+    } // End loop over instructions
+
+    TranslateTask.complete();
+    TranslateTask.advance("Finalization", true);
+    LibTcg.instruction_list_destroy(LibTcgContext, NewInstructionList);
+
+    // We might have a leftover block, probably due to the block created after
+    // the last call to exit_tb
+    auto *LastBlock = Builder.GetInsertBlock();
+    //errs() << *LastBlock << "\n";
+    if (LastBlock->empty()) {
+      eraseFromParent(LastBlock);
+    } else if (!LastBlock->rbegin()->isTerminator()) {
+      // Something went wrong, probably a mistranslation
+      errs() << *LastBlock->rbegin() << "\n";
+      errs() << "MISTRANSLATION??\n";
+      Builder.CreateUnreachable();
+    }
+
+    Translator.registerDirectJumps();
+    // Obtain a new program counter to translate
+    TranslateTask.complete();
+    LiftTask.advance("Peek new address", true);
+    std::tie(VirtualAddress, Entry) = JumpTargets.peek();
+  } // End translations loop
 
   LiftTask.complete();
 

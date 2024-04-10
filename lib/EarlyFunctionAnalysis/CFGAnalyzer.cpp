@@ -379,11 +379,14 @@ CFGAnalyzer::State CFGAnalyzer::loadState(llvm::IRBuilder<> &Builder) const {
   Value *ReturnAddress = nullptr;
   if (GlobalVariable *Register = GCBI.raReg()) {
     ReturnAddress = createLoad(Builder, Register);
+    errs() << "RETARDR 1: " << *ReturnAddress << "\n";
   } else {
     auto *OpaquePointer = PointerType::get(Context, 0);
     auto *StackPointerPointer = Builder.CreateIntToPtr(SP0, OpaquePointer);
     ReturnAddress = Builder.CreateLoad(GCBI.pcReg()->getValueType(),
                                        StackPointerPointer);
+    errs() << "TY 2: " << *GCBI.pcReg()->getValueType() << "\n";
+    errs() << "RETARDR 2: " << *ReturnAddress << "\n";
   }
 
   // Load the PC

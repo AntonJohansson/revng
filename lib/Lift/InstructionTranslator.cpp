@@ -39,6 +39,47 @@ static cl::opt<bool> RecordASM("record-asm",
 
 using IT = InstructionTranslator;
 
+/// Returns the maximum value which can be represented with the specified number
+/// of bits.
+// TODO(anjo): This can be done better
+static uint64_t getMaxValue(unsigned Bits) {
+  if (Bits == 32)
+    return 0xffffffff;
+  else if (Bits == 64)
+    return 0xffffffffffffffff;
+  else
+    revng_unreachable("Not the number of bits in an integer type");
+}
+
+static Value *genDeposit(IRBuilder<> &Builder,
+                         unsigned RegisterSize,
+                         Value *Into, Value *From,
+                         Value *Offset, Value *Length) {
+    revng_assert(isa<ConstantInt>(Offset));
+    uint64_t ConstOffset = cast<ConstantInt>(Offset)->getLimitedValue();
+    if (ConstOffset == RegisterSize)
+      return Into;
+
+    revng_assert(isa<ConstantInt>(Length));
+    uint64_t ConstLength = cast<ConstantInt>(Length)->getLimitedValue();
+
+    uint64_t Bits = 0;
+    // Thou shall not << 32
+    if (ConstLength == RegisterSize)
+      Bits = getMaxValue(RegisterSize);
+    else
+      Bits = (1 << ConstLength) - 1;
+
+    // result = (t1 & ~(bits << position)) | ((t2 & bits) << position)
+    uint64_t BaseMask = ~(Bits << ConstOffset);
+    Value *MaskedBase = Builder.CreateAnd(Into, BaseMask);
+    Value *Deposit = Builder.CreateAnd(From, Bits);
+    Value *ShiftedDeposit = Builder.CreateShl(Deposit, ConstOffset);
+    Value *Result = Builder.CreateOr(MaskedBase, ShiftedDeposit);
+
+    return Result;
+}
+
 //namespace PTC {
 //
 //template<bool C>
@@ -309,18 +350,6 @@ static Instruction::BinaryOps opcodeToBinaryOp(LibTcgOpcode Opcode) {
   }
 }
 
-/// Returns the maximum value which can be represented with the specified number
-/// of bits.
-// TODO(anjo): This can be done better
-static uint64_t getMaxValue(unsigned Bits) {
-  if (Bits == 32)
-    return 0xffffffff;
-  else if (Bits == 64)
-    return 0xffffffffffffffff;
-  else
-    revng_unreachable("Not the number of bits in an integer type");
-}
-
 /// Maps an opcode the corresponding input and output register size.
 ///
 /// \return the size, in bits, of the registers used by the opcode.
@@ -383,6 +412,10 @@ static unsigned getRegisterSize(const LibTcgInterface &LibTcg, LibTcgOpcode Opco
   case LIBTCG_op_sub2_i32:
   case LIBTCG_op_sub_i32:
   case LIBTCG_op_xor_i32:
+  case LIBTCG_op_extract_i32:
+  case LIBTCG_op_sextract_i32:
+  case LIBTCG_op_extract2_i32:
+  case LIBTCG_op_clz_i32:
     return 32;
   case LIBTCG_op_add2_i64:
   case LIBTCG_op_add_i64:
@@ -445,6 +478,8 @@ static unsigned getRegisterSize(const LibTcgInterface &LibTcg, LibTcgOpcode Opco
   case LIBTCG_op_sub2_i64:
   case LIBTCG_op_sub_i64:
   case LIBTCG_op_xor_i64:
+  case LIBTCG_op_clz_i64:
+  case LIBTCG_op_extract2_i64:
     return 64;
   case LIBTCG_op_br:
   case LIBTCG_op_call:
@@ -455,8 +490,16 @@ static unsigned getRegisterSize(const LibTcgInterface &LibTcg, LibTcgOpcode Opco
   case LIBTCG_op_goto_ptr:
   case LIBTCG_op_set_label:
     return 0;
-  default:
-    revng_unreachable("Unexpected libtcg opcode");
+  default: {
+    // For debugging purposes printing the actual opcode
+    // really helps.
+    std::stringstream ErrSS;
+    ErrSS << "Unexpected libtcg opcode ["
+          << Opcode
+          << "]: "
+          << LibTcg.get_instruction_name(Opcode);
+    revng_unreachable(ErrSS.str().c_str());
+  }
   }
 }
 
@@ -566,42 +609,40 @@ void IT::finalizeNewPCMarkers() {
     eraseFromParent(Call);
 }
 
-//SmallSet<unsigned, 1> IT::preprocess(PTCInstructionList *InstructionList) {
-//  SmallSet<unsigned, 1> Result;
-//
-//  for (unsigned I = 0; I < InstructionList->instruction_count; I++) {
-//    PTCInstruction &Instruction = InstructionList->instructions[I];
-//    switch (Instruction.opc) {
-//    case LIBTCG_op_movi_i32:
-//    case LIBTCG_op_movi_i64:
-//    case LIBTCG_op_mov_i32:
-//    case LIBTCG_op_mov_i64:
-//      break;
-//    default:
-//      continue;
-//    }
-//
-//    const PTC::Instruction TheInstruction(&Instruction);
-//    unsigned OutArg = TheInstruction.OutArguments[0];
-//    PTCTemp *Temporary = ptc_temp_get(InstructionList, OutArg);
-//
-//    if (!ptc_temp_is_global(InstructionList, OutArg))
-//      continue;
-//
-//    if (0 != strcmp("btarget", Temporary->name))
-//      continue;
-//
-//    for (unsigned J = I + 1; J < InstructionList->instruction_count; J++) {
-//      unsigned Opcode = InstructionList->instructions[J].opc;
-//      if (Opcode == LIBTCG_op_debug_insn_start)
-//        Result.insert(J);
-//    }
-//
-//    break;
-//  }
-//
-//  return Result;
-//}
+SmallSet<unsigned, 1> IT::preprocess(LibTcgInstructionList InstructionList) {
+  SmallSet<unsigned, 1> Result;
+
+  for (unsigned I = 0; I < InstructionList.instruction_count; ++I) {
+    LibTcgInstruction &Instruction = InstructionList.list[I];
+    switch (Instruction.opcode) {
+    case LIBTCG_op_mov_i32:
+    case LIBTCG_op_mov_i64:
+      break;
+    default:
+      continue;
+    }
+
+    LibTcgArgument Argument = Instruction.output_args[0];
+    revng_assert(Argument.kind == LIBTCG_ARG_TEMP);
+    LibTcgTemp *Temp = Argument.temp;
+
+    if (Temp->kind != LIBTCG_TEMP_GLOBAL)
+      continue;
+
+    if (strcmp("btarget", Temp->name) != 0)
+      continue;
+
+    for (unsigned J = I + 1; J < InstructionList.instruction_count; ++J) {
+      LibTcgOpcode Opcode = InstructionList.list[J].opcode;
+      if (Opcode == LIBTCG_op_insn_start)
+        Result.insert(J);
+    }
+
+    break;
+  }
+
+  return Result;
+}
 
 CallInst *IT::emitNewPCCall(IRBuilder<> &Builder,
                             MetaAddress PC,
@@ -616,11 +657,12 @@ CallInst *IT::emitNewPCCall(IRBuilder<> &Builder,
                                 String != nullptr ? String : Int8NullPtr,
                                 Int8NullPtr };
 
-  // Insert a call to NewPCMarker capturing all the local temporaries
-  // This prevents SROA from transforming them in SSA values, which is bad
-  // in case we have to split a basic block
-  for (AllocaInst *Local : Variables.locals())
-    Args.push_back(Local);
+  // Insert a call to NewPCMarker capturing all the currently live temporaries
+  // which might be alive across an instruction boundary. This prevents SROA
+  // from transforming them in SSA values, which is bad in case we have to
+  // split a basic block
+  for (AllocaInst *V : Variables.getLiveVariables())
+    Args.push_back(V);
 
   return Builder.CreateCall(NewPCMarker, Args);
 }
@@ -650,10 +692,6 @@ IT::newInstruction(LibTcgInstruction *Instr,
     NextPC = StartPC.replaceAddress(pc(Next));
   else
     NextPC = EndPC;
-
-  // TODO(anjo): We don't use AbortAt right?
-  //if (AbortAt.isValid() and NextPC.addressGreaterThan(bortAt))
-  //  return R{ Abort, nullptr, MetaAddress::invalid(), MetaAddress::invalid() };
 
   MDNode *MDOriginalInstr = nullptr;
   Constant *String = nullptr;
@@ -695,7 +733,7 @@ IT::newInstruction(LibTcgInstruction *Instr,
     }
   }
 
-  Variables.newBasicBlock();
+  //Variables.newBasicBlock();
 
   revng_assert(NextPC - PC);
   auto *Call = emitNewPCCall(Builder, PC, *(NextPC - PC), String);
@@ -793,8 +831,10 @@ IT::translate(LibTcgInstruction *Instr, MetaAddress PC, MetaAddress NextPC) {
         ConstArgs.push_back(Instr->constant_args[I]);
       }
     }
-    //  return v{ ConstantInt::get(RegisterType, ConstArguments[0]) };
   }
+
+  //errs() << "TRANSLATING: " << LibTcg.get_instruction_name(Instr->opcode) << "\n";
+
   LastPC = PC;
   auto Result = translateOpcode(Instr->opcode,
                                 ConstArgs,
@@ -861,16 +901,12 @@ IT::translateOpcode(LibTcgOpcode Opcode,
 
   using v = std::vector<Value *>;
   switch (Opcode) {
-  // TODO(anjo): movi are now just normal mov
-  //case LIBTCG_op_movi_i32:
-  //case LIBTCG_op_movi_i64:
-  //  return v{ ConstantInt::get(RegisterType, ConstArguments[0]) };
   case LIBTCG_op_discard:
     // Let's overwrite the discarded temporary with a 0
     return v{ ConstantInt::get(RegisterType, 0) };
   case LIBTCG_op_mov_i32:
   case LIBTCG_op_mov_i64:
-    if (auto Constant = dyn_cast<ConstantInt>(InArguments[0])) {
+    if (auto *Constant = dyn_cast<ConstantInt>(InArguments[0])) {
       return v{ Constant };
     } else {
       return v{ Builder.CreateTrunc(InArguments[0], RegisterType) };
@@ -1055,6 +1091,9 @@ IT::translateOpcode(LibTcgOpcode Opcode,
                                                 cast<ConstantInt>(InArguments[1])->getLimitedValue());
     revng_assert(Result != nullptr);
 
+    errs() << "Result: " << *Result << "\n";
+    errs() << RegisterSize << "\n";
+
     // Zero/sign extend in the target dimension
     if (Signed)
       return v{ Builder.CreateSExt(Result, RegisterType) };
@@ -1196,28 +1235,9 @@ IT::translateOpcode(LibTcgOpcode Opcode,
   }
   case LIBTCG_op_deposit_i32:
   case LIBTCG_op_deposit_i64: {
-    revng_assert(isa<ConstantInt>(InArguments[2]));
-    auto Position = cast<ConstantInt>(InArguments[2])->getLimitedValue();
-    if (Position == RegisterSize)
-      return v{ InArguments[0] };
-
-    revng_assert(isa<ConstantInt>(InArguments[3]));
-    auto Length = cast<ConstantInt>(InArguments[3])->getLimitedValue();
-    uint64_t Bits = 0;
-
-    // Thou shall not << 32
-    if (Length == RegisterSize)
-      Bits = getMaxValue(RegisterSize);
-    else
-      Bits = (1 << Length) - 1;
-
-    // result = (t1 & ~(bits << position)) | ((t2 & bits) << position)
-    uint64_t BaseMask = ~(Bits << Position);
-    Value *MaskedBase = Builder.CreateAnd(InArguments[0], BaseMask);
-    Value *Deposit = Builder.CreateAnd(InArguments[1], Bits);
-    Value *ShiftedDeposit = Builder.CreateShl(Deposit, Position);
-    Value *Result = Builder.CreateOr(MaskedBase, ShiftedDeposit);
-
+    Value *Result = genDeposit(Builder, RegisterSize,
+                               InArguments[0], InArguments[1],
+                               InArguments[2], InArguments[3]);
     return v{ Result };
   }
   case LIBTCG_op_ext8s_i32:
@@ -1368,7 +1388,6 @@ IT::translateOpcode(LibTcgOpcode Opcode,
     revng_assert(ConstArguments[0].kind == LIBTCG_ARG_LABEL);
     auto LabelId = ConstArguments[0].label->id;
 
-    // TODO(anjo): Use Twine here
     std::stringstream LabelSS;
     LabelSS << "bb." << JumpTargets.nameForAddress(LastPC);
     LabelSS << "_L" << std::dec << LabelId;
@@ -1395,7 +1414,7 @@ IT::translateOpcode(LibTcgOpcode Opcode,
 
     Blocks.push_back(Fallthrough);
     Builder.SetInsertPoint(Fallthrough);
-    Variables.newBasicBlock();
+    Variables.newExtendedBasicBlock();
 
     return v{};
   }
@@ -1408,7 +1427,6 @@ IT::translateOpcode(LibTcgOpcode Opcode,
     revng_assert(ConstArguments.back().kind == LIBTCG_ARG_LABEL);
     auto LabelId = ConstArguments.back().label->id;
 
-    // TODO(anjo): Use Twine here
     std::stringstream LabelSS;
     LabelSS << "bb." << JumpTargets.nameForAddress(LastPC);
     LabelSS << "_L" << std::dec << LabelId;
@@ -1446,7 +1464,10 @@ IT::translateOpcode(LibTcgOpcode Opcode,
 
     Blocks.push_back(Fallthrough);
     Builder.SetInsertPoint(Fallthrough);
-    Variables.newBasicBlock();
+
+    if (Opcode == LIBTCG_op_br) {
+      Variables.newExtendedBasicBlock();
+    }
 
     return v{};
   }
@@ -1460,7 +1481,7 @@ IT::translateOpcode(LibTcgOpcode Opcode,
     auto *NextBB = BasicBlock::Create(Context, "", TheFunction);
     Blocks.push_back(NextBB);
     Builder.SetInsertPoint(NextBB);
-    Variables.newBasicBlock();
+    Variables.newExtendedBasicBlock();
 
     return v{};
   }
@@ -1535,8 +1556,70 @@ IT::translateOpcode(LibTcgOpcode Opcode,
   case LIBTCG_op_mulsh_i64:
   case LIBTCG_op_setcond2_i32:
     revng_unreachable("Instruction not implemented");
+  case LIBTCG_op_extract_i32: {
+    auto *Const32 = ConstantInt::get(Type::getInt32Ty(Context), 32);
+    Value *Length = InArguments[1];
+    Value *Offset = InArguments[2];
+    Value *ShlAmount = Builder.CreateSub(Const32,
+                                         Builder.CreateAdd(Offset, Length));
+    Value *Shl = Builder.CreateShl(InArguments[0], ShlAmount);
+    Value *LShr = Builder.CreateLShr(Shl, Builder.CreateSub(Const32, Length));
+    return v{ LShr };
+  }
+  case LIBTCG_op_sextract_i32: {
+    auto *Const32 = ConstantInt::get(Type::getInt32Ty(Context), 32);
+    Value *Length = InArguments[1];
+    Value *Offset = InArguments[2];
+    Value *ShlAmount = Builder.CreateSub(Const32,
+                                         Builder.CreateAdd(Offset, Length));
+    Value *Shl = Builder.CreateShl(InArguments[0], ShlAmount);
+    Value *AShr = Builder.CreateAShr(Shl, Builder.CreateSub(Const32, Length));
+    return v{ AShr };
+  }
+  case LIBTCG_op_extract2_i32:
+  case LIBTCG_op_extract2_i64: {
+    Value *Low    = InArguments[0];
+    Value *High   = InArguments[1];
+    Value *Offset = InArguments[2];
+
+    auto *ConstSize = ConstantInt::get(RegisterType, RegisterSize);
+    Value *Shift = Builder.CreateLShr(Low, Offset);
+    Value *Result = genDeposit(Builder, RegisterSize, Shift, High,
+                               Builder.CreateSub(ConstSize, Offset), Offset);
+
+    return v{ Result };
+  }
+  case LIBTCG_op_clz_i32: {
+    Type *Int1Ty = Type::getInt1Ty(Context);
+    auto *One = ConstantInt::get(Int1Ty, 1);
+    auto *Zero = ConstantInt::get(RegisterType, 0);
+    Value *Arg = InArguments[0];
+    Value *ZeroVal = InArguments[1];
+    CallInst *Ctlz = Builder.CreateBinaryIntrinsic(Intrinsic::ctlz, Arg, One);
+    Value *ICmp = Builder.CreateICmp(CmpInst::ICMP_EQ, Arg, Zero);
+    Value *Select = Builder.CreateSelect(ICmp, ZeroVal, Ctlz);
+    return v{ Select };
+  }
+  case LIBTCG_op_clz_i64: {
+    Type *Int1Ty = Type::getInt1Ty(Context);
+    auto *One = ConstantInt::get(Int1Ty, 1);
+    auto *Zero = ConstantInt::get(RegisterType, 0);
+    Value *Arg = InArguments[0];
+    Value *ZeroVal = InArguments[1];
+    CallInst *Ctlz = Builder.CreateBinaryIntrinsic(Intrinsic::ctlz, Arg, One);
+    Value *ICmp = Builder.CreateICmp(CmpInst::ICMP_EQ, Arg, Zero);
+    Value *Select = Builder.CreateSelect(ICmp, ZeroVal, Ctlz);
+    return v{ Select };
+  }
   default:
-    revng_unreachable("Unknown opcode");
+    // For debugging purposes printing the actual opcode
+    // really helps.
+    std::stringstream ErrSS;
+    ErrSS << "Unknown libtcg opcode ["
+          << Opcode
+          << "]: "
+          << LibTcg.get_instruction_name(Opcode);
+    revng_unreachable(ErrSS.str().c_str());
   }
 }
 
@@ -1551,5 +1634,5 @@ void IT::handleExitTB() {
   auto *NextBB = BasicBlock::Create(Context, "", TheFunction);
   Blocks.push_back(NextBB);
   Builder.SetInsertPoint(NextBB);
-  Variables.newBasicBlock();
+  Variables.newExtendedBasicBlock();
 }

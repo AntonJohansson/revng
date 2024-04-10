@@ -176,6 +176,51 @@ public:
     }
   }
 
+  std::optional<SegmentDataPair>
+  getExecutableSegmentFromAddress(MetaAddress Address) const {
+    for (const model::Segment &Segment : Binary.Segments()) {
+      if (not Segment.IsExecutable())
+        continue;
+      if (Segment.contains(Address)) {
+        auto MaybeData = getByOffset(Segment.StartOffset(), Segment.FileSize());
+        if (MaybeData)
+          return SegmentDataPair(Segment, *MaybeData);
+      }
+    }
+    return std::nullopt;
+  }
+
+
+  struct SectionDataPair {
+    MetaAddress Start;
+    MetaAddress End;
+    size_t Size;
+    llvm::ArrayRef<uint8_t> Data;
+  };
+  cppcoro::generator<SectionDataPair> executableSections() const {
+    for (const model::Segment &Segment : Binary.Segments()) {
+      if (not Segment.IsExecutable())
+        continue;
+
+      if (Segment.Sections().size() > 0) {
+        for (const model::Section &Section : Segment.Sections()) {
+          if (not Section.ContainsCode())
+            continue;
+          auto Offset = addressToOffset(Section.StartAddress());
+          if (not Offset)
+            continue;
+          auto MaybeData = getByOffset(*Offset, Section.Size());
+          if (MaybeData)
+            co_yield {Section.StartAddress(), Section.endAddress(), Section.Size(), *MaybeData};
+        }
+      } else {
+        auto MaybeData = getByOffset(Segment.StartOffset(), Segment.FileSize());
+        if (MaybeData)
+          co_yield {Segment.startAddress(), Segment.endAddress(), Segment.FileSize(), *MaybeData};
+      }
+    }
+  }
+
 private:
   std::pair<const model::Segment *, uint64_t>
   findOffsetInSegment(MetaAddress Address, uint64_t Size) const {

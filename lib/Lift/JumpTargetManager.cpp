@@ -202,9 +202,15 @@ void TDBP::pinConstantStoreInternal(MetaAddress Address, CallInst *ExitTBCall) {
   // Remove unreachable right after the exit_tb
   BasicBlock::iterator CallIt(ExitTBCall);
   BasicBlock::iterator BlockEnd = ExitTBCall->getParent()->end();
-  errs() << "CALLT: " << *CallIt << "\n";
   CallIt++;
-  errs() << "URNECT: " << *CallIt << "\n";
+  if (!(CallIt != BlockEnd and isa<UnreachableInst>(&*CallIt))) {
+
+    errs() << "MODULE\n";
+    errs() << *ExitTBCall->getParent()->getParent()->getParent() << "\n";
+
+    errs() << "BLOCK\n";
+    errs() << *ExitTBCall->getParent() << "\n";
+  }
   revng_assert(CallIt != BlockEnd and isa<UnreachableInst>(&*CallIt));
   eraseFromParent(&*CallIt);
 
@@ -232,6 +238,7 @@ void TDBP::pinConstantStoreInternal(MetaAddress Address, CallInst *ExitTBCall) {
 bool TDBP::pinConstantStore(Function &F) {
   auto ExitTB = JTM->exitTB();
   auto ExitTBIt = ExitTB->use_begin();
+  int Dump = 0;
   while (ExitTBIt != ExitTB->use_end()) {
     // Take note of the use and increment the iterator immediately: this allows
     // us to erase the call to exit_tb without unexpected behaviors
@@ -241,7 +248,6 @@ bool TDBP::pinConstantStore(Function &F) {
 
     // Look for the last write to the PC
     auto [Result, NextPC] = PCH->getUniqueJumpTarget(Call->getParent());
-    errs() << "RESULT: " << Result << "\n";
 
     switch (Result) {
     case NextJumpTarget::Unique:
@@ -1232,15 +1238,9 @@ void JumpTargetManager::harvest() {
     OptimizingPM.run(*TheFunction);
     OptimizingPM.doFinalization();
 
-    errs() << "MODULE 1:\n";
-    errs() << TheModule << "\n";
-
     legacy::PassManager PreliminaryBranchesPM;
     PreliminaryBranchesPM.add(new TranslateDirectBranchesPass(this));
     PreliminaryBranchesPM.run(TheModule);
-
-    //errs() << "MODULE 2:\n";
-    //errs() << TheModule << "\n";
 
     if (empty()) {
       T.advance("Advanced Value Info");
@@ -1248,9 +1248,6 @@ void JumpTargetManager::harvest() {
       revng_log(JTCountLog, "Harvesting with Advanced Value Info");
       RootAnalyzer(*this).cloneOptimizeAndHarvest(TheFunction);
     }
-
-    //errs() << "MODULE 3:\n";
-    //errs() << TheModule << "\n";
 
     // TODO: eventually, `setCFGForm` should be replaced by using a CustomCFG
     // To improve the quality of our analysis, keep in the CFG only the edges we

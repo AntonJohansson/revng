@@ -13,6 +13,8 @@
 using namespace llvm;
 using PCH = ProgramCounterHandler;
 
+static bool DoStuff = false;
+
 class PCOnlyProgramCounterHandler : public ProgramCounterHandler {
 public:
   PCOnlyProgramCounterHandler(unsigned Alignment) :
@@ -206,8 +208,13 @@ private:
     auto *ThumbCode = CI::get(TypeType, Code_arm_thumb);
     // We don't use select here, SCEV can't handle it
     // NewType = ARM + IsThumb * (Thumb - ARM)
+    unsigned ThumbSize = cast<IntegerType>(IsThumb->getType())->getBitWidth();
+    unsigned TypeSize = cast<IntegerType>(TypeType)->getBitWidth();
+    auto *CastedThumb = (ThumbSize < TypeSize)
+                        ? B.CreateZExt(IsThumb, TypeType)
+                        : B.CreateTrunc(IsThumb, TypeType);
     auto *NewType = B.CreateAdd(ArmCode,
-                                B.CreateMul(B.CreateZExt(IsThumb, TypeType),
+                                B.CreateMul(CastedThumb,
                                             B.CreateSub(ThumbCode, ArmCode)));
     return NewType;
   }
@@ -345,18 +352,26 @@ public:
 
 bool PCH::isPCAffectingHelper(Instruction *I) const {
   CallInst *HelperCall = getCallToHelper(I);
+  if (DoStuff) errs() << "  " << (HelperCall == nullptr) << "\n";
   if (HelperCall == nullptr)
     return false;
 
   auto MaybeUsedCSVs = getCSVUsedByHelperCallIfAvailable(HelperCall);
 
   // If CSAA didn't consider this helper, be conservative
+  if (DoStuff) errs() << "  " << (not MaybeUsedCSVs) << "\n";
   if (not MaybeUsedCSVs)
     return true;
 
-  for (GlobalVariable *CSV : MaybeUsedCSVs->Written)
-    if (affectsPC(CSV))
+  for (GlobalVariable *CSV : MaybeUsedCSVs->Written) {
+    if (DoStuff) errs() << "     " << *CSV << "\n";
+    if (DoStuff) errs() << "     " << affectsPC(CSV) << "\n";
+    if (affectsPC(CSV)) {
       return true;
+    }
+  }
+
+  if (DoStuff) errs() << "  FQALSE\n";
 
   return false;
 }
@@ -421,6 +436,7 @@ void ProgramCounterHandler::setPlainMetaAddress(llvm::IRBuilder<> &Builder,
 
 std::pair<NextJumpTarget::Values, MetaAddress>
 PCH::getUniqueJumpTarget(BasicBlock *BB) {
+  //DoStuff = BB->getName().contains("0x400190");
   std::vector<StackEntry> Stack;
 
   enum ProcessResult {
@@ -442,9 +458,15 @@ PCH::getUniqueJumpTarget(BasicBlock *BB) {
 
     PartialMetaAddress &PMA = S.agreement();
 
+
+    if (DoStuff) errs() << "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO\n";
     // Iterate backward on all instructions
     for (Instruction &I : make_range(BB->rbegin(), BB->rend())) {
+      if (DoStuff) errs() << "||||: " << I << "\n";
+      if (DoStuff) errs() << PMA.isEmpty() << "\n";
+      if (DoStuff) errs() << isPCAffectingHelper(&I) << "\n";
       if (auto *Store = dyn_cast<StoreInst>(&I)) {
+        if (DoStuff) errs() << "STORE" << "\n";
         // We found a store
         Value *Pointer = Store->getPointerOperand();
         Value *V = Store->getValueOperand();
@@ -476,6 +498,7 @@ PCH::getUniqueJumpTarget(BasicBlock *BB) {
         }
 
       } else if (CallInst *NewPCCall = getCallTo(&I, "newpc")) {
+        if (DoStuff) errs() << "NEWPC" << "\n";
         //
         // We reached a call to newpc
         //
@@ -501,6 +524,7 @@ PCH::getUniqueJumpTarget(BasicBlock *BB) {
         }
 
       } else if (PMA.isEmpty() and isPCAffectingHelper(&I)) {
+        if (DoStuff) errs() << "HELPER" << "\n";
         // Non-constant store to PC CSV when no other value of the PC has been
         // written yet, bail out
         AgreedMA = MetaAddress::invalid();
@@ -550,6 +574,8 @@ PCH::getUniqueJumpTarget(BasicBlock *BB) {
   } else {
     return { NextJumpTarget::Multiple, MetaAddress::invalid() };
   }
+
+  DoStuff = false;
 }
 
 class SwitchManager {
