@@ -17,6 +17,10 @@
 #include "RootAnalyzer.h"
 #include "SubGraph.h"
 
+//#define PROFILER 1
+//#define PROFILE_FAULTS 1
+//#include "profile.cpp"
+
 using namespace llvm;
 
 namespace {
@@ -205,11 +209,11 @@ void TDBP::pinConstantStoreInternal(MetaAddress Address, CallInst *ExitTBCall) {
   CallIt++;
   if (!(CallIt != BlockEnd and isa<UnreachableInst>(&*CallIt))) {
 
-    errs() << "MODULE\n";
-    errs() << *ExitTBCall->getParent()->getParent()->getParent() << "\n";
+    //errs() << "MODULE\n";
+    //errs() << *ExitTBCall->getParent()->getParent()->getParent() << "\n";
 
-    errs() << "BLOCK\n";
-    errs() << *ExitTBCall->getParent() << "\n";
+    //errs() << "BLOCK\n";
+    //errs() << *ExitTBCall->getParent() << "\n";
   }
   revng_assert(CallIt != BlockEnd and isa<UnreachableInst>(&*CallIt));
   eraseFromParent(&*CallIt);
@@ -796,6 +800,7 @@ void JumpTargetManager::translateIndirectJumps() {
 }
 
 JumpTargetManager::BlockWithAddress JumpTargetManager::peek() {
+  //TimeFunction;
   // If we just harvested new branches, keep exploring
   do {
     harvest();

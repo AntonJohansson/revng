@@ -58,6 +58,11 @@
 #include "InstructionTranslator.h"
 #include "JumpTargetManager.h"
 #include "VariableManager.h"
+//
+//#define PROFILER 1
+//#define PROFILE_FAULTS 1
+//#define PROFILER_IMPLEMENTATION
+//#include "profile.cpp"
 
 using namespace llvm;
 
@@ -250,8 +255,6 @@ static void replaceFunctionWithRet(Function *ToReplace, uint64_t Result) {
   }
 
   ReturnInst::Create(ToReplace->getParent()->getContext(), ResultValue, Body);
-  errs() << "RET\n";
-  errs() << *Body << "\n";
 }
 
 class CpuLoopFunctionPass : public llvm::ModulePass {
@@ -414,12 +417,23 @@ static ReturnInst *createRet(Instruction *Position) {
   } else if (ReturnType->isIntegerTy() or ReturnType->isPointerTy()) {
     auto *Null = Constant::getNullValue(ReturnType);
     return ReturnInst::Create(F->getParent()->getContext(), Null, Position);
-  } else {
-    errs() << "RETURNTYPE: " << *ReturnType << "\n";
-    revng_abort("Return type not supported");
+  } else if (ReturnType->isStructTy()) {
+    auto *StructTy = cast<StructType>(ReturnType);
+    if (StructTy->getNumElements() == 2) {
+      bool Valid = true;
+      for (auto *Ty : StructTy->elements())
+        if (!Ty->isIntegerTy(64))
+          Valid = false;
+
+      if (Valid) {
+        auto *Null = ConstantAggregateZero::get(StructTy);
+        return ReturnInst::Create(F->getParent()->getContext(), Null, Position);
+      }
+    }
   }
 
-  return nullptr;
+  errs() << "RETURNTYPE: " << *ReturnType << "\n";
+  revng_abort("Return type not supported");
 }
 
 /// Find all calls to cpu_loop_exit and replace them with:
@@ -580,6 +594,7 @@ bool CpuLoopExitPass::runOnModule(llvm::Module &M) {
 
 void CodeGenerator::translate(const LibTcgInterface &LibTcg,
                               std::optional<uint64_t> RawVirtualAddress) {
+  //BeginProfile();
   using FT = FunctionType;
 
   Task T(12, "Translation");
@@ -637,29 +652,25 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg,
       "qemu_log", "qemu_loglevel_mask", "qemu_thread_atexit_init",
       "_nocheck__trace_user_do_sigreturn",
       "_nocheck__trace_user_do_rt_sigreturn",
+      "_nocheck__trace_user_s390x_restore_sigregs",
       "start_exclusive");
   for (auto Name : NoOpFunctionNames) {
-    errs() << "Name: " << Name << " " << HelpersModule->getFunction(Name) << "\n";;
     replaceFunctionWithRet(HelpersModule->getFunction(Name), 0);
-    auto *F = HelpersModule->getFunction(Name);
-    if (F) {
-      errs() << *F << "\n";
-    }
   }
 
-  {
-    auto *F = HelpersModule->getFunction("qemu_log");
-    if (F) {
-      SmallVector<Value *, 8> ToErase;
-      for (auto *U : F->users()) {
-        auto *Call = cast<CallInst>(U);
-        ToErase.push_back(Call);
-      }
-      for (auto *V : ToErase) {
-        eraseFromParent(V);
-      }
-    }
-  }
+  //{
+  //  auto *F = HelpersModule->getFunction("qemu_log");
+  //  if (F) {
+  //    SmallVector<Value *, 8> ToErase;
+  //    for (auto *U : F->users()) {
+  //      auto *Call = cast<CallInst>(U);
+  //      ToErase.push_back(Call);
+  //    }
+  //    for (auto *V : ToErase) {
+  //      eraseFromParent(V);
+  //    }
+  //  }
+  //}
 
   // Transform in abort
 
@@ -669,6 +680,7 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg,
       "cpu_restore_state", "cpu_mips_exec", "gdb_handlesig", "queue_signal",
       // syscall.c
       "do_ioctl_dm", "print_syscall", "print_syscall_ret",
+      "do_prctl_set_fp_mode",
       "safe_syscall_base",
       // ARM cpu_loop
       "cpu_abort", "do_arm_semihosting", "EmulateAll");
@@ -889,6 +901,7 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg,
   std::tie(Segment, SegmentData) = *MaybeData;
 
   while (Entry != nullptr) {
+    //TimeBlock("Loop");
 
     // Make sure VirtualAddress points to an executable segment, otherwise
     // look it up
@@ -919,12 +932,17 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg,
       revng_abort();
       break;
     }
-    auto NewInstructionList =
+
+    LibTcgInstructionList NewInstructionList;
+    {
+      //TimeBlock("LibTcg translate");
+    NewInstructionList =
       LibTcg.translate(LibTcgContext, SegmentData.data(),
                        Segment.startAddress().address(),
                        SegmentData.size(),
                        VirtualAddress.address(),
                        TranslateFlags);
+    }
 
     // TODO: rename this type
     const size_t ConsumedSize = NewInstructionList.size_in_bytes;
@@ -937,7 +955,8 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg,
     if (LibTcgLog.isEnabled()) {
       static std::array<char, 128> DumpBuf{0};
       LibTcgLog << "[Translation starting from "
-                << std::hex << VirtualAddress.address() << "]\n";
+                << std::hex << VirtualAddress.address()
+                << DoLog;
       for (size_t I = 0; I < NewInstructionList.instruction_count; ++I) {
         LibTcg.dump_instruction_to_buffer(&NewInstructionList.list[I],
                                           DumpBuf.data(),
@@ -960,6 +979,7 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg,
 
     unsigned J = 0;
 
+    {//TimeBlock("Instruction Translate");
     // Handle the first LIBTCG_op_insn_start
     {
       LibTcgInstruction *NextInstruction = nullptr;
@@ -1057,6 +1077,7 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg,
       }
 
     } // End loop over instructions
+    }
 
     TranslateTask.complete();
     TranslateTask.advance("Finalization", true);
@@ -1067,7 +1088,12 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg,
     auto *LastBlock = Builder.GetInsertBlock();
     //errs() << *LastBlock << "\n";
     if (LastBlock->empty()) {
+      static int i = 0;
+      //errs() << "---------------------------------\n";
+      //errs() << *MainFunction << "\n";
+      //errs() << "last\n";
       eraseFromParent(LastBlock);
+      //errs() << "------------\n";
     } else if (!LastBlock->rbegin()->isTerminator()) {
       // Something went wrong, probably a mistranslation
       errs() << *LastBlock->rbegin() << "\n";
@@ -1201,4 +1227,6 @@ void CodeGenerator::translate(const LibTcgInterface &LibTcg,
   JumpOutHandler.createExternalJumpsHandler();
 
   Variables.finalize();
+
+  //EndAndPrintProfile();
 }

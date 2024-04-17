@@ -331,7 +331,6 @@ forwardTaintAnalysis(const Module *M,
       switch (OpCode) {
       case Instruction::Load: {
         TaintLog << "LOAD" << DoLog;
-
         revng_assert(OperandNo == LoadInst::getPointerOperandIndex());
         auto *L = cast<LoadInst>(TheUser);
         if (TheUse->get() == L->getPointerOperand()) {
@@ -344,7 +343,6 @@ forwardTaintAnalysis(const Module *M,
       } break;
       case Instruction::Store: {
         TaintLog << "STORE" << DoLog;
-        revng_assert(OperandNo == StoreInst::getPointerOperandIndex());
         auto *S = cast<StoreInst>(TheUser);
         if (TheUse->get() == S->getPointerOperand()) {
           if (TaintLog.isEnabled()) {
@@ -352,6 +350,24 @@ forwardTaintAnalysis(const Module *M,
             TaintLog << dumpToString(TheUser) << DoLog;
           }
           Results.TaintedStores.insert(TheUser);
+        } else {
+          // If the value being stored is tainted, then taint
+          // the pointer being stored to.
+          //
+          // Consider
+          //    %a = ptr ...
+          //    %b = load i32, ptr @env
+          //    %c = add %b, 1234
+          //    store i32 %c, ptr %a
+          // then %a gets tainted.
+          for (const Use &U : S->getPointerOperand()->uses()) {
+            if (&U != TheUse and !isa<AllocaInst>(&U)) {
+              errs() << "TAINTING: " << *U << "\n";
+              ToTaintWorkList.push(&U);
+              TaintLog.indent();
+              break;
+            }
+          }
         }
       } break;
       case Instruction::Trunc:
@@ -2278,10 +2294,10 @@ template<bool IsLoad>
 void CPUSAOA::computeAggregatedOffsets() {
   const InstrPtrSet &Tainted = IsLoad ? TaintedAccesses.TaintedLoads :
                                         TaintedAccesses.TaintedStores;
-  if (IsLoad)
-    errs() << " LOAD -----------------------------------\n";
-  else
-    errs() << " STORE -----------------------------------\n";
+  //if (IsLoad)
+  //  errs() << " LOAD -----------------------------------\n";
+  //else
+  //  errs() << " STORE -----------------------------------\n";
   ValueCallSiteOffsetMap &AccessCSOffsets = IsLoad ? LoadCallSiteOffsets :
                                                      StoreCallSiteOffsets;
   CallSiteOffsetMap &CallSiteOffsets = IsLoad ? CallSiteLoadOffsets :
@@ -2378,16 +2394,16 @@ void CPUSAOA::computeAggregatedOffsets() {
 
         std::tie(CallOffsetIt,
                  Inserted) = CallSiteOffsets.insert({ Call, *New });
-        if (Call and Call->getCalledFunction()->getName() == "helper_raise_exception_err") {
-          errs() << "-CALL: " << *Call << " - {";
-          for (auto &I : *New)
-            errs() << I << ", ";
-          errs() << "}\n";
-          errs() << " - {";
-          for (auto &I : CallOffsetIt->second)
-            errs() << I << ", ";
-          errs() << "}\n";
-        }
+        //if (Call and Call->getCalledFunction()->getName() == "helper_exception_with_syndrome") {
+        //  errs() << "-CALL: " << *Call << " - {";
+        //  for (auto &I : *New)
+        //    errs() << I << ", ";
+        //  errs() << "}\n";
+        //  errs() << " - {";
+        //  for (auto &I : CallOffsetIt->second)
+        //    errs() << I << ", ";
+        //  errs() << "}\n";
+        //}
         if (not Inserted)
           CallOffsetIt->second.combine(*New);
       }
