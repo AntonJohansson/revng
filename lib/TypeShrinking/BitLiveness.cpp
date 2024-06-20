@@ -1,5 +1,6 @@
 /// \file BitLiveness.cpp
-/// \brief In this file we model the transfer functions for the analysis.
+/// In this file we model the transfer functions for the analysis.
+///
 /// Each transfer function models the information flow of a function or of
 /// a special case of an instruction.
 /// In our case, `R = transferXyz(Ins, E)` means that for the instruction Ins
@@ -19,6 +20,7 @@
 #include "llvm/IR/Type.h"
 #include "llvm/Support/Casting.h"
 
+#include "revng/MFP/Graph.h"
 #include "revng/MFP/MFP.h"
 #include "revng/Support/Assert.h"
 #include "revng/TypeShrinking/BitLiveness.h"
@@ -88,16 +90,6 @@ static uint32_t getMaxOperandSize(Instruction *Ins) {
   return Max;
 }
 
-/// If Ins has an integer return type return its bitwidth
-/// else return top
-static uint32_t getResultSize(Instruction *Ins) {
-  uint32_t Size = Top;
-  if (Ins->getType()->isIntegerTy()) {
-    Size = std::min(Size, Ins->getType()->getIntegerBitWidth());
-  }
-  return Size;
-}
-
 /// A specialization of the transfer function for the and instruction
 /// In cases where one of the operands is a constant mask
 ///
@@ -107,8 +99,8 @@ static uint32_t getResultSize(Instruction *Ins) {
 /// only the lower 8 bits of `%0` flow into `%1`, but if only the lower 4 bits
 /// of `%1` flow into a data flow sink, then only the lower 4 bits of `%0`
 /// will flow into the data flow sink
-static uint32_t
-transferMask(const uint32_t &Element, const uint32_t &MaskIndex) {
+static uint32_t transferMask(const uint32_t &Element,
+                             const uint32_t &MaskIndex) {
   return std::min(Element, MaskIndex);
 }
 
@@ -164,8 +156,8 @@ static uint32_t transferShiftLeft(Instruction *Ins, const uint32_t &Element) {
 ///
 /// if %0 is a constant, then the first E bits of %2 come from the first E +
 /// %0 bits of %1
-static uint32_t
-transferLogicalShiftRight(Instruction *Ins, const uint32_t &Element) {
+static uint32_t transferLogicalShiftRight(Instruction *Ins,
+                                          const uint32_t &Element) {
   uint32_t OperandSize = getMaxOperandSize(Ins);
   if (auto ConstOp = llvm::dyn_cast<llvm::ConstantInt>(Ins->getOperand(1))) {
     auto OpVal = ConstOp->getZExtValue();
@@ -187,8 +179,8 @@ transferLogicalShiftRight(Instruction *Ins, const uint32_t &Element) {
 ///
 /// if %0 is a constant, then the first E bits of %2 come from the first E +
 /// %0 bits of %1
-static uint32_t
-transferArithmeticalShiftRight(Instruction *Ins, const uint32_t &Element) {
+static uint32_t transferArithmeticalShiftRight(Instruction *Ins,
+                                               const uint32_t &Element) {
   uint32_t OperandSize = getMaxOperandSize(Ins);
   if (auto ConstOp = llvm::dyn_cast<llvm::ConstantInt>(Ins->getOperand(1))) {
     auto OpVal = ConstOp->getZExtValue();
@@ -223,11 +215,6 @@ static uint32_t transferZExt(Instruction *Ins, const uint32_t &Element) {
 uint32_t BitLivenessAnalysis::applyTransferFunction(DataFlowNode *L,
                                                     const uint32_t E) const {
   auto *Ins = L->Instruction;
-  uint32_t Input = E;
-  // At most every bit of the result is alive
-  if (!isDataFlowSink(Ins)) {
-    Input = std::min(E, getResultSize(Ins));
-  }
   switch (Ins->getOpcode()) {
   case Instruction::And:
     return transferAnd(Ins, E);
@@ -253,9 +240,10 @@ uint32_t BitLivenessAnalysis::applyTransferFunction(DataFlowNode *L,
   }
 }
 
-BitLivenessPass::Result
-BitLivenessPass::run(llvm::Function &F, llvm::FunctionAnalysisManager &) {
+BitLivenessPass::Result BitLivenessPass::run(llvm::Function &F,
+                                             llvm::FunctionAnalysisManager &) {
   GenericGraph<DataFlowNode> DataFlowGraph = buildDataFlowGraph(F);
+
   std::vector<DataFlowNode *> ExtremalLabels;
   for (DataFlowNode *Node : DataFlowGraph.nodes()) {
     if (isDataFlowSink(Node->Instruction)) {
@@ -269,8 +257,14 @@ BitLivenessPass::run(llvm::Function &F, llvm::FunctionAnalysisManager &) {
                                                                Top,
                                                                ExtremalLabels);
   BitLivenessPass::Result Result;
-  for (auto &[Label, MFPResult] : MFPRes)
-    Result[Label->Instruction] = MFPResult.OutValue;
+  for (auto &[Label, MFPResult] : MFPRes) {
+    auto &Entry = Result[Label->Instruction];
+    Entry.Result = MFPResult.InValue;
+    Entry.Operands = MFPResult.OutValue;
+  }
+
+  revng_assert(DataFlowGraph.verify());
+  MFP::Graph<BitLivenessAnalysis> MFPGraph(&DataFlowGraph, MFPRes);
 
   return Result;
 }
@@ -282,3 +276,10 @@ bool BitLivenessWrapperPass::runOnFunction(llvm::Function &F) {
 }
 
 } // namespace TypeShrinking
+
+template<>
+void MFP::dump(llvm::raw_ostream &Stream,
+               unsigned Indent,
+               const unsigned &Value) {
+  Stream << Value;
+}

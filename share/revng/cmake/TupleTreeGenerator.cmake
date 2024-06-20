@@ -5,6 +5,7 @@
 function(tuple_tree_generator_impl)
   set(oneValueArgs
       TARGET_NAME
+      EMIT_TRACKING
       GENERATED_HEADERS_VARIABLE
       GENERATED_IMPLS_VARIABLE
       NAMESPACE
@@ -66,7 +67,8 @@ function(tuple_tree_generator_impl)
     "${LOCAL_GENERATED_HEADERS}"
     "${LOCAL_GENERATED_IMPLS}"
     "${GENERATOR_ROOT_TYPE}"
-    "${GENERATOR_SCALAR_TYPES}")
+    "${GENERATOR_SCALAR_TYPES}"
+    "${GENERATOR_EMIT_TRACKING}")
 
   set("${GENERATOR_GENERATED_HEADERS_VARIABLE}"
       ${LOCAL_GENERATED_HEADERS}
@@ -158,11 +160,13 @@ function(tuple_tree_generator_compute_generated_cpp_files SOURCE_HEADERS
     get_filename_component(HEADER_FILENAME_WE "${HEADER}" NAME_WE)
     set(EARLY_OUTPUT "${HEADERS_DIR}/Early/${HEADER_FILENAME}")
     set(LATE_OUTPUT "${HEADERS_DIR}/Late/${HEADER_FILENAME}")
-    set(IMPL_OUTPUT "${HEADERS_DIR}/Impl/${HEADER_FILENAME_WE}.cpp")
     list(APPEND LOCAL_GENERATED_HEADERS_VARIABLE "${EARLY_OUTPUT}")
     list(APPEND LOCAL_GENERATED_HEADERS_VARIABLE "${LATE_OUTPUT}")
-    list(APPEND LOCAL_GENERATED_IMPLS_VARIABLE "${IMPL_OUTPUT}")
   endforeach()
+
+  set(IMPL_OUTPUT "${HEADERS_DIR}/Impl.cpp")
+  list(APPEND LOCAL_GENERATED_IMPLS_VARIABLE "${IMPL_OUTPUT}")
+
   set("${GENERATED_HEADERS_VARIABLE}"
       ${LOCAL_GENERATED_HEADERS_VARIABLE}
       PARENT_SCOPE)
@@ -230,19 +234,32 @@ function(
   EXPECTED_GENERATED_IMPLS
   # Root type of the schema, if there is any
   ROOT_TYPE
-  SCALAR_TYPES)
+  SCALAR_TYPES
+  EMIT_TRACKING)
 
   set(SCALAR_TYPE_ARGS)
   foreach(ST ${SCALAR_TYPES})
     list(APPEND SCALAR_TYPE_ARGS --scalar-type "'${ST}'")
   endforeach()
 
+  if(${EMIT_TRACKING})
+    set(TRACKING "--tracking")
+  else()
+    set(TRACKING "")
+  endif()
+
+  if(${TUPLE_TREE_GENERATOR_EMIT_TRACKING_DEBUG})
+    set(TRACKING_DEBUG "--tracking-debug")
+  else()
+    set(TRACKING_DEBUG "")
+  endif()
+
   add_custom_command(
     COMMAND
       "${SCRIPTS_ROOT_DIR}/tuple-tree-generate-cpp.py" --namespace
       "${NAMESPACE}" --include-path-prefix "${INCLUDE_PATH_PREFIX}" --root-type
       \""${ROOT_TYPE}"\" ${SCALAR_TYPE_ARGS} "${YAML_DEFINITIONS}"
-      "${OUTPUT_DIR}"
+      "${OUTPUT_DIR}" ${TRACKING} ${TRACKING_DEBUG}
     OUTPUT ${EXPECTED_GENERATED_HEADERS} ${EXPECTED_GENERATED_IMPLS}
     DEPENDS "${YAML_DEFINITIONS}" ${CPP_TEMPLATES}
             "${SCRIPTS_ROOT_DIR}/extract_yaml.py"
@@ -412,8 +429,11 @@ endfunction()
 
 # SEPARATE_STRING_TYPES Types equivalent to strings which get a separate type
 # definition
+
+# EMIT_TRACKING emits in every generated struct all the required wrappers and
+# members needed to track accesses to every field.
 function(target_tuple_tree_generator TARGET_ID)
-  set(options INSTALL)
+  set(options INSTALL EMIT_TRACKING)
   set(oneValueArgs
       HEADER_DIRECTORY
       NAMESPACE
@@ -442,9 +462,17 @@ function(target_tuple_tree_generator TARGET_ID)
         "${CMAKE_BINARY_DIR}/include/revng/${GEN_HEADER_DIRECTORY}/Generated")
   endif()
 
+  # Choose a target name that's available
+  set(INDEX 1)
+  set(GENERATOR_TARGET_NAME generate-${TARGET_ID}-tuple-tree-code)
+  if(TARGET "${GENERATOR_TARGET_NAME}")
+    math(EXPR INDEX "${INDEX}+1")
+    set(GENERATOR_TARGET_NAME generate-${TARGET_ID}-tuple-tree-code-${INDEX})
+  endif()
+
   tuple_tree_generator_impl(
     TARGET_NAME
-    generate-${TARGET_ID}-tuple-tree-code
+    "${GENERATOR_TARGET_NAME}"
     HEADERS
     "${GEN_HEADERS}"
     NAMESPACE
@@ -476,7 +504,9 @@ function(target_tuple_tree_generator TARGET_ID)
     TYPESCRIPT_INCLUDE
     ${GEN_TYPESCRIPT_INCLUDE}
     SCALAR_TYPES
-    ${GEN_SCALAR_TYPES})
+    ${GEN_SCALAR_TYPES}
+    EMIT_TRACKING
+    ${GEN_EMIT_TRACKING})
   if(GEN_INSTALL)
     install(DIRECTORY ${GEN_HEADERS_PATH}
             DESTINATION include/revng/${GEN_HEADER_DIRECTORY})
@@ -484,5 +514,5 @@ function(target_tuple_tree_generator TARGET_ID)
 
   target_sources(${TARGET_ID} PRIVATE ${GENERATED_IMPLS})
 
-  add_dependencies(${TARGET_ID} generate-${TARGET_ID}-tuple-tree-code)
+  add_dependencies(${TARGET_ID} "${GENERATOR_TARGET_NAME}")
 endfunction()

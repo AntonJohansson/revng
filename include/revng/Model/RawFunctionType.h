@@ -21,7 +21,10 @@ fields:
   - name: ReturnValues
     sequence:
       type: SortedVector
-      elementType: TypedRegister
+      elementType: NamedTypedRegister
+  - name: ReturnValueComment
+    type: string
+    optional: true
   - name: PreservedRegisters
     sequence:
       type: SortedVector
@@ -29,7 +32,10 @@ fields:
   - name: FinalStackOffset
     type: uint64_t
   - name: StackArgumentsType
-    type: QualifiedType
+    doc: The type of the struct representing stack arguments
+    reference:
+      pointeeType: Type
+      rootType: Binary
     optional: true
 TUPLE-TREE-YAML */
 
@@ -50,19 +56,19 @@ public:
   const llvm::SmallVector<model::QualifiedType, 4> edges() const {
     llvm::SmallVector<model::QualifiedType, 4> Result;
 
-    for (auto &Argument : Arguments)
-      Result.push_back(Argument.Type);
-    for (auto &RV : ReturnValues)
-      Result.push_back(RV.Type);
-    if (StackArgumentsType.UnqualifiedType.isValid())
-      Result.push_back(StackArgumentsType);
+    for (auto &Argument : Arguments())
+      Result.push_back(Argument.Type());
+    for (auto &RV : ReturnValues())
+      Result.push_back(RV.Type());
+    if (not StackArgumentsType().empty())
+      Result.push_back(QualifiedType{ StackArgumentsType(), {} });
 
     return Result;
   }
 
 public:
   static bool classof(const Type *T) { return classof(T->key()); }
-  static bool classof(const Key &K) { return std::get<0>(K) == AssociatedKind; }
+  static bool classof(const Key &K) { return std::get<1>(K) == AssociatedKind; }
 };
 
 #include "revng/Model/Generated/Late/RawFunctionType.h"

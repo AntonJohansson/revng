@@ -1,5 +1,4 @@
 /// \file InvokeIsolatedFunctions.cpp
-/// \brief
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
@@ -10,7 +9,7 @@
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 
-#include "revng/ABI/FunctionType.h"
+#include "revng/ABI/FunctionType/Layout.h"
 #include "revng/FunctionIsolation/InvokeIsolatedFunctions.h"
 #include "revng/Pipeline/AllRegistries.h"
 #include "revng/Pipeline/Contract.h"
@@ -32,11 +31,7 @@ struct InvokeIsolatedPipe {
 
   std::vector<pipeline::ContractGroup> getContract() const {
     using namespace revng::kinds;
-    return { pipeline::ContractGroup(Root,
-                                     pipeline::Exactness::Exact,
-                                     0,
-                                     IsolatedRoot,
-                                     0) };
+    return { pipeline::ContractGroup(Root, 0, IsolatedRoot, 0) };
   }
 
   void registerPasses(llvm::legacy::PassManager &Manager) {
@@ -52,6 +47,7 @@ private:
   using FunctionMap = std::map<MetaAddress, FunctionInfo>;
 
 private:
+  const model::Binary &Binary;
   Function *RootFunction;
   Module *M;
   LLVMContext &Context;
@@ -62,17 +58,18 @@ public:
   InvokeIsolatedFunctions(const model::Binary &Binary,
                           Function *RootFunction,
                           GeneratedCodeBasicInfo &GCBI) :
+    Binary(Binary),
     RootFunction(RootFunction),
     M(RootFunction->getParent()),
     Context(M->getContext()),
     GCBI(GCBI) {
 
-    for (const model::Function &Function : Binary.Functions) {
+    for (const model::Function &Function : Binary.Functions()) {
       // TODO: this temporary
       auto Name = (Twine("local_") + Function.name()).str();
       llvm::Function *F = M->getFunction(Name);
       revng_assert(F != nullptr);
-      Map[Function.Entry] = { &Function, nullptr, F };
+      Map[Function.Entry()] = { &Function, nullptr, F };
     }
 
     for (BasicBlock &BB : *RootFunction) {
@@ -158,12 +155,12 @@ public:
     RootFunction->setPersonalityFn(PersonalityFunction);
 
     for (auto [_, T] : Map) {
-      auto [ModelFunction, BB, F] = T;
+      auto [ModelF, BB, F] = T;
 
       // Create a new trampoline entry block and substitute it to the old entry
       // block
-      BasicBlock *NewBB = BasicBlock::Create(Context, "", BB->getParent(), BB);
-      BB->replaceAllUsesWith(NewBB);
+      BasicBlock *NewBB = BB->splitBasicBlockBefore(BB->begin());
+      NewBB->getTerminator()->eraseFromParent();
       NewBB->takeName(BB);
 
       IRBuilder<> Builder(NewBB);
@@ -171,13 +168,14 @@ public:
       // In case the isolated functions has arguments, provide them
       SmallVector<Value *, 4> Arguments;
       if (F->getFunctionType()->getNumParams() > 0) {
-        auto Layout = abi::FunctionType::Layout::make(ModelFunction->Prototype);
+        auto ThePrototype = ModelF->prototype(Binary);
+        auto Layout = abi::FunctionType::Layout::make(ThePrototype);
         for (const auto &ArgumentLayout : Layout.Arguments) {
           for (model::Register::Values Register : ArgumentLayout.Registers) {
             auto Name = model::Register::getCSVName(Register);
             GlobalVariable *CSV = M->getGlobalVariable(Name, true);
             revng_assert(CSV != nullptr);
-            Arguments.push_back(Builder.CreateLoad(CSV));
+            Arguments.push_back(createLoad(Builder, CSV));
           }
         }
       }
@@ -191,7 +189,7 @@ public:
     }
 
     // Remove all the orphan basic blocks from the root function (e.g., the
-    // blocks that have been substitued by the trampoline)
+    // blocks that have been substituted by the trampoline)
     EliminateUnreachableBlocks(*RootFunction, nullptr, false);
   }
 };
@@ -202,7 +200,7 @@ bool InvokeIsolatedFunctionsPass::runOnModule(Module &M) {
   auto &GCBI = getAnalysis<GeneratedCodeBasicInfoWrapperPass>().getGCBI();
   const auto &ModelWrapper = getAnalysis<LoadModelWrapperPass>().get();
   const model::Binary &Binary = *ModelWrapper.getReadOnlyModel();
-  InvokeIsolatedFunctions IIF(Binary, M.getFunction("root"), GCBI);
-  IIF.run();
+  InvokeIsolatedFunctions TheFunction(Binary, M.getFunction("root"), GCBI);
+  TheFunction.run();
   return true;
 }

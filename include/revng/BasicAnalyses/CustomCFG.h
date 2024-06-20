@@ -13,7 +13,7 @@ namespace llvm {
 class BasicBlock;
 }
 
-/// \brief Node of a CustomCFG
+/// Node of a CustomCFG
 ///
 /// A simple container for nodes and a set of successors and predecessors.
 class CustomCFGNode {
@@ -84,7 +84,7 @@ public:
   }
 };
 
-/// \brief A CFG representing a custom view on the actual CFG of a function
+/// A CFG representing a custom view on the actual CFG of a function
 ///
 /// This class implements `GraphTraits`.
 class CustomCFG {
@@ -98,9 +98,7 @@ public:
         Successor->addPredecessor(&P.second);
   }
 
-  bool hasNode(const llvm::BasicBlock *BB) const {
-    return Blocks.count(BB) != 0;
-  }
+  bool hasNode(const llvm::BasicBlock *BB) const { return Blocks.contains(BB); }
 
   CustomCFGNode *getNode(llvm::BasicBlock *BB) {
     auto It = Blocks.find(BB);

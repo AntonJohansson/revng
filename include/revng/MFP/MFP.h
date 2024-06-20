@@ -45,13 +45,17 @@ concept MonotoneFrameworkInstance = requires(const MFI &I,
 
   std::same_as<typename MFI::Label,
                typename llvm::GraphTraits<typename MFI::GraphType>::NodeRef>;
-  // Disable clang-format, because it does not handle concepts very well yet
-  // clang-format off
   { I.combineValues(E1, E2) } -> std::same_as<LatticeElement>;
   { I.isLessOrEqual(E1, E2) } -> std::same_as<bool>;
   { I.applyTransferFunction(L, E2) } -> std::same_as<LatticeElement>;
-  // clang-format on
 };
+
+template<typename Label, typename LatticeElement>
+using ResultMap = std::map<Label, MFPResult<LatticeElement>>;
+
+template<MonotoneFrameworkInstance MFI>
+using MFIResultMap = ResultMap<typename MFI::Label,
+                               typename MFI::LatticeElement>;
 
 /// Compute the maximum fixed points of an instance of monotone framework GT an
 /// instance of llvm::GraphTraits that tells us how to visit the graph LGT a
@@ -62,9 +66,9 @@ concept MonotoneFrameworkInstance = requires(const MFI &I,
 template<MonotoneFrameworkInstance MFI,
          typename GT = llvm::GraphTraits<typename MFI::GraphType>,
          typename LGT = typename MFI::Label>
-std::map<typename MFI::Label, MFPResult<typename MFI::LatticeElement>>
+MFIResultMap<MFI>
 getMaximalFixedPoint(const MFI &Instance,
-                     const typename MFI::GraphType &Flow,
+                     typename MFI::GraphType Flow,
                      typename MFI::LatticeElement InitialValue,
                      typename MFI::LatticeElement ExtremalValue,
                      const std::vector<typename MFI::Label> &ExtremalLabels,
@@ -79,7 +83,6 @@ getMaximalFixedPoint(const MFI &Instance,
     size_t Priority;
     Label Item;
 
-    // NOLINTNEXTLINE(readability-identifier-naming)
     std::strong_ordering operator<=>(const WorklistItem &) const = default;
   };
   std::set<WorklistItem> Worklist;
@@ -93,9 +96,9 @@ getMaximalFixedPoint(const MFI &Instance,
   }
 
   for (Label Start : InitialNodes) {
-    if (Visited.count(Start) == 0) {
+    if (!Visited.contains(Start)) {
       // Fill the worklist with nodes in reverse post order
-      // lauching a visit from each remaining node
+      // launching a visit from each remaining node
       ReversePostOrderTraversalExt<LGT,
                                    llvm::GraphTraits<LGT>,
                                    llvm::SmallSet<Label, 8>>
@@ -104,9 +107,8 @@ getMaximalFixedPoint(const MFI &Instance,
         LabelPriority[Node] = LabelPriority.size();
         Worklist.insert({ LabelPriority.at(Node), Node });
         // initialize the analysis value for non extremal nodes
-        if (AnalysisResult.find(Node) == AnalysisResult.end()) {
+        if (!AnalysisResult.contains(Node))
           AnalysisResult[Node].InValue = InitialValue;
-        }
       }
     }
   }
@@ -136,9 +138,9 @@ getMaximalFixedPoint(const MFI &Instance,
 template<MonotoneFrameworkInstance MFI,
          typename GT = llvm::GraphTraits<typename MFI::GraphType>,
          typename LGT = typename MFI::Label>
-std::map<typename MFI::Label, MFPResult<typename MFI::LatticeElement>>
+MFIResultMap<MFI>
 getMaximalFixedPoint(const MFI &Instance,
-                     const typename MFI::GraphType &Flow,
+                     typename MFI::GraphType Flow,
                      typename MFI::LatticeElement InitialValue,
                      typename MFI::LatticeElement ExtremalValue,
                      const std::vector<typename MFI::Label> &ExtremalLabels) {

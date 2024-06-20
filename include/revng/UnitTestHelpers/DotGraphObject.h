@@ -24,6 +24,7 @@ class DotGraph;
 class DotNode {
 
   // Define the container for the successors and some useful helpers.
+
 public:
   using child_container = std::vector<DotNode *>;
   using child_iterator = typename child_container::iterator;
@@ -122,9 +123,9 @@ public:
   DotGraph() {}
 
 public:
-  /// \brief Parse a particularly well-formed GraphViz from a file.
-  void
-  parseDotFromFile(llvm::StringRef FileName, llvm::StringRef EntryName = "");
+  /// Parse a particularly well-formed GraphViz from a file.
+  void parseDotFromFile(llvm::StringRef FileName,
+                        llvm::StringRef EntryName = "");
 
   node_range nodes() { return llvm::make_range(begin(), end()); }
 
@@ -153,7 +154,7 @@ public:
   DotNode *getNodeByName(llvm::StringRef Name);
 
 private:
-  /// \brief Actual implementation of the parser.
+  /// Actual implementation of the parser.
   void parseDotImpl(std::ifstream &F, llvm::StringRef EntryName);
 };
 

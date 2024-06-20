@@ -1,5 +1,5 @@
 /// \file Lift.cpp
-/// \brief Lift transform a binary into a llvm module
+/// Lift transform a binary into a llvm module
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
@@ -26,9 +26,9 @@ using namespace llvm;
 using namespace pipeline;
 using namespace ::revng::pipes;
 
-void Lift::run(Context &Ctx,
-               const FileContainer &SourceBinary,
-               LLVMContainer &TargetsList) {
+void Lift::run(ExecutionContext &Ctx,
+               const BinaryFileContainer &SourceBinary,
+               LLVMContainer &Output) {
   if (not SourceBinary.exists())
     return;
 
@@ -43,13 +43,15 @@ void Lift::run(Context &Ctx,
   PM.add(new LoadModelWrapperPass(Model));
   PM.add(new LoadBinaryWrapperPass(Buffer->getBuffer()));
   PM.add(new LiftPass);
-  PM.run(TargetsList.getModule());
+  PM.run(Output.getModule());
+
+  Ctx.commitUniqueTarget(Output);
 }
 
 llvm::Error Lift::checkPrecondition(const pipeline::Context &Ctx) const {
   const auto &Model = *getModelFromContext(Ctx);
 
-  if (Model.Architecture == model::Architecture::Invalid) {
+  if (Model.Architecture() == model::Architecture::Invalid) {
     return llvm::createStringError(inconvertibleErrorCode(),
                                    "Cannot lift binary with architecture "
                                    "invalid.");

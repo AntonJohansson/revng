@@ -12,56 +12,13 @@
 #include <type_traits>
 
 //
-// The concepts from the STL.
-// TODO: remove these after updating the libc++ version.
-//
-
-// clang-format off
-template<class Derived, class Base>
-concept derived_from = std::is_base_of_v<Base, Derived>
-                       && std::is_convertible_v<const volatile Derived *,
-                                                const volatile Base *>;
-// clang-format on
-
-template<typename T, typename U>
-concept convertible_to = std::is_convertible_v<T, U>;
-
-template<typename T>
-concept integral = std::is_integral_v<T>;
-
-template<class T>
-concept equality_comparable = requires(T &&LHS, T &&RHS) {
-  { LHS == RHS } -> convertible_to<bool>;
-};
-
-/// TODO: Remove after updating to clang-format with concept support.
-struct ClangFormatPleaseDoNotBreakMyCode;
-// clang-format off
-// clang-format on
-
-namespace ranges {
-
-template<class T>
-concept range = requires(T &&R) {
-  std::begin(R);
-  std::end(R);
-};
-
-template<class T>
-concept sized_range = ranges::range<T> && requires(T &&R) {
-  std::size(R);
-};
-
-} // namespace ranges
-
-//
 // Concepts to simplify working with tuples.
 //
 
 template<class T>
 concept TupleSizeCompatible = requires {
   std::tuple_size<T>::value;
-  { std::tuple_size_v<T> } -> convertible_to<size_t>;
+  { std::tuple_size_v<T> } -> std::convertible_to<size_t>;
 };
 
 static_assert(TupleSizeCompatible<std::tuple<>>);
@@ -73,7 +30,7 @@ namespace revng::detail {
 template<class T, std::size_t N>
 concept TupleElementCompatibleHelper = requires(T Value) {
   typename std::tuple_element_t<N, std::remove_const_t<T>>;
-  { get<N>(Value) } -> convertible_to<std::tuple_element_t<N, T> &>;
+  { get<N>(Value) } -> std::convertible_to<std::tuple_element_t<N, T> &>;
 };
 
 template<typename T, size_t... N>
@@ -89,11 +46,9 @@ constexpr auto checkAllTupleElementTypes() {
 
 } // namespace revng::detail
 
-// clang-format off
 template<class T>
 concept TupleLike = (TupleSizeCompatible<T>
                      and revng::detail::checkAllTupleElementTypes<T>());
-// clang-format on
 
 static_assert(TupleLike<std::tuple<>>);
 static_assert(TupleLike<std::tuple<int, int, long>>);
@@ -112,23 +67,11 @@ static_assert(not TupleLike<std::vector<int>>);
 /// `IsRank`) concepts needed since we can now just say
 /// `SpecializationOf<GenericGraph>` on the interface boundaries and get
 /// the expected check.
-///
-/// TODO: this requires clang-13+, uncomment it after the update.
-// template<typename Type, template<typename...> class Ref>
-// concept SpecializationOf = requires(Type &&Value) {
-//   []<typename... Ts>(Ref<Ts...> &){}(Value);
-// };
-//
-// static_assert(SpecializationOf<std::pair<int, long>, std::pair>);
-// static_assert(SpecializationOf<const std::pair<int, long>, std::pair>);
-// static_assert(SpecializationOf<std::string, std::basic_string>);
-// static_assert(SpecializationOf<std::ostream, std::basic_ios>);
-// static_assert(not SpecializationOf<std::string, std::basic_string_view>);
-
-/// TODO: Remove after updating to clang-format with concept support.
-struct ClangFormatPleaseDoNotBreakMyCode;
-// clang-format off
-// clang-format on
+template<typename Type, template<typename...> class Ref>
+concept SpecializationOf = requires(Type &Value) {
+  []<typename... Ts>(Ref<Ts...> &) {
+  }(const_cast<std::remove_const_t<Type> &>(Value));
+};
 
 namespace revng::detail {
 
@@ -151,25 +94,58 @@ constexpr bool
 /// allows direct specializations (and aliases) - no inheritance.
 ///
 /// It's useful in the cases when template parameter deduction is important,
-/// e.g. when instanciating traits.
+/// e.g. when instantiating traits.
 template<typename Test, template<typename...> class Ref>
 concept StrictSpecializationOf = revng::detail::StrictSpecialization<Test, Ref>;
 
+namespace examples {
+
+static_assert(SpecializationOf<std::pair<int, long>, std::pair>);
 static_assert(StrictSpecializationOf<std::pair<int, long>, std::pair>);
+static_assert(SpecializationOf<const std::pair<int, long>, std::pair>);
 static_assert(StrictSpecializationOf<const std::pair<int, long>, std::pair>);
+
+static_assert(SpecializationOf<std::string, std::basic_string>);
 static_assert(StrictSpecializationOf<std::string, std::basic_string>);
-static_assert(not StrictSpecializationOf<std::ostream, std::basic_ios>);
+static_assert(not SpecializationOf<std::string, std::basic_string_view>);
 static_assert(not StrictSpecializationOf<std::string, std::basic_string_view>);
 
+using Alias = std::pair<int, long>;
+static_assert(SpecializationOf<Alias, std::pair>);
+static_assert(StrictSpecializationOf<Alias, std::pair>);
+
+template<typename Type>
+struct InheritanceT : std::pair<int, Type> {};
+struct PublicInheritance : public InheritanceT<long> {};
+struct PrivateInheritance : private InheritanceT<long> {};
+struct ProtectedInheritance : protected InheritanceT<long> {};
+
+static_assert(SpecializationOf<PublicInheritance, std::pair>);
+static_assert(SpecializationOf<PublicInheritance, InheritanceT>);
+static_assert(not SpecializationOf<PrivateInheritance, std::pair>);
+static_assert(not SpecializationOf<ProtectedInheritance, std::pair>);
+
+static_assert(not StrictSpecializationOf<PublicInheritance, std::pair>);
+static_assert(not StrictSpecializationOf<PublicInheritance, InheritanceT>);
+static_assert(not StrictSpecializationOf<PrivateInheritance, std::pair>);
+static_assert(not StrictSpecializationOf<ProtectedInheritance, std::pair>);
+
+} // namespace examples
+
 //
-// Other Miscellanious concepts.
+// Other Miscellaneous concepts.
 //
 
-// clang-format off
-namespace ranges {
-template<class Range, typename ValueType>
-concept range_with_value_type = ranges::range<Range> &&
-                std::is_convertible_v<typename Range::value_type,
-                                      ValueType>;
-} // namespace ranges
-// clang-format on
+template<typename T, typename R>
+concept ConstOrNot = std::is_same_v<R, T> or std::is_same_v<const R, T>;
+
+template<class R, typename ValueType>
+concept range_with_value_type = std::ranges::range<R>
+                                && std::is_convertible_v<typename R::value_type,
+                                                         ValueType>;
+
+template<typename T, typename... Types>
+  requires(sizeof...(Types) > 0)
+inline constexpr bool anyOf() {
+  return (std::is_same_v<T, Types> || ...);
+}

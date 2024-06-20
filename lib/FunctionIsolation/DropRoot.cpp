@@ -1,5 +1,4 @@
 /// \file DropRoot.cpp
-/// \brief
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
@@ -42,7 +41,6 @@ struct DropRootPipe {
     using namespace pipeline;
     namespace ranks = ::revng::ranks;
     return { ContractGroup::transformOnlyArgument(::revng::kinds::Root,
-                                                  Exactness::DerivedFrom,
                                                   Kind::deadKind(ranks::Binary),
                                                   InputPreservation::Erase) };
   }

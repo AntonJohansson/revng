@@ -6,20 +6,21 @@
 
 #include <map>
 
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/PassManager.h"
 
 #include "revng/Support/IRHelpers.h"
 
-using CSVToAllocaMap = std::map<llvm::GlobalVariable *, llvm::AllocaInst *>;
+using CSVToAllocaMap = llvm::DenseMap<llvm::GlobalVariable *,
+                                      llvm::AllocaInst *>;
 
-/// \brief Helper class to generate calls that summarize pieces of codes
-///        accessing CSVs
+/// Helper class to generate calls that summarize pieces of codes accessing CSVs
 class SummaryCallsBuilder {
 private:
   const CSVToAllocaMap &CSVMap;
-  std::map<llvm::Type *, llvm::Function *> TemporaryFunctions;
+  llvm::DenseMap<llvm::Type *, llvm::Function *> TemporaryFunctions;
 
 public:
   SummaryCallsBuilder(const CSVToAllocaMap &CSVMap) : CSVMap(CSVMap) {}
@@ -41,13 +42,13 @@ public:
               std::back_inserter(Arguments));
 
     for (GlobalVariable *CSV : ReadCSVs)
-      Arguments.push_back(Builder.CreateLoad(csvToAlloca(CSV)));
+      Arguments.push_back(createLoadVariable(Builder, csvToAlloca(CSV)));
 
     CallInst *Result = Builder.CreateCall(getRandom(M, ReturnType), Arguments);
 
     // Put a `store getRandom()` targeting each written CSV
     for (GlobalVariable *Written : WrittenCSVs) {
-      Type *PointeeTy = Written->getType()->getPointerElementType();
+      Type *PointeeTy = Written->getValueType();
       Value *Random = Builder.CreateCall(getRandom(M, PointeeTy));
       Builder.CreateStore(Random, csvToAlloca(Written));
     }
@@ -89,7 +90,7 @@ private:
   }
 };
 
-/// \brief Replace calls to helper functions with read/writes to CSVs they use
+/// Replace calls to helper functions with read/writes to CSVs they use
 ///
 /// This pass removes all the calls to helper functions replacing them with a
 /// function call to `generic_helper` whose arguments (all variadic) are as
@@ -116,8 +117,8 @@ public:
                       SummaryCallsBuilder &SCB) :
     SCB(SCB), SyscallHelper(SyscallHelper), SyscallIDCSV(SyscallIDCSV) {}
 
-  llvm::PreservedAnalyses
-  run(llvm::Function &F, llvm::FunctionAnalysisManager &);
+  llvm::PreservedAnalyses run(llvm::Function &F,
+                              llvm::FunctionAnalysisManager &);
 
 private:
 };
@@ -154,7 +155,7 @@ DropHelperCallsPass::run(llvm::Function &F, llvm::FunctionAnalysisManager &) {
         for (Value *Argument : CallArguments)
           BaseArguments.push_back(Argument);
 
-        Optional<uint32_t> SyscallIDArgumentIndex;
+        std::optional<uint32_t> SyscallIDArgumentIndex;
         for (GlobalVariable *CSV : CSVs.Read)
           if (Callee == SyscallHelper and CSV == SyscallIDCSV)
             SyscallIDArgumentIndex = BaseArguments.size();

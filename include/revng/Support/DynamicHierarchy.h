@@ -10,12 +10,11 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Debug.h"
-#include "llvm/Support/ManagedStatic.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include "revng/Support/Debug.h"
 
-/// A dynamic hierarcy is a tree that can be extended by downstream
+/// A dynamic hierarchy is a tree that can be extended by downstream
 /// libraries. By instantiating a node and providing a parent then the child
 /// will be visible from the parent as well.
 ///
@@ -40,10 +39,19 @@ public:
   DynamicHierarchy(llvm::StringRef Name) : Parent(nullptr), Name(Name.str()) {
     getRoots().push_back(&self());
     getAll().push_back(&self());
+
+    // NOTE: order the entries, in order to guarantee consistent ordering
+    // irrespective of load order
+    llvm::sort(getRoots(), compareByName);
+    llvm::sort(getAll(), compareByName);
   }
+
   DynamicHierarchy(llvm::StringRef Name, DynamicHierarchy &Parent) :
     Parent(&Parent), Name(Name.str()) {
     getAll().push_back(&self());
+
+    // NOTE: see constructor above
+    llvm::sort(getAll(), compareByName);
   }
 
   DynamicHierarchy(DynamicHierarchy &&) = delete;
@@ -190,4 +198,12 @@ private:
 private:
   const DerivedType &self() const { return *static_cast<DerivedType *>(this); }
   DerivedType &self() { return *static_cast<DerivedType *>(this); }
+
+  static bool compareByName(DerivedType *Elem1, DerivedType *Elem2) {
+    revng_assert(Elem1->name() != Elem2->name() or Elem1 == Elem2,
+                 ("There are two dynamic hierarchy elements named "
+                  + Elem1->name().str())
+                   .c_str());
+    return Elem1->name() < Elem2->name();
+  }
 };

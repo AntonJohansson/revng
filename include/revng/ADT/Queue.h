@@ -9,13 +9,12 @@
 
 #include "revng/Support/Assert.h"
 
-/// \brief Queue where an element cannot be re-inserted if it's already in the
-///        queue
+/// Queue where an element cannot be re-inserted if it's already in the queue
 template<typename T, bool Once>
 class QueueImpl {
 public:
   void insert(T Element) {
-    if (Set.count(Element) == 0) {
+    if (!Set.contains(Element)) {
       Set.insert(Element);
       Queue.push(Element);
     }

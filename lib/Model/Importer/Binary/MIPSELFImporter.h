@@ -19,16 +19,15 @@ private:
 public:
   MIPSELFImporter(TupleTree<model::Binary> &Model,
                   const llvm::object::ELFObjectFileBase &TheBinary,
-                  uint64_t PreferredBaseAddress) :
-    ELFImporter<T, HasAddend>(Model, TheBinary, PreferredBaseAddress),
+                  uint64_t BaseAddress) :
+    ELFImporter<T, HasAddend>(Model, TheBinary, BaseAddress),
     MIPSFirstGotSymbol(std::nullopt),
     MIPSLocalGotEntries(std::nullopt) {}
 
-  void
-  parseTargetDynamicTags(uint64_t Tag,
-                         MetaAddress Relocated,
-                         SmallVectorImpl<uint64_t> &NeededLibraryNameOffsets,
-                         uint64_t Val) override {
+  void parseTargetDynamicTags(uint64_t Tag,
+                              MetaAddress Relocated,
+                              SmallVectorImpl<uint64_t> &LibrariesOffsets,
+                              uint64_t Val) override {
     using namespace llvm;
 
     switch (Tag) {
@@ -124,8 +123,8 @@ public:
                                 *this->DynstrPortion.get());
   }
 
-  llvm::Error import() override {
-    if (llvm::Error E = ELFImporter<T, HasAddend>::import())
+  llvm::Error import(const ImporterOptions &Options) override {
+    if (llvm::Error E = ELFImporter<T, HasAddend>::import(Options))
       return E;
     registerMIPSRelocations();
     return llvm::Error::success();

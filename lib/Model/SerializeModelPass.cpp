@@ -1,6 +1,6 @@
 /// \file SerializeModelPass.cpp
-/// \brief Implementation of the pass taking care of serializing the
-///        model in the Module as Metadata.
+/// Implementation of the pass taking care of serializing the model in the
+/// Module as Metadata.
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
@@ -27,7 +27,7 @@ void writeModel(const model::Binary &Model, llvm::Module &M) {
   Model.verify(true);
 
   NamedMDNode *NamedMD = M.getNamedMetadata(ModelMetadataName);
-  revng_check(not NamedMD, "The model has alread been serialized");
+  revng_check(not NamedMD, "The model has already been serialized");
 
   std::string Buffer;
   {

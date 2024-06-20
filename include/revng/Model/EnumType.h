@@ -34,15 +34,16 @@ public:
 
 public:
   Identifier name() const;
+  Identifier entryName(const model::EnumEntry &Entry) const;
 
 public:
   const llvm::SmallVector<model::QualifiedType, 4> edges() const {
-    return { UnderlyingType };
+    return { UnderlyingType() };
   }
 
 public:
   static bool classof(const Type *T) { return classof(T->key()); }
-  static bool classof(const Key &K) { return std::get<0>(K) == AssociatedKind; }
+  static bool classof(const Key &K) { return std::get<1>(K) == AssociatedKind; }
 };
 
 #include "revng/Model/Generated/Late/EnumType.h"

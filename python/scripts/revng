@@ -5,17 +5,21 @@
 
 import os
 import sys
+import sysconfig
 from pathlib import Path
 
-python_libs_dir = str(Path(__file__).parent.parent / "lib" / "python")
-sys.path.insert(0, python_libs_dir)
+libpath = Path(sysconfig.get_path("purelib")).relative_to(sysconfig.get_config_var("base"))
+new_path = (Path(__file__) / "../.." / libpath).resolve()
+assert new_path.is_dir()
 
-prev_pythonpath = os.environ.get("PYTHONPATH")
-os.environ["PYTHONPATH"] = python_libs_dir
-if prev_pythonpath:
-    os.environ["PYTHONPATH"] += ":" + prev_pythonpath
-
-from revng.cli.revng import main  # noqa: E402
+if str(new_path) not in sys.path:
+    if "PYTHONPATH" in os.environ:
+        os.environ["PYTHONPATH"] = f"{new_path!s}:{os.environ['PYTHONPATH']}"
+    else:
+        os.environ["PYTHONPATH"] = str(new_path)
+    sys.path.insert(0, str(new_path))
 
 if __name__ == "__main__":
+    from revng.internal.cli.revng import main
+
     sys.exit(main())

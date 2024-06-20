@@ -22,23 +22,6 @@ export const yamlToStringOptions = {
     directives: true,
 } as const;
 
-/**
- * Parses an int safely, returning undefined if the number cannot be repesented as a decimal
- * string
- */
-export function safeParseInt(str?: string): number | undefined {
-    if (str !== undefined) {
-        const num = Number.parseInt(str);
-        if (num == undefined || isNaN(num) || !isFinite(num)) {
-            return undefined;
-        } else {
-            return num;
-        }
-    } else {
-        return undefined;
-    }
-}
-
 export type IReference = string;
 
 /**
@@ -52,20 +35,28 @@ export class Reference<T, M> {
         this.reference = ref;
     }
 
-    toJSON(): string | undefined {
+    toJSON(): string {
         return this.reference;
     }
 
-    resolve(root: M): T {
-        return _getElementByPath<T>(this.reference, root);
+    equals(other: unknown): boolean {
+        if (other instanceof Reference<T, M>) {
+            return this.reference == other.reference;
+        } else {
+            return false;
+        }
     }
 
-    static parse<T, M>(ref?: string): Reference<T, M> | undefined {
-        if (ref !== undefined) {
-            return new Reference(ref);
-        } else {
-            return undefined;
-        }
+    resolve(root: M): T {
+        return _getElementByPath<T>(this.reference, root)!;
+    }
+
+    isValid(): boolean {
+        return this.reference !== "";
+    }
+
+    static parse<T, M>(ref?: string): Reference<T, M> {
+        return new Reference(ref || "");
     }
 }
 
@@ -112,13 +103,9 @@ function getElementByPathArray<T>(path: string[], obj: any): T | undefined {
     const component = path[0];
     if (obj instanceof Array) {
         for (const elem of obj) {
-            if (
-                "key" in (elem as any) &&
-                typeof elem["key"] == "function" &&
-                elem["key"]() == component
-            ) {
+            if (keyableObject(elem) && elem.key() == component) {
                 if (path.length == 1) {
-                    return elem as T;
+                    return elem as unknown as T;
                 } else {
                     return getElementByPathArray(path.slice(1), elem);
                 }
@@ -138,12 +125,58 @@ function getElementByPathArray<T>(path: string[], obj: any): T | undefined {
     }
 }
 
+function setElementByPathArray<T>(path: string[], obj: any, value: T): boolean {
+    const component = path[0];
+    if (obj instanceof Array) {
+        const index = obj.findIndex((elem) => keyableObject(elem) && elem.key() === component);
+
+        if (index >= 0) {
+            if (path.length === 1) {
+                obj[index] = value;
+                return true;
+            } else {
+                return setElementByPathArray(path.slice(1), obj[index], value);
+            }
+        } else if (
+            index === -1 &&
+            path.length === 1 &&
+            keyableObject(value) &&
+            value.key() === component
+        ) {
+            // We're appending a value to an array
+            obj.push(value);
+            return true;
+        } else {
+            return false;
+        }
+    } else {
+        if (component in obj) {
+            if (path.length == 1) {
+                obj[component] = value;
+                return true;
+            } else {
+                return setElementByPathArray(path.slice(1), obj[component], value);
+            }
+        }
+        return false;
+    }
+}
+
 /**
  * Given a Tuple Tree path and a root object, resolve the object or return
  * undefined if the path is not present in the tuple tree
  */
 export function _getElementByPath<T>(path: string, obj: any): T | undefined {
     return getElementByPathArray(path.split("/").slice(1), obj);
+}
+
+/**
+ * Given a Tuple Tree path, a root object and a value, set the path with the
+ * value provided and return true. If the path does not resolve, this returns
+ * false
+ */
+export function _setElementByPath<T>(path: string, obj: any, value: T): boolean {
+    return setElementByPathArray(path.split("/").slice(1), obj, value);
 }
 
 // Tree Diffing
@@ -216,134 +249,95 @@ class Diff {
     }
 }
 
-/**
- * Comm object
- * Represents a difference between 2 sets, where 'common' are the elements present in both sets
- * and only<n> the ones only present in set<n>
- */
-interface Comm<T> {
-    only1: Set<T>;
-    only2: Set<T>;
-    common: Set<T>;
-}
-
 function isNull(obj: any): obj is undefined | null {
     return obj === undefined || obj === null;
 }
 
-/**
- * Computes the comm of the object keys, pruning undefined and null keys
- * @param obj1 first object
- * @param obj2 second object
- * @returns Comm object with only1 containing non-null keys unique to obj1, only2 keys unique to
- *          obj2 and common with keys common to obj1 and obj2
- */
-function objComm(obj1: any, obj2: any): Comm<string> {
-    const only1 = new Set<string>();
-    const only2 = new Set<string>();
-    const common = new Set<string>();
-    for (const element of new Set([...Object.keys(obj1), ...Object.keys(obj2)])) {
-        if (element in obj1 && element in obj2) {
-            if (!isNull(obj1[element]) && !isNull(obj2[element])) {
-                common.add(element);
-            } else if (!isNull(obj1[element]) && isNull(obj2[element])) {
-                only1.add(element);
-            } else if (!isNull(obj2[element]) && isNull(obj1[element])) {
-                only2.add(element);
-            }
-        } else if (element in obj1 && !isNull(obj1[element])) {
-            only1.add(element);
-        } else if (element in obj2 && !isNull(obj2[element])) {
-            only2.add(element);
-        }
-    }
-
-    return { only1: only1, only2: only2, common: common };
+function hasEquals(obj: any): obj is { equals: (other: unknown) => boolean } {
+    return typeof obj === "object" && typeof obj?.equals === "function";
 }
 
-/**
- * Computes the comm of 2 sets
- * @param set1 first set
- * @param set2 second set
- * @returns Comm object where only1 are the elements unique to set1, only2 are elements unique to
- *          set2 and common are elements in common between the two sets
- */
-function setComm<T>(set1: Set<T>, set2: Set<T>): Comm<T> {
-    const only1 = new Set<T>();
-    const only2 = new Set<T>();
-    const common = new Set<T>();
-
-    for (const element of new Set([...set1, ...set2])) {
-        if (set1.has(element) && set2.has(element)) {
-            common.add(element);
-        } else if (set1.has(element)) {
-            only1.add(element);
-        } else {
-            only2.add(element);
-        }
-    }
-
-    return { only1: only1, only2: only2, common: common };
+function keyableObject(obj: any): obj is { key: () => string } {
+    return (
+        obj !== null &&
+        typeof obj === "object" &&
+        "key" in obj &&
+        typeof obj.key === "function" &&
+        typeof obj.key() === "string"
+    );
 }
 
-function hasCustomJson(obj: any): obj is { toJSON: () => any } {
-    return typeof obj === "object" && "toJSON" in obj && typeof obj.toJSON === "function";
+export function _makeDiff<T>(
+    tuple_tree_old: T,
+    tuple_tree_new: T,
+    typeHints: TypeHints,
+    rootType: Constructor
+): DiffSet {
+    const rootTypeInfo: ConstructorType = {
+        type: rootType,
+        ctor: "class",
+        isArray: false,
+        optional: false,
+        isAbstract: false,
+    };
+    return new DiffSet(
+        makeDiffSubtree(tuple_tree_old, tuple_tree_new, "", typeHints, rootTypeInfo, false)
+    );
 }
 
-function isNativeType(obj: any): obj is string | bigint | boolean {
-    return ["string", "bigint", "boolean", "number"].includes(typeof obj);
-}
-
-function keyableArray(obj: Array<any>): obj is { key: () => string }[] {
-    return obj
-        .map(
-            (e) =>
-                typeof e === "object" &&
-                "key" in e &&
-                typeof e.key === "function" &&
-                typeof e.key() === "string"
-        )
-        .every((e) => e);
-}
-
-function keyabaleArrayToMap(array: { key: () => string }[]): Map<string, any> {
-    const ret = new Map<string, any>();
-    for (const element of array) {
-        ret.set(element.key(), element);
-    }
-    return ret;
-}
-
-export function _makeDiff<T>(tuple_tree_old: T, tuple_tree_new: T): DiffSet {
-    return new DiffSet(makeDiffSubtree(tuple_tree_old, tuple_tree_new, ""));
-}
-
-export function makeDiffSubtree(obj_old: any, obj_new: any, prefix: string): Diff[] {
+export function makeDiffSubtree(
+    obj_old: any,
+    obj_new: any,
+    prefix: string,
+    typeHints: TypeHints,
+    typeInfo: TypeInfo,
+    inArray: boolean
+): Diff[] {
     const result: Diff[] = [];
     if (typeof obj_old != typeof obj_new) {
         return [];
     }
-    if (obj_old instanceof Array) {
-        if (keyableArray(obj_old) && keyableArray(obj_new)) {
-            const map_old = keyabaleArrayToMap(obj_old);
-            const map_new = keyabaleArrayToMap(obj_new);
 
-            const map_comm = setComm(new Set(map_old.keys()), new Set(map_new.keys()));
+    let infoObject: TypeInfoObject;
+    if (typeInfo.isAbstract) {
+        const derivedClass = (
+            typeInfo.type as unknown as { parseClass: (obj) => Constructor }
+        ).parseClass(obj_old);
+        const baseInfoObject = typeHints.get(typeInfo.type as Constructor | Parsable);
+        const derivedClassObject = typeHints.get(derivedClass);
+        infoObject = { ...baseInfoObject, ...derivedClassObject };
+    } else {
+        infoObject = typeHints.get(typeInfo.type as Constructor | Parsable);
+    }
 
-            for (const element of map_comm.only1) {
-                result.push(new Diff(`${prefix}`, undefined, map_old.get(element)));
+    if (typeInfo.isArray && !inArray) {
+        if ("keyed" in typeInfo.type && typeInfo.type.keyed) {
+            const map_old = new Map(obj_old.map((e) => [e.key(), e]));
+            const map_new = new Map(obj_new.map((e) => [e.key(), e]));
+
+            const common_keys = new Set();
+            for (const [key, value] of map_old) {
+                if (map_new.has(key)) {
+                    common_keys.add(key);
+                    result.push(
+                        ...makeDiffSubtree(
+                            value,
+                            map_new.get(key),
+                            `${prefix}/${key}`,
+                            typeHints,
+                            typeInfo,
+                            true
+                        )
+                    );
+                } else {
+                    result.push(new Diff(`${prefix}`, undefined, value));
+                }
             }
-            for (const element of map_comm.only2) {
-                result.push(new Diff(`${prefix}`, map_new.get(element), undefined));
-            }
-            for (const element of map_comm.common) {
-                result.push(
-                    ...makeDiffSubtree(
-                        map_old.get(element),
-                        map_new.get(element),
-                        `${prefix}/${element}`
-                    )
-                );
+
+            for (const [key, value] of map_new) {
+                if (!common_keys.has(key)) {
+                    result.push(new Diff(`${prefix}`, value, undefined));
+                }
             }
         } else {
             const array_old: Array<any> = [...obj_old];
@@ -362,37 +356,37 @@ export function makeDiffSubtree(obj_old: any, obj_new: any, prefix: string): Dif
             result.push(...array_new.map((e) => new Diff(prefix, e, undefined)));
         }
     } else {
-        const obj_comm = objComm(obj_old, obj_new);
-        for (const element of obj_comm.only1) {
-            result.push(new Diff(`${prefix}/${element}`, "", obj_old[element]));
-        }
-        for (const element of obj_comm.only2) {
-            result.push(new Diff(`${prefix}/${element}`, obj_new[element], ""));
-        }
-        for (const element of obj_comm.common) {
-            if (isNativeType(obj_old[element]) && isNativeType(obj_new[element])) {
-                if (obj_old[element] !== obj_new[element]) {
+        for (const key in infoObject) {
+            if (infoObject[key].ctor == "native" && !infoObject[key].isArray) {
+                if (obj_old[key] !== obj_new[key]) {
                     result.push(
                         new Diff(
-                            `${prefix}/${element}`,
-                            obj_new[element].toString(),
-                            obj_old[element].toString()
+                            `${prefix}/${key}`,
+                            obj_new[key].toString(),
+                            obj_old[key].toString()
                         )
                     );
                 }
-            } else if (hasCustomJson(obj_old[element]) && hasCustomJson(obj_new[element])) {
-                if (obj_old[element].toJSON() !== obj_new[element].toJSON()) {
+            } else if (hasEquals(obj_old[key]) && hasEquals(obj_new[key])) {
+                if (!obj_old[key].equals(obj_new[key])) {
                     result.push(
                         new Diff(
-                            `${prefix}/${element}`,
-                            obj_new[element].toJSON().toString(),
-                            obj_old[element].toJSON().toString()
+                            `${prefix}/${key}`,
+                            obj_new[key].toString(),
+                            obj_old[key].toString()
                         )
                     );
                 }
             } else {
                 result.push(
-                    ...makeDiffSubtree(obj_old[element], obj_new[element], `${prefix}/${element}`)
+                    ...makeDiffSubtree(
+                        obj_old[key],
+                        obj_new[key],
+                        `${prefix}/${key}`,
+                        typeHints,
+                        infoObject[key],
+                        false
+                    )
                 );
             }
         }
@@ -416,7 +410,7 @@ type getTypeInfoType = (path: string | string[], root?: any) => TypeInfo;
 export function _getTypeInfo(
     path: string | string[],
     root: any,
-    TYPE_HINTS: Map<TupleTreeType, { [key: string]: TypeInfo }>
+    TYPE_HINTS: TypeHints
 ): TypeInfo | undefined {
     if (typeof path === "string") {
         path = path.split("/").slice(1);
@@ -430,7 +424,7 @@ export function _getTypeInfo(
         } else {
             if (type_info.isArray && type_info.ctor === "parse" && "parseKey" in type_info.type) {
                 const key = path[1];
-                const key_parsed = type_info.type["parseKey"](key);
+                const key_parsed = type_info.type.parseKey(key);
                 if ("Kind" in key_parsed) {
                     const specialized_type = Array.from(TYPE_HINTS.keys()).find(
                         (e) => "name" in e && e["name"] === key_parsed.Kind
@@ -525,14 +519,14 @@ export function _applyDiff<T>(
                 if (target === undefined) {
                     const parentPath = diff.Path.split("/").slice(1);
                     const element = parentPath.pop();
-                    const parent = _getElementByPath(parentPath.join("/"), new_obj);
-                    parent[element] = [];
-                    target = parent[element];
+                    const parent = _getElementByPath(parentPath.join("/"), new_obj)!;
+                    parent[element!] = [];
+                    target = parent[element!];
                 }
                 (target as any).push(constructType(info, diff.Add));
             }
         } else {
-            const parent = getParentElementByPath(diff.Path, new_obj);
+            const parent = getParentElementByPath(diff.Path, new_obj)!;
             const element = diff.Path.split("/").reverse()[0];
             true;
             if (diff.Remove !== undefined) {
@@ -550,7 +544,8 @@ export function _applyDiff<T>(
 // Type Hinting
 
 type Constructor = new (rawObject: any) => any;
-type Parsable = { parse: (rawObject: any) => any };
+type SimpleParsable = { parse: (rawObject: any) => any };
+type Parsable = SimpleParsable | (SimpleParsable & { parseKey: (key: string) => any });
 type NativeParsable = (rawObject: any) => any;
 
 export type TupleTreeType = Constructor | Parsable;
@@ -558,6 +553,7 @@ export type TupleTreeType = Constructor | Parsable;
 interface CommonTypeInfo {
     optional: boolean;
     isArray: boolean;
+    isAbstract: boolean;
 }
 
 interface ConstructorType extends CommonTypeInfo {
@@ -582,6 +578,8 @@ interface EnumType extends CommonTypeInfo {
 }
 
 export type TypeInfo = ConstructorType | ParsableType | NativeType | EnumType;
+export type TypeInfoObject = { [key: string]: TypeInfo };
+export type TypeHints = Map<TupleTreeType, TypeInfoObject>;
 
 export function BigIntBuilder(rawObject: any): bigint {
     return BigInt(rawObject);

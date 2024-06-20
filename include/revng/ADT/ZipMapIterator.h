@@ -11,42 +11,35 @@
 #include <vector>
 
 #include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/Optional.h"
 #include "llvm/ADT/iterator.h"
 
 #include "revng/ADT/KeyedObjectContainer.h"
 #include "revng/Support/Assert.h"
 
-// clang-format off
 template<typename T>
-concept HasKeyType = requires {
-  typename T::key_type;
-};
+concept HasKeyType = requires { typename T::key_type; };
 
 template<typename T>
-concept HasMappedType = requires {
-  typename T::mapped_type;
-};
+concept HasMappedType = requires { typename T::mapped_type; };
 
 template<typename T>
 concept MapLike = HasKeyType<T> and HasMappedType<T>
-  and std::is_same_v<const typename T::value_type::first_type,
-                     const typename T::key_type>
-  and std::is_same_v<typename T::value_type::second_type,
-                     typename T::mapped_type>;
+                  and std::is_same_v<const typename T::value_type::first_type,
+                                     const typename T::key_type>
+                  and std::is_same_v<typename T::value_type::second_type,
+                                     typename T::mapped_type>;
 
 template<typename T>
-concept SetLike = KeyedObjectContainer<T>
-                  or (HasKeyType<T> and not HasMappedType<T>
-                      and std::is_same_v<typename T::key_type,
-                                         typename T::value_type>);
+concept SetLike = HasKeyType<T> and not HasMappedType<T>
+                  and std::is_same_v<typename T::key_type,
+                                     typename T::value_type>;
 
 template<typename T>
-concept VectorOfPairs =
-  std::is_same_v<std::vector<std::pair<typename T::value_type::first_type,
-                                       typename T::value_type::second_type>>,
-                 std::remove_const_t<T>>
-  and std::is_const_v<typename T::value_type::first_type>;
+concept VectorOfPairs = std::is_same_v<std::vector<std::pair<
+                                         typename T::value_type::first_type,
+                                         typename T::value_type::second_type>>,
+                                       std::remove_const_t<T>>
+                        and std::is_const_v<typename T::value_type::first_type>;
 
 namespace {
 
@@ -58,8 +51,6 @@ static_assert(not VectorOfPairs<const vector<pair<int, long>>>, "");
 static_assert(not VectorOfPairs<vector<pair<int, long>>>, "");
 
 } // namespace
-
-// clang-format on
 
 //
 // element_pointer_t

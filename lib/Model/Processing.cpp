@@ -1,6 +1,6 @@
 /// \file Processing.cpp
-/// \brief A collection of helper functions to improve the quality of the
-///        model/make it valid
+/// A collection of helper functions to improve the quality of the model/make it
+/// valid.
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
@@ -16,6 +16,20 @@ using namespace llvm;
 
 namespace model {
 
+template<typename T>
+void purgeFunctions(T &Functions,
+                    const std::set<const model::Type *> &ToDelete) {
+  auto Begin = Functions.begin();
+  for (auto It = Begin; It != Functions.end(); /**/) {
+    if (not It->Prototype().isValid()
+        or not ToDelete.contains(It->Prototype().get())) {
+      ++It;
+    } else {
+      It = Functions.erase(It);
+    }
+  }
+}
+
 unsigned dropTypesDependingOnTypes(TupleTree<model::Binary> &Model,
                                    const std::set<const model::Type *> &Types) {
   // TODO: in case we reach a StructField or UnionField, we should drop the
@@ -30,17 +44,17 @@ unsigned dropTypesDependingOnTypes(TupleTree<model::Binary> &Model,
 
   // Create nodes in reverse dependency graph
   std::map<const model::Type *, ForwardNode<TypeNode> *> TypeToNode;
-  for (UpcastablePointer<model::Type> &T : Model->Types)
+  for (UpcastablePointer<model::Type> &T : Model->Types())
     TypeToNode[T.get()] = ReverseDependencyGraph.addNode(TypeNode{ T.get() });
 
   // Register edges
-  for (UpcastablePointer<model::Type> &T : Model->Types) {
+  for (UpcastablePointer<model::Type> &T : Model->Types()) {
     // Ignore dependencies of types we need to drop
-    if (Types.count(T.get()) != 0)
+    if (Types.contains(T.get()))
       continue;
 
     for (const model::QualifiedType &QT : T->edges()) {
-      auto *DependantType = QT.UnqualifiedType.get();
+      auto *DependantType = QT.UnqualifiedType().get();
       TypeToNode.at(DependantType)->addSuccessor(TypeToNode.at(T.get()));
     }
   }
@@ -53,21 +67,14 @@ unsigned dropTypesDependingOnTypes(TupleTree<model::Binary> &Model,
     }
   }
 
-  // Purge dynamic functions depending on Types
-  auto Begin = Model->ImportedDynamicFunctions.begin();
-  for (auto It = Begin; It != Model->ImportedDynamicFunctions.end(); /**/) {
-    if (not It->Prototype.isValid()
-        or ToDelete.count(It->Prototype.get()) == 0) {
-      ++It;
-    } else {
-      It = Model->ImportedDynamicFunctions.erase(It);
-    }
-  }
+  // Purge both dynamic and local functions depending on Types
+  purgeFunctions(Model->ImportedDynamicFunctions(), ToDelete);
+  purgeFunctions(Model->Functions(), ToDelete);
 
   // Purge types depending on unresolved Types
-  for (auto It = Model->Types.begin(); It != Model->Types.end();) {
-    if (ToDelete.count(It->get()) != 0)
-      It = Model->Types.erase(It);
+  for (auto It = Model->Types().begin(); It != Model->Types().end();) {
+    if (ToDelete.contains(It->get()))
+      It = Model->Types().erase(It);
     else
       ++It;
   }

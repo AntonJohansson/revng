@@ -14,6 +14,8 @@
 
 #include "revng/Model/Binary.h"
 
+struct ImporterOptions;
+
 class PDBImporter {
 private:
   TupleTree<model::Binary> &Model;
@@ -30,6 +32,11 @@ public:
   MetaAddress &getBaseAddress() { return ImageBase; }
   llvm::pdb::PDBFile *getPDBFile() { return ThePDBFile; }
 
-  void import(const llvm::object::COFFObjectFile &TheBinary);
+  void import(const llvm::object::COFFObjectFile &TheBinary,
+              const ImporterOptions &Options);
   void loadDataFromPDB(std::string PDBFileName);
+  std::optional<std::string>
+  getCachedPDBFilePath(std::string PDBFileID,
+                       llvm::StringRef PDBFilePath,
+                       llvm::StringRef InputFileName);
 };

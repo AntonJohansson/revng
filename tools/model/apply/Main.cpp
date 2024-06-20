@@ -1,5 +1,4 @@
 /// \file Main.cpp
-/// \brief
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
@@ -36,10 +35,7 @@ static cl::opt<std::string> DiffPath(cl::Positional,
 static ModelOutputOptions<false> Options(ThisToolCategory);
 
 int main(int Argc, char *Argv[]) {
-  revng::InitRevng X(Argc, Argv);
-
-  cl::HideUnrelatedOptions({ &ThisToolCategory });
-  cl::ParseCommandLineOptions(Argc, Argv);
+  revng::InitRevng X(Argc, Argv, "", { &ThisToolCategory });
 
   ExitOnError ExitOnError;
 
@@ -47,11 +43,10 @@ int main(int Argc, char *Argv[]) {
   if (not Model)
     ExitOnError(Model.takeError());
 
-  auto Diff = deserializeFileOrSTDIN<TupleTreeDiff<model::Binary>>(DiffPath);
-  if (not Diff)
-    ExitOnError(Diff.takeError());
+  using Type = TupleTreeDiff<model::Binary>;
+  auto Diff = ExitOnError(deserializeFileOrSTDIN<Type>(DiffPath));
 
-  Diff->apply(Model->getModel());
+  ExitOnError(Diff.apply(Model->getWriteableModel()));
 
   auto DesiredOutput = Options.getDesiredOutput(Model->hasModule());
   ExitOnError(Model->save(Options.getPath(), DesiredOutput));

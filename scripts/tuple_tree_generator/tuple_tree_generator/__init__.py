@@ -1,17 +1,19 @@
 # This file is distributed under the MIT License. See LICENSE.md for details.
 
-from .generators import (
-    CppHeadersGenerator,
-    JSONSchemaGenerator,
-    PythonGenerator,
-    TypeScriptGenerator,
-)
+from .generators import CppHeadersGenerator, JSONSchemaGenerator, PythonGenerator
+from .generators import TypeScriptGenerator
 from .schema import Schema
 
 
-def generate_cpp_headers(schema: Schema, root_type, user_include_path):
+def generate_cpp_headers(
+    schema: Schema, root_type, user_include_path, emit_tracking, emit_tracking_debug
+):
     generator = CppHeadersGenerator(
-        schema, root_type=root_type, user_include_path=user_include_path
+        schema,
+        root_type=root_type,
+        emit_tracking=emit_tracking,
+        emit_tracking_debug=emit_tracking_debug,
+        user_include_path=user_include_path,
     )
     return generator.emit()
 

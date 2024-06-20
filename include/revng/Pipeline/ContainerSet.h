@@ -21,15 +21,12 @@
 #include "llvm/Support/MemoryBuffer.h"
 
 #include "revng/Pipeline/Container.h"
-#include "revng/Pipeline/Contract.h"
+#include "revng/Pipeline/ContainerFactory.h"
 #include "revng/Pipeline/Kind.h"
 #include "revng/Pipeline/Target.h"
 #include "revng/Support/Assert.h"
 
 namespace pipeline {
-
-using FactorySignature = std::unique_ptr<ContainerBase>(llvm::StringRef);
-using ContainerFactory = std::function<FactorySignature>;
 
 /// A map from containerName to the container itself, which is initially empty.
 ///
@@ -98,7 +95,7 @@ public:
   ContainerBase &operator[](llvm::StringRef Name) {
     revng_assert(containsOrCanCreate(Name));
     if (Content[Name] == nullptr)
-      Content[Name] = (*Factories[Name]) (Name);
+      Content[Name] = (*Factories[Name])(Name);
     auto &Pointer = Content.find(Name)->second;
     revng_assert(Pointer != nullptr);
     return *Pointer;
@@ -119,11 +116,12 @@ public:
   }
 
   bool contains(llvm::StringRef Name) const {
-    return Content.count(Name) != 0 and Content.find(Name)->second != nullptr;
+    auto Iterator = Content.find(Name);
+    return Iterator != Content.end() and Iterator->second != nullptr;
   }
 
   bool containsOrCanCreate(llvm::StringRef Name) const {
-    return Content.count(Name) != 0;
+    return Content.find(Name) != Content.end();
   }
 
   template<typename T>
@@ -159,8 +157,8 @@ public:
   void intersect(ContainerToTargetsMap &ToIntersect) const;
 
 public:
-  llvm::Error storeToDisk(llvm::StringRef DirectoryPath) const;
-  llvm::Error loadFromDisk(llvm::StringRef DirectoryPath);
+  llvm::Error store(const revng::DirectoryPath &DirectoryPath) const;
+  llvm::Error load(const revng::DirectoryPath &DirectoryPath);
 
 public:
   template<typename OStream>

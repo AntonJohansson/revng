@@ -3,22 +3,30 @@
 //
 
 #include "revng/EarlyFunctionAnalysis/FunctionMetadata.h"
-#include "revng/EarlyFunctionAnalysis/IRHelpers.h"
+#include "revng/EarlyFunctionAnalysis/FunctionMetadataCache.h"
 #include "revng/Model/Binary.h"
 #include "revng/Pipeline/Location.h"
 #include "revng/Pipeline/Pipe.h"
 #include "revng/Pipeline/RegisterContainerFactory.h"
 #include "revng/Pipeline/RegisterPipe.h"
+#include "revng/Pipes/FunctionStringMap.h"
 #include "revng/Pipes/Kinds.h"
 #include "revng/Pipes/ModelGlobal.h"
-#include "revng/Yield/CrossRelations.h"
-#include "revng/Yield/Pipes/ProcessCallGraphPipe.h"
+#include "revng/Pipes/TupleTreeContainer.h"
+#include "revng/Yield/CrossRelations/CrossRelations.h"
+#include "revng/Yield/Generated/ForwardDecls.h"
+#include "revng/Yield/Pipes/ProcessCallGraph.h"
+#include "revng/Yield/Pipes/YieldCallGraph.h"
+#include "revng/Yield/Pipes/YieldCallGraphSlice.h"
+#include "revng/Yield/SVG.h"
+
+using ptml::PTMLBuilder;
 
 namespace revng::pipes {
 
-void ProcessCallGraph::run(pipeline::Context &Context,
+void ProcessCallGraph::run(pipeline::ExecutionContext &Context,
                            const pipeline::LLVMContainer &TargetList,
-                           FileContainer &OutputFile) {
+                           CrossRelationsFileContainer &OutputFile) {
   // Access the model
   const auto &Model = getModelFromContext(Context);
 
@@ -28,50 +36,83 @@ void ProcessCallGraph::run(pipeline::Context &Context,
   // Gather function metadata
   SortedVector<efa::FunctionMetadata> Metadata;
   for (const auto &LLVMFunction : FunctionTags::Isolated.functions(&Module))
-    Metadata.insert(*extractFunctionMetadata(&LLVMFunction));
-  revng_assert(Metadata.size() == Model->Functions.size());
+    Metadata.insert(*::detail::extractFunctionMetadata(&LLVMFunction));
 
-  // Gather the relations
-  yield::CrossRelations Relations(Metadata, *Model);
+  // If some functions are missing, do not output anything
+  if (Metadata.size() != Model->Functions().size())
+    return;
 
-  // Serialize the output
-  std::error_code ErrorCode;
-  llvm::raw_fd_ostream Stream(OutputFile.getOrCreatePath(), ErrorCode);
-  if (ErrorCode)
-    revng_abort(ErrorCode.message().c_str());
-
-  llvm::yaml::Output YamlStream(Stream);
-  YamlStream << Relations;
-
-  Stream.flush();
-  if ((ErrorCode = Stream.error()))
-    revng_abort(ErrorCode.message().c_str());
+  OutputFile.emplace(Metadata, *Model);
 }
 
 void ProcessCallGraph::print(const pipeline::Context &,
                              llvm::raw_ostream &OS,
                              llvm::ArrayRef<std::string>) const {
-  OS << *revng::ResourceFinder.findFile("bin/revng") << " magic ^_^\n";
+  OS << "[this is a pure pipe, no command exists for its invocation]\n";
 }
 
-std::array<pipeline::ContractGroup, 1> ProcessCallGraph::getContract() const {
-  return { pipeline::ContractGroup(kinds::IsolatedRoot,
-                                   pipeline::Exactness::Exact,
-                                   0,
-                                   kinds::BinaryCrossRelations,
-                                   1,
-                                   pipeline::InputPreservation::Preserve) };
+void YieldCallGraph::run(pipeline::ExecutionContext &Context,
+                         const CrossRelationsFileContainer &Relations,
+                         CallGraphSVGFileContainer &Output) {
+  // Access the model
+  const auto &Model = revng::getModelFromContext(Context);
+  PTMLBuilder ThePTMLBuilder;
+
+  // Convert the graph to SVG.
+  auto Result = yield::svg::callGraph(ThePTMLBuilder, *Relations.get(), *Model);
+
+  // Print the result.
+  Output.setContent(std::move(Result));
 }
 
-static pipeline::RegisterContainerFactory
-  InternalContainer("BinaryCrossRelations",
-                    makeFileContainerFactory(kinds::BinaryCrossRelations,
-                                             "application/"
-                                             "x.yaml.cross-relations"));
+void YieldCallGraph::print(const pipeline::Context &,
+                           llvm::raw_ostream &OS,
+                           llvm::ArrayRef<std::string>) const {
+  OS << "[this is a pure pipe, no command exists for its invocation]\n";
+}
 
-static pipeline::RegisterRole
-  Role("BinaryCrossRelations", kinds::BinaryCrossRelationsRole);
+void YieldCallGraphSlice::run(pipeline::ExecutionContext &Context,
+                              const pipeline::LLVMContainer &TargetList,
+                              const CrossRelationsFileContainer &Relations,
+                              CallGraphSliceSVGStringMap &Output) {
+  // Access the model
+  const auto &Model = revng::getModelFromContext(Context);
+
+  // Access the llvm module
+  const llvm::Module &Module = TargetList.getModule();
+  PTMLBuilder ThePTMLBuilder;
+  FunctionMetadataCache Cache;
+  for (const auto &LLVMFunction : FunctionTags::Isolated.functions(&Module)) {
+    auto &Metadata = Cache.getFunctionMetadata(&LLVMFunction);
+    revng_assert(llvm::is_contained(Model->Functions(), Metadata.Entry()));
+
+    // Slice the graph for the current function and convert it to SVG
+    auto SlicePoint = pipeline::serializedLocation(revng::ranks::Function,
+                                                   Metadata.Entry());
+    Output.insert_or_assign(Metadata.Entry(),
+                            yield::svg::callGraphSlice(ThePTMLBuilder,
+                                                       SlicePoint,
+                                                       *Relations.get(),
+                                                       *Model));
+  }
+}
+
+void YieldCallGraphSlice::print(const pipeline::Context &,
+                                llvm::raw_ostream &OS,
+                                llvm::ArrayRef<std::string>) const {
+  OS << "[this is a pure pipe, no command exists for its invocation]\n";
+}
+using namespace pipeline;
+
+static RegisterDefaultConstructibleContainer<CrossRelationsFileContainer> X1;
+static RegisterDefaultConstructibleContainer<CallGraphSVGFileContainer> X2;
+static RegisterFunctionStringMap<CallGraphSliceSVGStringMap> X3;
+
+static pipeline::RegisterRole Role("BinaryCrossRelations",
+                                   kinds::BinaryCrossRelationsRole);
 
 static pipeline::RegisterPipe<ProcessCallGraph> ProcessPipe;
+static pipeline::RegisterPipe<YieldCallGraph> YieldPipe;
+static pipeline::RegisterPipe<YieldCallGraphSlice> YieldSlicePipe;
 
 } // end namespace revng::pipes

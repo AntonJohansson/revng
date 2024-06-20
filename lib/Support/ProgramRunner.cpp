@@ -1,6 +1,6 @@
 /// \file ProgramRunner.cpp
-/// \brief a program runner is used to invoke external programs a bit more
-/// safelly than to compose a string and invoke system
+/// A program runner is used to invoke external programs a bit more safelly than
+/// to compose a string and invoke system.
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
@@ -23,11 +23,9 @@ ProgramRunner Runner;
 
 ProgramRunner::ProgramRunner() {
   using namespace llvm::sys::path;
-  std::string CurrentProgramPath = parent_path(getCurrentExecutableFullPath())
-                                     .str();
   llvm::SmallString<128> BinPath;
   append(BinPath, getCurrentRoot(), "bin");
-  Paths = { CurrentProgramPath, BinPath.str().str() };
+  Paths = { BinPath.str().str() };
 
   // Append PATH
   char *Path = getenv("PATH");
@@ -39,14 +37,24 @@ ProgramRunner::ProgramRunner() {
     Paths.push_back(BasePath.str());
 }
 
-int ProgramRunner::run(llvm::StringRef ProgramName,
-                       ArrayRef<std::string> Args) {
-  using namespace llvm::sys;
+bool ProgramRunner::isProgramAvailable(llvm::StringRef ProgramName) {
   llvm::SmallVector<llvm::StringRef, 64> PathsRef;
   for (const std::string &Path : Paths)
     PathsRef.push_back(llvm::StringRef(Path));
 
-  auto MaybeProgramPath = findProgramByName(ProgramName, PathsRef);
+  auto MaybeProgramPath = llvm::sys::findProgramByName(ProgramName, PathsRef);
+  if (!MaybeProgramPath)
+    return false;
+  return true;
+}
+
+int ProgramRunner::run(llvm::StringRef ProgramName,
+                       ArrayRef<std::string> Args) {
+  llvm::SmallVector<llvm::StringRef, 64> PathsRef;
+  for (const std::string &Path : Paths)
+    PathsRef.push_back(llvm::StringRef(Path));
+
+  auto MaybeProgramPath = llvm::sys::findProgramByName(ProgramName, PathsRef);
   revng_assert(not Paths.empty());
   revng_assert(MaybeProgramPath,
                (ProgramName + " was not found in " + getenv("PATH"))
@@ -58,7 +66,7 @@ int ProgramRunner::run(llvm::StringRef ProgramName,
   for (const std::string &Arg : Args)
     StringRefs.push_back(Arg);
 
-  int ExitCode = ExecuteAndWait(StringRefs[0], StringRefs);
+  int ExitCode = llvm::sys::ExecuteAndWait(StringRefs[0], StringRefs);
 
   return ExitCode;
 }

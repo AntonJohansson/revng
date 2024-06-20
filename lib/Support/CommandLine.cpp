@@ -1,5 +1,4 @@
 /// \file CommandLine.cpp
-/// \brief Implementation of the debug framework
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
@@ -13,11 +12,6 @@
 namespace cl = llvm::cl;
 
 cl::OptionCategory MainCategory("Options", "");
-
-cl::opt<bool> IgnoreDebugSymbols("ignore-debug-symbols",
-                                 cl::desc("ignore section and symbol function "
-                                          "informations"),
-                                 cl::cat(MainCategory));
 
 std::ostream &pathToStream(const std::string &Path, std::ofstream &File) {
   if (Path[0] == '-' && Path[1] == '\0') {

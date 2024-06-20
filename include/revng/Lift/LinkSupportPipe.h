@@ -11,7 +11,7 @@
 #include "revng/Pipeline/ContainerSet.h"
 #include "revng/Pipeline/Contract.h"
 #include "revng/Pipeline/LLVMContainer.h"
-#include "revng/Pipeline/LLVMGlobalKindBase.h"
+#include "revng/Pipeline/LLVMKind.h"
 #include "revng/Pipeline/Target.h"
 #include "revng/Pipes/Kinds.h"
 
@@ -23,12 +23,12 @@ public:
 
   std::array<pipeline::ContractGroup, 1> getContract() const {
     return { pipeline::ContractGroup(kinds::Root,
-                                     pipeline::Exactness::DerivedFrom,
                                      0,
                                      pipeline::InputPreservation::Preserve) };
   }
 
-  void run(const pipeline::Context &Ctx, pipeline::LLVMContainer &TargetsList);
+  void run(const pipeline::ExecutionContext &Ctx,
+           pipeline::LLVMContainer &TargetsList);
 
   void print(const pipeline::Context &Ctx,
              llvm::raw_ostream &OS,

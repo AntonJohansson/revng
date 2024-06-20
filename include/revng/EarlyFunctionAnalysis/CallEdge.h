@@ -46,15 +46,20 @@ private:
     AssociatedType = FunctionEdgeType::FunctionCall;
 
 public:
-  CallEdge() : efa::generated::CallEdge() { Type = AssociatedType; }
+  using generated::CallEdge::CallEdge;
 
-  CallEdge(MetaAddress Destination, FunctionEdgeType::Values Type) :
-    efa::generated::CallEdge(Destination, Type) {}
+  CallEdge() : efa::generated::CallEdge() { Type() = AssociatedType; }
+
+  CallEdge(BasicBlockID Destination, FunctionEdgeType::Values Type) :
+    efa::generated::CallEdge() {
+    this->Destination() = Destination;
+    this->Type() = Type;
+  }
 
 public:
   static bool classof(const FunctionEdgeBase *A) { return classof(A->key()); }
   static bool classof(const Key &K) {
-    return FunctionEdgeType::isCall(std::get<1>(K));
+    return std::get<1>(K) == FunctionEdgeBaseKind::CallEdge;
   }
 
 public:
@@ -62,11 +67,11 @@ public:
                     model::FunctionAttribute::Values Attribute) const {
     using namespace model;
 
-    if (Attributes.count(Attribute) != 0)
+    if (Attributes().contains(Attribute))
       return true;
 
     if (const auto *CalleeAttributes = calleeAttributes(Binary))
-      return CalleeAttributes->count(Attribute) != 0;
+      return CalleeAttributes->contains(Attribute);
     else
       return false;
   }
@@ -75,7 +80,7 @@ public:
   attributes(const model::Binary &Binary) const {
     MutableSet<model::FunctionAttribute::Values> Result;
     auto Inserter = Result.batch_insert();
-    for (auto &Attribute : Attributes)
+    for (auto &Attribute : Attributes())
       Inserter.insert(Attribute);
 
     if (const auto *CalleeAttributes = calleeAttributes(Binary))
@@ -92,45 +97,17 @@ public:
   void dump() const debug_function;
 
 private:
-  const MutableSet<model::FunctionAttribute::Values> *
+  const TrackingMutableSet<model::FunctionAttribute::Values> *
   calleeAttributes(const model::Binary &Binary) const {
-    if (not DynamicFunction.empty()) {
-      const auto &F = Binary.ImportedDynamicFunctions.at(DynamicFunction);
-      return &F.Attributes;
-    } else if (Destination.isValid()) {
-      return &Binary.Functions.at(Destination).Attributes;
+    if (not DynamicFunction().empty()) {
+      const auto &F = Binary.ImportedDynamicFunctions().at(DynamicFunction());
+      return &F.Attributes();
+    } else if (Destination().isValid()) {
+      return &Binary.Functions().at(Destination().start()).Attributes();
     } else {
       return nullptr;
     }
   }
 };
-
-inline model::TypePath getPrototype(const model::Binary &Binary,
-                                    MetaAddress CallerFunctionAddress,
-                                    MetaAddress CallerBlockAddress,
-                                    const efa::CallEdge &Edge) {
-  model::TypePath Result;
-
-  auto It = Binary.Functions.at(CallerFunctionAddress)
-              .CallSitePrototypes.find(CallerBlockAddress);
-  if (It != Binary.Functions.at(CallerFunctionAddress).CallSitePrototypes.end())
-    Result = It->Prototype;
-
-  if (Edge.Type == efa::FunctionEdgeType::FunctionCall) {
-    if (not Edge.DynamicFunction.empty()) {
-      // Get the dynamic function prototype
-      Result = Binary.ImportedDynamicFunctions.at(Edge.DynamicFunction)
-                 .Prototype;
-    } else if (Edge.Destination.isValid()) {
-      // Get the function prototype
-      Result = Binary.Functions.at(Edge.Destination).Prototype;
-    }
-  }
-
-  if (not Result.isValid())
-    Result = Binary.DefaultPrototype;
-
-  return Result;
-}
 
 #include "revng/EarlyFunctionAnalysis/Generated/Late/CallEdge.h"

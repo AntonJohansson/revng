@@ -1,5 +1,4 @@
 /// \file Extraction.cpp
-/// \brief
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
@@ -11,60 +10,59 @@
 #include "revng/Yield/ControlFlow/Configuration.h"
 #include "revng/Yield/ControlFlow/Extraction.h"
 #include "revng/Yield/ControlFlow/FallthroughDetection.h"
+#include "revng/Yield/ControlFlow/Graph.h"
 #include "revng/Yield/Function.h"
-#include "revng/Yield/Graph.h"
 
-yield::Graph
+yield::cfg::PreLayoutGraph
 yield::cfg::extractFromInternal(const yield::Function &Function,
                                 const model::Binary &Binary,
                                 const Configuration &Configuration) {
-  const auto &ControlFlowGraph = Function.ControlFlowGraph;
-  auto [Result, Table] = efa::buildControlFlowGraph<Graph>(ControlFlowGraph,
-                                                           Function.Entry,
-                                                           Binary);
+  using PLG = PreLayoutGraph;
+  const auto &ControlFlowGraph = Function.ControlFlowGraph();
+  auto [Result, Lookup] = efa::buildControlFlowGraph<PLG>(ControlFlowGraph,
+                                                          Function.Entry(),
+                                                          Binary);
 
   if (!Configuration.AddExitNode) {
-    auto ExitNodeIterator = Table.find(MetaAddress::invalid());
-    if (ExitNodeIterator != Table.end())
+    auto ExitNodeIterator = Lookup.find(BasicBlockID::invalid());
+    if (ExitNodeIterator != Lookup.end())
       Result.removeNode(ExitNodeIterator->second);
   }
 
   if (Configuration.AddEntryNode) {
-    auto EntryIterator = Table.find(Function.Entry);
-    revng_assert(EntryIterator != Table.end());
+    auto EntryIterator = Lookup.find(BasicBlockID(Function.Entry()));
+    revng_assert(EntryIterator != Lookup.end());
     auto *RootNode = Result.addNode();
-    RootNode->Address = MetaAddress::invalid();
     RootNode->addSuccessor(EntryIterator->second);
     Result.setEntryNode(RootNode);
   }
 
-  // Colour taken and refused edges.
-  for (const auto &BasicBlock : Function.ControlFlowGraph) {
-    auto NodeIterator = Table.find(BasicBlock.Start);
-    revng_assert(NodeIterator != Table.end());
+  // Colour 'taken' and 'refused' edges.
+  for (const auto &BasicBlock : Function.ControlFlowGraph()) {
+    auto NodeIterator = Lookup.find(BasicBlock.ID());
+    revng_assert(NodeIterator != Lookup.end());
     auto &CurrentNode = *NodeIterator->second;
-    CurrentNode.NextAddress = BasicBlock.End;
 
-    if (BasicBlock.Successors.size() == 2) {
+    if (BasicBlock.Successors().size() == 2) {
       revng_assert(CurrentNode.successorCount() <= 2);
       if (CurrentNode.successorCount() == 2) {
         auto Front = *CurrentNode.successor_edges_begin();
         auto Back = *std::next(CurrentNode.successor_edges_begin());
-        if (Front.Neighbor->Address == BasicBlock.End) {
-          Front.Label->Type = yield::Graph::EdgeType::Refused;
-          Back.Label->Type = yield::Graph::EdgeType::Taken;
-        } else if (Back.Neighbor->Address == BasicBlock.End) {
-          Front.Label->Type = yield::Graph::EdgeType::Taken;
-          Back.Label->Type = yield::Graph::EdgeType::Refused;
+        if (Front.Neighbor->getBasicBlock() == BasicBlock.nextBlock()) {
+          Front.Label->Type = yield::cfg::EdgeType::Refused;
+          Back.Label->Type = yield::cfg::EdgeType::Taken;
+        } else if (Back.Neighbor->getBasicBlock() == BasicBlock.nextBlock()) {
+          Front.Label->Type = yield::cfg::EdgeType::Taken;
+          Back.Label->Type = yield::cfg::EdgeType::Refused;
         }
       } else if (CurrentNode.successorCount() == 1) {
-        for (const auto &Successor : BasicBlock.Successors)
-          if (efa::FunctionEdgeType::isCall(Successor->Type))
+        for (const auto &Successor : BasicBlock.Successors())
+          if (FunctionEdgeType::isCall(Successor->Type()))
             continue;
 
         auto Edge = *CurrentNode.successor_edges_begin();
-        if (Edge.Neighbor->Address == BasicBlock.End)
-          Edge.Label->Type = yield::Graph::EdgeType::Refused;
+        if (Edge.Neighbor->getBasicBlock() == BasicBlock.nextBlock())
+          Edge.Label->Type = yield::cfg::EdgeType::Refused;
       }
     }
   }

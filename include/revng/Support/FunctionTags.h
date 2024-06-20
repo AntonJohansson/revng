@@ -24,12 +24,9 @@ namespace FunctionTags {
 
 class Tag;
 
-// clang-format off
 template<typename T>
-concept Taggable = (std::is_base_of_v<llvm::Instruction, T>
-                    or std::is_same_v<llvm::GlobalVariable, T>
+concept Taggable = (std::is_same_v<llvm::GlobalVariable, T>
                     or std::is_same_v<llvm::Function, T>);
-// clang-format on
 
 /// Represents a set of Tag that can be attached to an
 /// Instruction/GlobalVariable/Function
@@ -55,10 +52,15 @@ public:
   static TagsSet from(const llvm::MDNode *MD);
 
 public:
-  bool containsExactly(const Tag &Target) const {
-    return Tags.count(&Target) != 0;
-  }
+  auto begin() const { return Tags.begin(); }
+  auto end() const { return Tags.end(); }
 
+public:
+  bool containsExactly(const Tag &Target) const;
+
+  // TODO: This seems non-obvious to me. I feel like it would be more natural
+  //       for this to be called `containsDescendants`, while `containsExactly`
+  //       could either stay as is or be renamed into just `contains`.
   bool contains(const Tag &Target) const;
 
 public:
@@ -147,6 +149,19 @@ public:
   }
 };
 
+inline bool TagsSet::containsExactly(const Tag &Target) const {
+  // if the input is not inside me, return false
+  if (Tags.count(&Target) == 0)
+    return false;
+
+  // for each element of me, if the target is a ancestor but is not exactly that
+  // tag, return false
+  for (const Tag *T : Tags)
+    if (Target.ancestorOf(*T) and &Target != T)
+      return false;
+  return true;
+}
+
 inline bool TagsSet::contains(const Tag &Target) const {
   for (const Tag *T : Tags)
     if (Target.ancestorOf(*T))
@@ -177,7 +192,6 @@ inline Tag Isolated("Isolated");
 inline Tag ABIEnforced("ABIEnforced", Isolated);
 inline Tag CSVsPromoted("CSVsPromoted", ABIEnforced);
 
-inline Tag CallToLifted("CallToLifted");
 inline Tag Exceptional("Exceptional");
 inline Tag StructInitializer("StructInitializer");
 inline Tag OpaqueCSVValue("OpaqueCSVValue");
@@ -187,6 +201,10 @@ inline Tag IsolatedRoot("IsolatedRoot");
 inline Tag CSVsAsArgumentsWrapper("CSVsAsArgumentsWrapper");
 inline Tag Marker("Marker");
 inline Tag DynamicFunction("DynamicFunction");
+inline Tag ClobbererFunction("ClobbererFunction");
+inline Tag ReaderFunction("ReaderFunction");
+
+inline Tag CSV("CSV");
 
 } // namespace FunctionTags
 
@@ -194,4 +212,27 @@ inline bool isRootOrLifted(const llvm::Function *F) {
   auto Tags = FunctionTags::TagsSet::from(F);
   return Tags.contains(FunctionTags::Root)
          or Tags.contains(FunctionTags::Isolated);
+}
+
+//
+// {is,get}CallToTagged
+//
+const llvm::CallInst *getCallToTagged(const llvm::Value *V,
+                                      const FunctionTags::Tag &T);
+
+llvm::CallInst *getCallToTagged(llvm::Value *V, const FunctionTags::Tag &T);
+
+inline bool isCallToTagged(const llvm::Value *V, const FunctionTags::Tag &T) {
+  return getCallToTagged(V, T) != nullptr;
+}
+
+//
+// {is,get}CallToIsolatedFunction
+//
+const llvm::CallInst *getCallToIsolatedFunction(const llvm::Value *V);
+
+llvm::CallInst *getCallToIsolatedFunction(llvm::Value *V);
+
+inline bool isCallToIsolatedFunction(const llvm::Value *V) {
+  return getCallToIsolatedFunction(V) != nullptr;
 }

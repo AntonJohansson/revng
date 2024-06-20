@@ -37,6 +37,7 @@ public:
 
   // typedef ChildEdgeIteratorType - Type used to iterate over children edges in
   //                             graph, dereference to a EdgeRef.
+
 protected:
   using PredT = typename PredicateType::value_type;
   static_assert(std::is_invocable_r_v<bool, PredT, NodeRef, NodeRef>);
@@ -55,16 +56,16 @@ public:
   //    Return iterators that point to the beginning and ending of the child
   //    node list for the specified node.
   static auto child_begin(NodeRef N) {
-    auto Childs = llvm::make_range(BaseGraphTraits::child_begin(N),
-                                   BaseGraphTraits::child_end(N));
+    auto Children = llvm::make_range(BaseGraphTraits::child_begin(N),
+                                     BaseGraphTraits::child_end(N));
     const auto P = std::bind(PredicateType::value, N, std::placeholders::_1);
-    return llvm::make_filter_range(Childs, std::move(P)).begin();
+    return llvm::make_filter_range(Children, std::move(P)).begin();
   }
   static auto child_end(NodeRef N) {
-    auto Childs = llvm::make_range(BaseGraphTraits::child_begin(N),
-                                   BaseGraphTraits::child_end(N));
+    auto Children = llvm::make_range(BaseGraphTraits::child_begin(N),
+                                     BaseGraphTraits::child_end(N));
     const auto P = std::bind(PredicateType::value, N, std::placeholders::_1);
-    return llvm::make_filter_range(Childs, std::move(P)).end();
+    return llvm::make_filter_range(Children, std::move(P)).end();
   }
 
   static_assert(std::is_same_v<decltype(child_begin(std::declval<NodeRef>())),
@@ -92,6 +93,7 @@ public:
 
   // typedef ChildEdgeIteratorType - Type used to iterate over children edges in
   //                             graph, dereference to a EdgeRef.
+
 protected:
   using PredT = typename PredicateType::value_type;
   static_assert(std::is_invocable_r_v<bool, PredT, NodeRef, NodeRef>);
@@ -108,16 +110,16 @@ public:
   //    Return iterators that point to the beginning and ending of the child
   //    node list for the specified node.
   static auto child_begin(NodeRef N) {
-    auto Childs = llvm::make_range(InvGraphTraits::child_begin(N),
-                                   InvGraphTraits::child_end(N));
+    auto Children = llvm::make_range(InvGraphTraits::child_begin(N),
+                                     InvGraphTraits::child_end(N));
     const auto P = std::bind(PredicateType::value, std::placeholders::_1, N);
-    return llvm::make_filter_range(Childs, std::move(P)).begin();
+    return llvm::make_filter_range(Children, std::move(P)).begin();
   }
   static auto child_end(NodeRef N) {
-    auto Childs = llvm::make_range(InvGraphTraits::child_begin(N),
-                                   InvGraphTraits::child_end(N));
+    auto Children = llvm::make_range(InvGraphTraits::child_begin(N),
+                                     InvGraphTraits::child_end(N));
     const auto P = std::bind(PredicateType::value, std::placeholders::_1, N);
-    return llvm::make_filter_range(Childs, std::move(P)).end();
+    return llvm::make_filter_range(Children, std::move(P)).end();
   }
 
   static_assert(std::is_same_v<decltype(child_begin(std::declval<NodeRef>())),
@@ -184,7 +186,8 @@ public:
   using EdgeRef = typename BaseGraphTraits::EdgeRef;
 
   // typedef ChildEdgeIteratorType - Type used to iterate over children edges in
-  //                             graph, dereference to a EdgeRef.
+  //                                 graph, dereference to a EdgeRef.
+
 protected:
   using PredT = typename PredicateType::value_type;
   static_assert(std::is_invocable_r_v<bool, PredT, EdgeRef>);
@@ -285,6 +288,7 @@ public:
 
   // typedef ChildEdgeIteratorType - Type used to iterate over children edges in
   //                             graph, dereference to a EdgeRef.
+
 protected:
   using PredT = typename PredicateType::value_type;
   static_assert(std::is_invocable_r_v<bool, PredT, EdgeRef>);
@@ -316,6 +320,7 @@ public:
 
   // typedef ChildIteratorType - Type used to iterate over children in graph,
   //                             dereference to a NodeRef.
+
 protected:
   using EdgeDest = NodeRef (*)(EdgeRef);
 

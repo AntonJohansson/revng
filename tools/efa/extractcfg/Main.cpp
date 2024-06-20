@@ -9,12 +9,12 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/MemoryBuffer.h"
 
-#include "revng/EarlyFunctionAnalysis/IRHelpers.h"
+#include "revng/EarlyFunctionAnalysis/FunctionMetadataCache.h"
 #include "revng/Model/ToolHelpers.h"
 #include "revng/Support/IRHelpers.h"
 #include "revng/Support/InitRevng.h"
 
-#include "./DecoratedFunction.h"
+#include "DecoratedFunction.h"
 
 using namespace llvm;
 
@@ -30,11 +30,8 @@ static cl::opt<std::string> OutputFilename("o",
                                            llvm::cl::desc("<output file>"),
                                            cl::value_desc("filename"));
 
-int main(int argc, const char **argv) {
-  revng::InitRevng X(argc, argv);
-
-  cl::HideUnrelatedOptions({ &MainCategory });
-  cl::ParseCommandLineOptions(argc, argv);
+int main(int argc, char *argv[]) {
+  revng::InitRevng X(argc, argv, "", { &MainCategory });
 
   auto BufOrError = MemoryBuffer::getFileOrSTDIN(InputModule);
   if (std::error_code EC = BufOrError.getError())
@@ -54,6 +51,7 @@ int main(int argc, const char **argv) {
   auto *RootFunction = Module->getFunction("root");
   revng_assert(RootFunction != nullptr);
 
+  FunctionMetadataCache Cache;
   if (not RootFunction->isDeclaration()) {
     for (BasicBlock &BB : *Module->getFunction("root")) {
       llvm::Instruction *Term = BB.getTerminator();
@@ -61,27 +59,33 @@ int main(int argc, const char **argv) {
       if (not FMMDNode)
         continue;
 
-      efa::FunctionMetadata FM = *extractFunctionMetadata(&BB).get();
-      auto &Function = Model->Functions.at(FM.Entry);
-      revng::DecoratedFunction NewFunction(FM.Entry,
-                                           Function.OriginalName,
+      const efa::FunctionMetadata &FM = Cache.getFunctionMetadata(&BB);
+      auto &Function = Model->Functions().at(FM.Entry());
+      MutableSet<model::FunctionAttribute::Values> Attributes;
+      for (auto &Entry : Function.Attributes())
+        Attributes.insert(Entry);
+      revng::DecoratedFunction NewFunction(FM.Entry(),
+                                           Function.OriginalName(),
                                            FM,
-                                           Function.Attributes);
+                                           Attributes);
       DecoratedFunctions.insert(std::move(NewFunction));
     }
   }
 
   for (Function &F : FunctionTags::Isolated.functions(Module.get())) {
     auto *FMMDNode = F.getMetadata(FunctionMetadataMDName);
-    efa::FunctionMetadata FM = *extractFunctionMetadata(&F).get();
-    if (not FMMDNode or DecoratedFunctions.count(FM.Entry) != 0)
+    const efa::FunctionMetadata &FM = Cache.getFunctionMetadata(&F);
+    if (not FMMDNode or DecoratedFunctions.contains(FM.Entry()))
       continue;
 
-    auto &Function = Model->Functions.at(FM.Entry);
-    revng::DecoratedFunction NewFunction(FM.Entry,
-                                         Function.OriginalName,
+    auto &Function = Model->Functions().at(FM.Entry());
+    MutableSet<model::FunctionAttribute::Values> Attributes;
+    for (auto &Entry : Function.Attributes())
+      Attributes.insert(Entry);
+    revng::DecoratedFunction NewFunction(FM.Entry(),
+                                         Function.OriginalName(),
                                          FM,
-                                         Function.Attributes);
+                                         Attributes);
     DecoratedFunctions.insert(std::move(NewFunction));
   }
 

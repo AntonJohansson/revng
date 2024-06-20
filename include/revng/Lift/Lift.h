@@ -13,7 +13,7 @@
 namespace JTReason {
 
 // TODO: move me to another header file
-/// \brief Reason for registering a jump target
+/// Reason for registering a jump target
 enum Values {
   /// PC after an helper (e.g., a syscall)
   PostHelper = 1,
@@ -21,8 +21,8 @@ enum Values {
   DirectJump = 2,
   /// Obtained digging in global data
   GlobalData = 4,
-  /// Fallthrough of multiple instructions in the immediately preceeding bytes
-  AmbigousInstruction = 8,
+  /// Fallthrough of multiple instructions in the immediately preceding bytes
+  AmbiguousInstruction = 8,
   /// Stored in the PC
   PCStore = 16,
   /// Stored in memory
@@ -51,8 +51,8 @@ inline const char *getName(Values Reason) {
     return "DirectJump";
   case GlobalData:
     return "GlobalData";
-  case AmbigousInstruction:
-    return "AmbigousInstruction";
+  case AmbiguousInstruction:
+    return "AmbiguousInstruction";
   case PCStore:
     return "PCStore";
   case MemoryStore:
@@ -81,8 +81,8 @@ inline Values fromName(llvm::StringRef ReasonName) {
     return DirectJump;
   else if (ReasonName == "GlobalData")
     return GlobalData;
-  else if (ReasonName == "AmbigousInstruction")
-    return AmbigousInstruction;
+  else if (ReasonName == "AmbiguousInstruction")
+    return AmbiguousInstruction;
   else if (ReasonName == "PCStore")
     return PCStore;
   else if (ReasonName == "MemoryStore")
@@ -111,7 +111,12 @@ inline bool hasReason(uint32_t Reasons, Values ToCheck) {
 
 namespace KillReason {
 
-enum Values { NonKiller, KillerSyscall, EndlessLoop, LeadsToKiller };
+enum Values {
+  NonKiller,
+  KillerSyscall,
+  EndlessLoop,
+  LeadsToKiller
+};
 
 inline llvm::StringRef getName(Values Reason) {
   switch (Reason) {

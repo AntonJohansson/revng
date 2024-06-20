@@ -16,7 +16,7 @@
 #include "revng/Pipeline/GenericLLVMPipe.h"
 #include "revng/Pipeline/Kind.h"
 #include "revng/Pipeline/LLVMContainer.h"
-#include "revng/Pipeline/LLVMGlobalKindBase.h"
+#include "revng/Pipeline/LLVMKind.h"
 #include "revng/Pipeline/Target.h"
 #include "revng/Pipes/FileContainer.h"
 #include "revng/Pipes/Kinds.h"
@@ -30,15 +30,14 @@ public:
   static constexpr auto Name = "Lift";
   std::array<pipeline::ContractGroup, 1> getContract() const {
     return { pipeline::ContractGroup(kinds::Binary,
-                                     pipeline::Exactness::Exact,
                                      0,
                                      kinds::Root,
                                      1,
                                      pipeline::InputPreservation::Preserve) };
   }
 
-  void run(pipeline::Context &Ctx,
-           const FileContainer &SourceBinary,
+  void run(pipeline::ExecutionContext &Ctx,
+           const BinaryFileContainer &SourceBinary,
            pipeline::LLVMContainer &Output);
 
   llvm::Error checkPrecondition(const pipeline::Context &Ctx) const;

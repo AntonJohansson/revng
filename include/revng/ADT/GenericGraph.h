@@ -30,29 +30,27 @@
 ///     of implementation simplicity this node stores COPIES of the labels.
 ///     It's only suitable to be used with cheap to copy labels which are never
 ///     mutated. There are plans on making them explicitly immutable (TODO),
-///     as such you can consider label mutation a deprecated behaviour.
+///     as such you can consider label mutation a deprecated behavior.
 ///
 ///   - MutableEdgeNode - a double-linked node with dynamically allocated
 ///     labels. It is similar to BidirectionalNode except it stores edge labels
 ///     on the heap. It's slower and uses more memory but allows for safe label
 ///     modification as well as controls that nodes and edges are removed
-///     safely, with the other "halfs" cleaned up as well.
+///     safely, with the other "halves" cleaned up as well.
 ///     Note that it's disallowed to have a mutable edge graph without edge
 ///     labels. Use `BidirectionalNode` in those cases.
 ///
 ///   - The node you're going to write - No-one knows the needs of your
-///     project better than you. That's why the best datastructure is the one
+///     project better than you. That's why the best data structure is the one
 ///     you are going to write. So just inherit one of our nodes, or even copy
 ///     it and modify it so that it suits your graphs as nicely as possible.
 ///
 ///  On the side-note, we're providing a couple of helpful concepts to help
-///  differenciate different node types. This is helpful in the projects that
+///  differentiate different node types. This is helpful in the projects that
 ///  use multiple different graph architectures side by side.
 
 template<typename T>
-concept SpecializationOfForwardNode = requires {
-  T::is_forward_node;
-};
+concept SpecializationOfForwardNode = requires { T::is_forward_node; };
 
 template<typename T>
 concept StrictSpecializationOfBidirectionalNode = requires {
@@ -102,7 +100,7 @@ template<typename Node, typename EdgeLabel>
 struct Edge : public EdgeLabel {
   Edge(Node *Neighbor) : Neighbor(Neighbor) {}
   Edge(Node *Neighbor, EdgeLabel EL) : EdgeLabel(EL), Neighbor(Neighbor) {}
-  Node *Neighbor;
+  Node *Neighbor = nullptr;
 };
 
 //
@@ -157,7 +155,7 @@ namespace revng::detail {
 /// \note At this step Forward edge has not been declared yet, thus we accept a
 ///       template parameter that has the same signature as ForwardEdge that
 ///       will be declared later. This allows us to use it as if it was
-///       delcared, provided that only the real ForwardEdge is used as this
+///       declared, provided that only the real ForwardEdge is used as this
 ///       argument.
 template<typename Node,
          typename EdgeLabel,
@@ -227,6 +225,8 @@ public:
 
   ForwardNode(const ForwardNode &) = default;
   ForwardNode(ForwardNode &&) = default;
+  ForwardNode &operator=(const ForwardNode &) = default;
+  ForwardNode &operator=(ForwardNode &&) = default;
 
   NodeData &data() { return *this; }
   const NodeData &data() const { return *this; }
@@ -278,6 +278,8 @@ public:
     return Successors.erase(It);
   }
 
+  void clearSuccessors() { Successors.clear(); }
+
 public:
   llvm::iterator_range<const_child_iterator> successors() const {
     return toNeighborRange(Successors);
@@ -297,6 +299,11 @@ public:
 
   bool hasSuccessors() const { return Successors.size() != 0; }
   size_t successorCount() const { return Successors.size(); }
+  bool hasSuccessor(DerivedType const *S) const {
+    auto Iterator = llvm::find_if(Successors,
+                                  [S](auto &N) { return N.Neighbor == S; });
+    return Iterator != Successors.end();
+  }
 
 protected:
   static llvm::iterator_range<child_iterator>
@@ -311,7 +318,7 @@ protected:
     return llvm::map_range(Range, &getConstNeighbor);
   }
 
-private:
+protected:
   NeighborContainer Successors;
 };
 
@@ -322,9 +329,9 @@ namespace revng::detail {
 ///
 /// \note At this step BidirectionalEdge has not been declared yet, thus we
 ///       accept a template parameter that has the same signature as
-///       BidirecationEdge that will be declared later. This allows us to use it
-///       as if it was delcared, provided that only the real BidirecationalEdge
-///       is used as this argument.
+///       BidirectionalEdge that will be declared later. This allows us to use
+///       it as if it was declared, provided that only the real
+///       BidirectionalEdge is used as this argument.
 template<typename Node,
          typename EdgeLabel,
          bool NeedsParent,
@@ -385,33 +392,123 @@ public:
 
 public:
   void addSuccessor(BidirectionalNode *NewSuccessor) {
-    Base::addSuccessor({ NewSuccessor });
+    Base::Successors.emplace_back(NewSuccessor);
     NewSuccessor->Predecessors.emplace_back(this);
   }
 
   void addSuccessor(BidirectionalNode *NewSuccessor, EdgeLabel EL) {
-    Base::addSuccessor(NewSuccessor, EL);
+    Base::Successors.emplace_back(NewSuccessor, EL);
     NewSuccessor->Predecessors.emplace_back(this, EL);
   }
 
   void addPredecessor(BidirectionalNode *NewPredecessor) {
     Predecessors.emplace_back(NewPredecessor);
-    NewPredecessor->addSuccessor(this);
+    NewPredecessor->Successors.emplace_back(this);
   }
 
   void addPredecessor(BidirectionalNode *NewPredecessor, EdgeLabel EL) {
     Predecessors.emplace_back(NewPredecessor, EL);
-    NewPredecessor->addSuccessor(this, EL);
+    NewPredecessor->Successors.emplace_back(this, EL);
   }
 
 public:
-  child_iterator removePredecessor(child_iterator It) {
-    auto InternalIt = Predecessors.erase(It.getCurrent());
-    return child_iterator(InternalIt, Base::getNeighbor);
+  void removePredecessor(child_iterator It) {
+    BidirectionalNode *Predecessor = *It;
+    bool Found = false;
+    auto PredecessorSuccessors = Predecessor->successor_edges();
+    for (auto PredecessorIt = PredecessorSuccessors.begin(),
+              Last = PredecessorSuccessors.end();
+         PredecessorIt != Last;) {
+      auto Edge = *PredecessorIt;
+      Edge.Neighbor = this;
+      if (Edge == *PredecessorIt) {
+        Predecessor->Successors.erase(PredecessorIt);
+        Found = true;
+        break;
+      } else {
+        ++PredecessorIt;
+      }
+    }
+    revng_assert(Found);
+
+    Predecessors.erase(It.getCurrent());
   }
 
-  edge_iterator removePredecessorEdge(edge_iterator It) {
-    return Predecessors.erase(It);
+  void removePredecessorEdge(edge_iterator It) {
+    auto Edge = *It;
+    bool Found = false;
+    auto Predecessor = Edge.Neighbor;
+    auto PredecessorSuccessors = Predecessor->successor_edges();
+    for (auto PredecessorIt = PredecessorSuccessors.begin(),
+              Last = PredecessorSuccessors.end();
+         PredecessorIt != Last;) {
+      Edge.Neighbor = this;
+      if (Edge == *PredecessorIt) {
+        Predecessor->Successors.erase(PredecessorIt);
+        Found = true;
+        break;
+      } else {
+        ++PredecessorIt;
+      }
+    }
+    revng_assert(Found);
+
+    Predecessors.erase(It);
+  }
+
+  void clearPredecessors() {
+    while (Predecessors.size())
+      removePredecessorEdge(Predecessors.begin());
+  }
+
+  void removeSuccessor(child_iterator It) {
+    BidirectionalNode *Successor = *It;
+    bool Found = false;
+    auto SuccessorPredecessors = Successor->predecessor_edges();
+    for (auto SuccessorIt = SuccessorPredecessors.begin(),
+              Last = SuccessorPredecessors.end();
+         SuccessorIt != Last;) {
+      auto Edge = *SuccessorIt;
+      Edge.Neighbor = this;
+      if (Edge == *SuccessorIt) {
+        Successor->Predecessors.erase(SuccessorIt);
+        Found = true;
+        break;
+      } else {
+        ++SuccessorIt;
+      }
+    }
+
+    revng_assert(Found);
+
+    Base::Successors.erase(It.getCurrent());
+  }
+
+  void removeSuccessorEdge(edge_iterator It) {
+    auto Edge = *It;
+    bool Found = false;
+    auto Successor = Edge.Neighbor;
+    auto SuccessorPredecessors = Successor->predecessor_edges();
+    for (auto SuccessorIt = SuccessorPredecessors.begin(),
+              Last = SuccessorPredecessors.end();
+         SuccessorIt != Last;) {
+      Edge.Neighbor = this;
+      if (Edge == *SuccessorIt) {
+        Successor->Predecessors.erase(SuccessorIt);
+        Found = true;
+        break;
+      } else {
+        ++SuccessorIt;
+      }
+    }
+    revng_assert(Found);
+
+    this->Successors.erase(It);
+  }
+
+  void clearSuccessors() {
+    while (Base::Successors.size())
+      removeSuccessorEdge(Base::Successors.begin());
   }
 
 public:
@@ -433,6 +530,11 @@ public:
 
   bool hasPredecessors() const { return Predecessors.size() != 0; }
   size_t predecessorCount() const { return Predecessors.size(); }
+  bool hasPredecessor(BidirectionalNode const *P) const {
+    auto Iterator = llvm::find_if(Predecessors,
+                                  [P](auto &N) { return N.Neighbor == P; });
+    return Iterator != Predecessors.end();
+  }
 
 private:
   NeighborContainer Predecessors;
@@ -440,7 +542,7 @@ private:
 
 namespace revng::detail {
 /// The parameters deciding specifics of the base type `MutableEdgeNode`
-/// extends are non-trivial. That's why those decisiion were wrapped
+/// extends are non-trivial. That's why those decision were wrapped
 /// inside this struct to minimize clutter.
 ///
 /// \note At this step `TheNode` has not been declared yet, thus we accept a
@@ -893,18 +995,18 @@ private:
   }
 
   static auto findSuccessorHalf(typename EdgeOwnerContainer::iterator Edge,
-                                EdgeViewContainer &Halfs) {
+                                EdgeViewContainer &Halves) {
     auto Comparator = [Edge](auto const &Half) {
       return Half.Label == Edge->Label.get();
     };
-    return std::find_if(Halfs.begin(), Halfs.end(), Comparator);
+    return std::find_if(Halves.begin(), Halves.end(), Comparator);
   }
   static auto findPredecessorHalf(typename EdgeViewContainer::iterator Edge,
-                                  EdgeOwnerContainer &Halfs) {
+                                  EdgeOwnerContainer &Halves) {
     auto Comparator = [Edge](auto const &Half) {
       return Half.Label.get() == Edge->Label;
     };
-    return std::find_if(Halfs.begin(), Halfs.end(), Comparator);
+    return std::find_if(Halves.begin(), Halves.end(), Comparator);
   }
 
 public:
@@ -1191,6 +1293,20 @@ private:
   using const_nodes_iterator_impl = typename NodesContainer::const_iterator;
 
 public:
+  GenericGraph() = default;
+  GenericGraph(const GenericGraph &) = delete;
+  GenericGraph(GenericGraph &&) = default;
+  GenericGraph &operator=(const GenericGraph &) = delete;
+  GenericGraph &operator=(GenericGraph &&) = default;
+
+  bool verify() const debug_function {
+    for (const std::unique_ptr<NodeT> &Node : Nodes)
+      if (Node.get() == nullptr)
+        return false;
+    return true;
+  }
+
+public:
   static NodeT *getNode(std::unique_ptr<NodeT> &E) { return E.get(); }
   static const NodeT *getConstNode(const std::unique_ptr<NodeT> &E) {
     return E.get();
@@ -1261,8 +1377,8 @@ public:
   }
 
 public:
-  nodes_iterator
-  insertNode(nodes_iterator Where, std::unique_ptr<NodeT> &&Ptr) {
+  nodes_iterator insertNode(nodes_iterator Where,
+                            std::unique_ptr<NodeT> &&Ptr) {
     auto InternalIt = Nodes.insert(Where.getCurrent(), std::move(Ptr));
     return nodes_iterator(InternalIt, getNode);
   }
@@ -1277,7 +1393,7 @@ public:
   void reserve(size_t Size) { Nodes.reserve(Size); }
   void clear() { Nodes.clear(); }
 
-private:
+protected:
   NodesContainer Nodes;
 };
 
@@ -1324,6 +1440,28 @@ public:
   static NodeRef getEntryNode(NodeRef N) { return N; };
 };
 
+/// Specializes GraphTraits<llvm::Inverse<BidirectionalNode<...> *>>
+template<StrictSpecializationOfBidirectionalNode T>
+struct GraphTraits<llvm::Inverse<T *>> {
+public:
+  using NodeRef = T *;
+  using ChildIteratorType = std::conditional_t<std::is_const_v<T>,
+                                               typename T::const_child_iterator,
+                                               typename T::child_iterator>;
+
+public:
+  static ChildIteratorType child_begin(NodeRef N) {
+    return N->predecessors().begin();
+  }
+
+  static ChildIteratorType child_end(NodeRef N) {
+    return N->predecessors().end();
+  }
+
+  static NodeRef getEntryNode(llvm::Inverse<NodeRef> N) { return N.Graph; };
+};
+
+// TODO: implement const version of GraphTraits
 /// Specializes GraphTraits<MutableEdgeNode<...> *>
 template<StrictSpecializationOfMutableEdgeNode T>
 struct GraphTraits<T *> {
@@ -1350,6 +1488,7 @@ public:
   static T *getEntryNode(T *N) { return N; };
 };
 
+// TODO: implement const version of GraphTraits
 /// Specializes GraphTraits<llvm::Inverse<MutableEdgeNode<...> *>>
 template<StrictSpecializationOfMutableEdgeNode T>
 struct GraphTraits<llvm::Inverse<T *>> {
@@ -1378,7 +1517,10 @@ public:
 
 /// Specializes GraphTraits<GenericGraph<...> *>>
 template<SpecializationOfGenericGraph T>
-struct GraphTraits<T *> : public GraphTraits<typename T::Node *> {
+struct GraphTraits<T *>
+  : public GraphTraits<std::conditional_t<std::is_const_v<T>,
+                                          const typename T::Node *,
+                                          typename T::Node *>> {
 
   using NodeRef = std::conditional_t<std::is_const_v<T>,
                                      const typename T::Node *,
@@ -1396,25 +1538,36 @@ struct GraphTraits<T *> : public GraphTraits<typename T::Node *> {
   static size_t size(T *G) { return G->size(); }
 };
 
-/// Specializes GraphTraits<llvm::Inverse<BidirectionalNode<...> *>>
-template<StrictSpecializationOfBidirectionalNode T>
-struct GraphTraits<llvm::Inverse<T *>> {
-public:
-  using NodeRef = T *;
-  using ChildIteratorType = std::conditional_t<std::is_const_v<T>,
-                                               typename T::const_child_iterator,
-                                               typename T::child_iterator>;
+/// Specializes GraphTraits<llvm::Inverse<GenericGraph<...> *>>>
+template<SpecializationOfGenericGraph T>
+struct GraphTraits<llvm::Inverse<T *>>
+  : public GraphTraits<
+      llvm::Inverse<std::conditional_t<std::is_const_v<T>,
+                                       const typename T::Node *,
+                                       typename T::Node *>>> {
 
-public:
-  static ChildIteratorType child_begin(NodeRef N) {
-    return N->predecessors().begin();
+  using NodeRef = std::conditional_t<std::is_const_v<T>,
+                                     const typename T::Node *,
+                                     typename T::Node *>;
+  using nodes_iterator = std::conditional_t<std::is_const_v<T>,
+                                            typename T::const_nodes_iterator,
+                                            typename T::nodes_iterator>;
+
+  static NodeRef getEntryNode(llvm::Inverse<T *> Inv) {
+    // TODO: we might want to consider an option of having optional
+    // `ExitNode`s as well, for consistency.
+    return Inv.Graph->getEntryNode();
   }
 
-  static ChildIteratorType child_end(NodeRef N) {
-    return N->predecessors().end();
+  static nodes_iterator nodes_begin(llvm::Inverse<T *> Inv) {
+    return Inv.Graph->nodes().begin();
   }
 
-  static NodeRef getEntryNode(llvm::Inverse<NodeRef> N) { return N.Graph; };
+  static nodes_iterator nodes_end(llvm::Inverse<T *> Inv) {
+    return Inv.Graph->nodes().end();
+  }
+
+  static size_t size(T *G) { return G->size(); }
 };
 
 } // namespace llvm

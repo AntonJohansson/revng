@@ -13,7 +13,7 @@
 #include "revng/Pipeline/Contract.h"
 #include "revng/Pipeline/GenericLLVMPipe.h"
 #include "revng/Pipeline/LLVMContainer.h"
-#include "revng/Pipeline/LLVMGlobalKindBase.h"
+#include "revng/Pipeline/LLVMKind.h"
 #include "revng/Pipeline/Target.h"
 #include "revng/Pipes/FileContainer.h"
 #include "revng/Pipes/Kinds.h"
@@ -26,15 +26,11 @@ class CompileModule {
 public:
   static constexpr auto Name = "Compile";
   std::array<pipeline::ContractGroup, 1> getContract() const {
-    return { pipeline::ContractGroup(kinds::Root,
-                                     pipeline::Exactness::DerivedFrom,
-                                     0,
-                                     kinds::Object,
-                                     1) };
+    return { pipeline::ContractGroup(kinds::Root, 0, kinds::Object, 1) };
   }
-  void run(const pipeline::Context &,
+  void run(const pipeline::ExecutionContext &,
            pipeline::LLVMContainer &TargetsList,
-           FileContainer &TargetBinary);
+           ObjectFileContainer &TargetBinary);
 
   void print(const pipeline::Context &Ctx,
              llvm::raw_ostream &OS,
@@ -50,21 +46,16 @@ public:
   static constexpr auto Name = "CompileIsolated";
   std::array<pipeline::ContractGroup, 1> getContract() const {
     pipeline::Contract RootPart(kinds::IsolatedRoot,
-                                pipeline::Exactness::Exact,
                                 0,
                                 kinds::Object,
                                 1,
                                 pipeline::InputPreservation::Preserve);
-    pipeline::Contract IsolatedPart(kinds::Isolated,
-                                    pipeline::Exactness::Exact,
-                                    0,
-                                    kinds::Object,
-                                    1);
+    pipeline::Contract IsolatedPart(kinds::Isolated, 0, kinds::Object, 1);
     return { pipeline::ContractGroup({ RootPart, IsolatedPart }) };
   }
-  void run(const pipeline::Context &,
+  void run(const pipeline::ExecutionContext &,
            pipeline::LLVMContainer &TargetsList,
-           FileContainer &TargetBinary);
+           ObjectFileContainer &TargetBinary);
 
   void print(const pipeline::Context &Ctx,
              llvm::raw_ostream &OS,

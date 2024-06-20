@@ -9,15 +9,16 @@ bool init_unit_test();
 #include "revng/Model/Binary.h"
 #include "revng/Pipeline/Location.h"
 #include "revng/Pipes/Ranks.h"
+#include "revng/Support/BasicBlockID.h"
 
 BOOST_AUTO_TEST_SUITE(RevngLocationInfrastructure);
 
 BOOST_AUTO_TEST_CASE(DefinitionStyles) {
   namespace ranks = revng::ranks;
 
-  const MetaAddress A0 = MetaAddress::fromString("0x1:Generic64");
-  const MetaAddress A1 = MetaAddress::fromString("0x2:Generic64");
-  const MetaAddress A2 = MetaAddress::fromString("0x3:Generic64");
+  const auto A0 = MetaAddress::fromString("0x1:Generic64");
+  const auto A1 = BasicBlockID::fromString("0x2:Generic64");
+  const auto A2 = MetaAddress::fromString("0x3:Generic64");
   auto Location = pipeline::location(ranks::Instruction, A0, A1, A2);
 
   constexpr auto S = "/instruction/0x1:Generic64/0x2:Generic64/0x3:Generic64";
@@ -31,29 +32,26 @@ BOOST_AUTO_TEST_CASE(DefinitionStyles) {
 BOOST_AUTO_TEST_CASE(MetaAddressAsTheKey) {
   namespace ranks = revng::ranks;
 
-  const MetaAddress A0 = MetaAddress::fromString("0x123:Generic64");
-  const MetaAddress A1 = MetaAddress::fromString("0x456:Generic64");
-  const MetaAddress A2 = MetaAddress::fromString("0x789:Generic64");
+  const auto A0 = MetaAddress::fromString("0x123:Generic64");
+  const auto A1 = BasicBlockID::fromString("0x456:Generic64");
+  const auto A2 = MetaAddress::fromString("0x789:Generic64");
   auto Location = pipeline::location(ranks::Instruction, A0, A1, A2);
 
   revng_check(std::get<0>(Location.at(ranks::Function)).address() == 0x123);
-  revng_check(Location.at(ranks::BasicBlock).address() == 0x456);
+  revng_check(Location.at(ranks::BasicBlock).start().address() == 0x456);
   revng_check(Location.at(ranks::Instruction).address() == 0x789);
 
-  Location.at(ranks::BasicBlock) += Location.at(ranks::Instruction).address();
-  revng_check(Location.at(ranks::BasicBlock).address() == 0xbdf);
-
   constexpr auto Expected = "/instruction/0x123:Generic64/"
-                            "0xbdf:Generic64/0x789:Generic64";
+                            "0x456:Generic64/0x789:Generic64";
   revng_check(Location.toString() == Expected);
   revng_check(Location.toString() == serializeToString(Location));
 }
 
 static model::TypePath makeFunction(model::Binary &Model) {
   model::CABIFunctionType Function;
-  Function.CustomName = "my_cool_func";
-  Function.OriginalName = "Function_at_0x40012f:Code_x86_64";
-  Function.ABI = model::ABI::SystemV_x86_64;
+  Function.CustomName() = "my_cool_func";
+  Function.OriginalName() = "Function_at_0x40012f:Code_x86_64";
+  Function.ABI() = model::ABI::SystemV_x86_64;
 
   using UT = model::UpcastableType;
   auto Ptr = UT::make<model::CABIFunctionType>(std::move(Function));
@@ -66,7 +64,7 @@ BOOST_AUTO_TEST_CASE(TypeIDAsTheKey) {
   auto Function = makeFunction(*NewModel);
 
   namespace ranks = revng::ranks;
-  auto FieldLocation = pipeline::location(ranks::TypeField,
+  auto FieldLocation = pipeline::location(ranks::UnionField,
                                           Function.get()->key(),
                                           2);
 
@@ -75,18 +73,17 @@ BOOST_AUTO_TEST_CASE(TypeIDAsTheKey) {
 
   std::string ID = Function.toString();
   ID = ID.substr(ID.find_last_of('/') + 1);
-  revng_check(FieldLocation.toString() == "/type-field/" + ID + "/2");
+  revng_check(FieldLocation.toString() == "/union-field/" + ID + "/2");
   revng_check(FieldLocation.toString() == serializeToString(FieldLocation));
 }
 
 BOOST_AUTO_TEST_CASE(Serialization) {
   constexpr std::array<std::string_view, 4> TestCases{
-    // clang-format off
+    // a list of unrelated serialized locations to use as sources of truth
     "/binary",
     "/instruction/0x12:Generic64/0x34:Generic64/0x56:Generic64",
-    "/type/PrimitiveType-1026",
+    "/type/1026-PrimitiveType",
     "/raw-byte-range/0x78:Generic64/0x90:Generic64"
-    // clang-format on
   };
 
   using pipeline::locationFromString;
@@ -109,7 +106,7 @@ BOOST_AUTO_TEST_CASE(Serialization) {
 
       auto FunctionMetaAddress = std::get<0>(Instruction->at(ranks::Function));
       revng_check(FunctionMetaAddress.address() == 0x12);
-      revng_check(Instruction->at(ranks::BasicBlock).address() == 0x34);
+      revng_check(Instruction->at(ranks::BasicBlock).start().address() == 0x34);
       revng_check(Instruction->at(ranks::Instruction).address() == 0x56);
 
       revng_check(TestCase == Instruction->toString());
@@ -138,7 +135,9 @@ BOOST_AUTO_TEST_CASE(Serialization) {
 
     revng_check(!locationFromString(ranks::Function, TestCase).has_value());
     revng_check(!locationFromString(ranks::BasicBlock, TestCase).has_value());
-    revng_check(!locationFromString(ranks::TypeField, TestCase).has_value());
+    revng_check(!locationFromString(ranks::StructField, TestCase).has_value());
+    revng_check(!locationFromString(ranks::UnionField, TestCase).has_value());
+    revng_check(!locationFromString(ranks::EnumEntry, TestCase).has_value());
     revng_check(!locationFromString(ranks::RawByte, TestCase).has_value());
 
     using namespace std::string_literals;

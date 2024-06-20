@@ -1,5 +1,4 @@
 /// \file Main.cpp
-/// \brief
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
@@ -10,7 +9,7 @@
 #include "llvm/Support/CommandLine.h"
 
 #include "revng/Model/Importer/Binary/BinaryImporter.h"
-#include "revng/Model/Importer/Binary/BinaryImporterOptions.h"
+#include "revng/Model/Importer/Binary/Options.h"
 #include "revng/Model/Importer/DebugInfo/DwarfImporter.h"
 #include "revng/Model/ToolHelpers.h"
 #include "revng/Support/CommandLine.h"
@@ -33,12 +32,7 @@ static opt<std::string> OutputFilename("o",
                                        value_desc("filename"));
 
 int main(int Argc, char *Argv[]) {
-  revng::InitRevng X(Argc, Argv);
-
-  HideUnrelatedOptions({ &MainCategory });
-  ParseCommandLineOptions(Argc, Argv);
-
-  revng_check(BaseAddress % 4096 == 0, "Base address is not page aligned");
+  revng::InitRevng X(Argc, Argv, "", { &MainCategory });
 
   // Open output
   ExitOnError ExitOnError;
@@ -50,12 +44,16 @@ int main(int Argc, char *Argv[]) {
   // Import
   TupleTree<model::Binary> Model;
 
-  ExitOnError(importBinary(Model, InputFilename, BaseAddress));
+  const ImporterOptions &Options = importerOptions();
+  ExitOnError(importBinary(Model, InputFilename, Options));
 
-  if (ImportDebugInfo.size() > 0) {
+  revng_check(Options.BaseAddress % 4096 == 0,
+              "Base address is not page aligned");
+
+  if (!Options.AdditionalDebugInfoPaths.empty()) {
     DwarfImporter Importer(Model);
-    for (const std::string &Path : ImportDebugInfo)
-      Importer.import(Path);
+    for (const std::string &Path : Options.AdditionalDebugInfoPaths)
+      Importer.import(Path, Options);
   }
 
   // Serialize

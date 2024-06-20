@@ -129,7 +129,7 @@ static void *prepare_stack(void *stack, int argc, char **argv) {
   // Compute the value of stack pointer once we'll be done
 
   // WARNING: keep this number in sync with the number of auxiliary entries
-  const unsigned aux_count = 17;
+  const unsigned aux_count = 16;
   unsigned entries_count = aux_count * 2 + 1 + env_count + 1 + argc + 1;
   uintptr_t final_stack = ((uintptr_t) stack
                            - entries_count * sizeof(target_reg));
@@ -159,7 +159,6 @@ static void *prepare_stack(void *stack, int argc, char **argv) {
   PUSH_AUX(stack, AT_GID, getgid());
   PUSH_AUX(stack, AT_EGID, getegid());
   PUSH_AUX(stack, AT_HWCAP, 0);
-  PUSH_AUX(stack, AT_HWCAP2, 0);
   PUSH_AUX(stack, AT_CLKTCK, sysconf(_SC_CLK_TCK));
   PUSH_AUX(stack, AT_RANDOM, random_address);
   PUSH_AUX(stack, AT_PLATFORM, platform_address);
@@ -232,7 +231,18 @@ void *g_malloc0_n(size_t n, size_t size) {
   return calloc(n, size);
 }
 
+void *g_try_malloc0_n(size_t n, size_t size) {
+  return calloc(n, size);
+}
+
 void *g_malloc(size_t n_bytes) {
+  if (n_bytes == 0)
+    return NULL;
+  else
+    return malloc(n_bytes);
+}
+
+void *g_try_malloc(size_t n_bytes) {
   if (n_bytes == 0)
     return NULL;
   else
@@ -246,10 +256,17 @@ void g_free(void *memory) {
     return free(memory);
 }
 
-void unknownPC(PlainMetaAddress *PC) {
+void g_assertion_message_expr(const char *domain,
+                              const char *file,
+                              int line,
+                              const char *func,
+                              const char *expr) {
+}
+
+void unknown_pc() {
   int arg;
   fprintf(stderr, "Unknown PC:");
-  fprint_metaaddress(stderr, PC);
+  fprint_metaaddress(stderr, &current_pc);
   fprintf(stderr, "\n");
 
   for (arg = 0; arg < saved_argc; arg++) {
@@ -262,8 +279,7 @@ void unknownPC(PlainMetaAddress *PC) {
 }
 
 void jump_to_symbol(char *Symbol) {
-  PlainMetaAddress Empty = { 0 };
-  raise_exception_helper(Symbol, &Empty, &Empty);
+  _abort(Symbol);
 }
 
 #ifdef TRACE
@@ -460,17 +476,15 @@ int main(int argc, char *argv[]) {
   root((uintptr_t) stack);
 }
 
-// Helper function used to raise an exception
-noreturn void raise_exception_helper(const char *reason,
-                                     PlainMetaAddress *source,
-                                     PlainMetaAddress *destination) {
-
+static noreturn void fail(const char *reason,
+                          PlainMetaAddress *source,
+                          PlainMetaAddress *destination) {
   // Dump information about the exception
   fprintf(stderr, "Exception: %s", reason);
   fprintf(stderr, " (");
   fprint_metaaddress(stderr, source);
   fprintf(stderr, " -> ");
-  fprint_metaaddress(stderr, source);
+  fprint_metaaddress(stderr, destination);
   fprintf(stderr, ")\n");
 
   // Declare the exception object
@@ -480,4 +494,12 @@ noreturn void raise_exception_helper(const char *reason,
   _Unwind_RaiseException(&exc);
 
   abort();
+}
+
+noreturn void _abort(const char *reason) {
+  fail(reason, &last_pc, &current_pc);
+}
+
+noreturn void _unreachable(const char *reason) {
+  fail(reason, &last_pc, &current_pc);
 }

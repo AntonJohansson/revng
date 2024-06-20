@@ -1,5 +1,4 @@
 /// \file DataFlowGraph.cpp
-/// \brief
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
@@ -15,7 +14,8 @@ using namespace llvm;
 
 namespace TypeShrinking {
 GenericGraph<DataFlowNode> buildDataFlowGraph(Function &F) {
-  GenericGraph<DataFlowNode> DataFlowGraph{};
+  GenericGraph<DataFlowNode> DataFlowGraph;
+
   std::vector<DataFlowNode *> Worklist;
   std::unordered_map<Instruction *, DataFlowNode *> InstructionNodeMap;
   // Initialization
@@ -33,7 +33,26 @@ GenericGraph<DataFlowNode> buildDataFlowGraph(Function &F) {
       UseNode->addSuccessor(DefNode);
     }
   }
+
   return DataFlowGraph;
 }
 
 } // namespace TypeShrinking
+
+using TSDOTGraphTraits = DOTGraphTraits<const TypeShrinking::DataFlowGraph *>;
+
+std::string
+TSDOTGraphTraits::getNodeLabel(const TypeShrinking::DataFlowNode *Node,
+                               const TypeShrinking::DataFlowGraph *Graph) {
+  std::string Buffer;
+  {
+    llvm::raw_string_ostream Stream(Buffer);
+    Node->Instruction->print(Stream);
+  }
+  return Buffer;
+}
+
+std::string
+TSDOTGraphTraits::getGraphProperties(const TypeShrinking::DataFlowGraph *) {
+  return "  node [shape=box];\n  rankdir = BT;\n";
+}

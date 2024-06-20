@@ -20,19 +20,86 @@ inline Logger<> ModelVerifyLogger("model-verify");
 
 namespace model {
 class Type;
-
+class Identifier;
 class VerifyHelper {
+private:
+  template<typename TrackableTupleTree>
+  class TrackingSuspender {
+  private:
+    VerifyHelper *TheContext;
+    std::optional<TrackGuard<TrackableTupleTree>> Guard;
+
+  public:
+    TrackingSuspender(TrackingSuspender &&Other) :
+      TheContext(Other.TheContext), Guard(std::move(Other.Guard)) {}
+    TrackingSuspender &operator=(TrackingSuspender &Other) {
+      if (this == Other)
+        return *this;
+
+      onDestruction();
+      TheContext = Other.TheContext;
+      Guard = std::move(Other.Guard);
+      return *this;
+    }
+    TrackingSuspender(const TrackingSuspender &Other) = delete;
+    TrackingSuspender &operator=(const TrackingSuspender &Other) = delete;
+
+  public:
+    TrackingSuspender(VerifyHelper &Context,
+                      const TrackableTupleTree &Trackable) :
+      TheContext(&Context), Guard(std::nullopt) {
+      revng_assert(TheContext != nullptr);
+      if (not Context.hasPushedTracking()) {
+        Context.setPushedTracking();
+        Guard = TrackGuard<TrackableTupleTree>(Trackable);
+      }
+    }
+
+  public:
+    ~TrackingSuspender() { onDestruction(); }
+
+  private:
+    void onDestruction() {
+      if (Guard.has_value()) {
+        TheContext->setPushedTracking(false);
+        Guard = std::nullopt;
+      }
+    }
+  };
+
+  friend class VerifyHelper;
+
 private:
   std::set<const model::Type *> VerifiedCache;
   std::map<const model::Type *, uint64_t> SizeCache;
+  std::map<const model::Type *, uint64_t> AlignmentCache;
   std::set<const model::Type *> InProgress;
   bool AssertOnFail = false;
+  std::map<model::Identifier, std::string> GlobalSymbols;
+  bool HasPushedTracking = false;
+
+  // TODO: This is a hack for now, but the methods, when the Model does not
+  // verify, should return an llvm::Error with the error message found by this.
+  std::string ReasonBuffer;
 
 public:
   VerifyHelper() = default;
   VerifyHelper(bool AssertOnFail) : AssertOnFail(AssertOnFail) {}
 
   ~VerifyHelper() { revng_assert(InProgress.size() == 0); }
+
+private:
+  bool hasPushedTracking() const { return HasPushedTracking; }
+
+  void setPushedTracking(bool HasPushed = true) {
+    HasPushedTracking = HasPushed;
+  }
+
+public:
+  template<typename T>
+  TrackingSuspender<T> suspendTracking(const T &Trackable) {
+    return TrackingSuspender<T>(*this, Trackable);
+  }
 
 public:
   void setVerified(const model::Type *T) {
@@ -41,22 +108,24 @@ public:
   }
 
   bool isVerified(const model::Type *T) const {
-    return VerifiedCache.count(T) != 0;
+    return VerifiedCache.contains(T);
   }
+
+  const std::string &getReason() const { return ReasonBuffer; }
 
 public:
-  bool isVerificationInProgess(const model::Type *T) const {
-    return InProgress.count(T) != 0;
+  bool isVerificationInProgress(const model::Type *T) const {
+    return InProgress.contains(T);
   }
 
-  void verificationInProgess(const model::Type *T) {
-    revng_assert(not isVerificationInProgess(T));
+  void verificationInProgress(const model::Type *T) {
+    revng_assert(not isVerificationInProgress(T));
     revng_assert(not isVerified(T));
     InProgress.insert(T);
   }
 
   void verificationCompleted(const model::Type *T) {
-    revng_assert(isVerificationInProgess(T));
+    revng_assert(isVerificationInProgress(T));
     InProgress.erase(T);
   }
 
@@ -71,47 +140,67 @@ public:
     if (It != SizeCache.end())
       return It->second;
     else
-      return {};
+      return std::nullopt;
   }
 
 public:
-  bool maybeFail(bool Result) const { return maybeFail(Result, {}); }
+  void setAlignment(const model::Type *T, uint64_t NewValue) {
+    revng_assert(not alignment(T));
+    AlignmentCache[T] = NewValue;
+  }
 
-  bool maybeFail(bool Result, const llvm::Twine &Reason) const {
+  std::optional<uint64_t> alignment(const model::Type *T) {
+    auto It = AlignmentCache.find(T);
+    if (It != AlignmentCache.end())
+      return It->second;
+    else
+      return std::nullopt;
+  }
+
+public:
+  [[nodiscard]] bool isGlobalSymbol(const model::Identifier &Name) const;
+  [[nodiscard]] bool registerGlobalSymbol(const model::Identifier &Name,
+                                          const std::string &Path);
+
+public:
+  bool maybeFail(bool Result) { return maybeFail(Result, {}); }
+
+  bool maybeFail(bool Result, const llvm::Twine &Reason) {
     if (AssertOnFail and not Result) {
       revng_abort(Reason.str().c_str());
     } else {
+      if (not Result)
+        InProgress.clear();
       return Result;
     }
   }
 
   template<typename T>
-  bool maybeFail(bool Result, const llvm::Twine &Reason, T &Element) const {
+  bool maybeFail(bool Result, const llvm::Twine &Reason, T &Element) {
     if (not Result) {
-      std::string Buffer;
+      InProgress.clear();
+
       {
-        llvm::raw_string_ostream StringStream(Buffer);
+        llvm::raw_string_ostream StringStream(ReasonBuffer);
         StringStream << Reason << "\n";
         serialize(StringStream, const_cast<std::remove_const_t<T> &>(Element));
       }
 
       if (AssertOnFail) {
-        revng_abort(Buffer.c_str());
+        revng_abort(ReasonBuffer.c_str());
       } else {
-        revng_log(ModelVerifyLogger, Buffer);
+        revng_log(ModelVerifyLogger, ReasonBuffer);
       }
     }
 
     return Result;
   }
 
-  bool fail() const { return maybeFail(false); }
-  bool fail(const llvm::Twine &Reason) const {
-    return maybeFail(false, Reason);
-  }
+  bool fail() { return maybeFail(false); }
+  bool fail(const llvm::Twine &Reason) { return maybeFail(false, Reason); }
 
   template<typename T>
-  bool fail(const llvm::Twine &Reason, T &Element) const {
+  bool fail(const llvm::Twine &Reason, T &Element) {
     return maybeFail(false, Reason, Element);
   }
 };

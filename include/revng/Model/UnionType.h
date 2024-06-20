@@ -39,15 +39,15 @@ public:
   const llvm::SmallVector<model::QualifiedType, 4> edges() const {
     llvm::SmallVector<model::QualifiedType, 4> Result;
 
-    for (auto &Field : Fields)
-      Result.push_back(Field.Type);
+    for (auto &Field : Fields())
+      Result.push_back(Field.Type());
 
     return Result;
   }
 
 public:
   static bool classof(const Type *T) { return classof(T->key()); }
-  static bool classof(const Key &K) { return std::get<0>(K) == AssociatedKind; }
+  static bool classof(const Key &K) { return std::get<1>(K) == AssociatedKind; }
 };
 
 #include "revng/Model/Generated/Late/UnionType.h"

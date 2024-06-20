@@ -1,11 +1,11 @@
 /// \file Dump.cpp
-/// \brief
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
 #include "revng/Yield/BasicBlock.h"
+#include "revng/Yield/CallEdge.h"
 #include "revng/Yield/Function.h"
 #include "revng/Yield/Instruction.h"
 #include "revng/Yield/Tag.h"

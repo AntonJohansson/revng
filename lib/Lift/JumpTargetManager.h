@@ -6,14 +6,16 @@
 
 #include <cstdint>
 #include <map>
-#include <set>
+#include <unordered_set>
 #include <vector>
 
 #include "boost/icl/interval_map.hpp"
 #include "boost/icl/interval_set.hpp"
 #include "boost/type_traits/is_same.hpp"
 
-#include "llvm/ADT/Optional.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/Analysis/MemorySSAUpdater.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/PassManager.h"
 
@@ -40,6 +42,7 @@ class Value;
 
 class JumpTargetManager;
 class ProgramCounterHandler;
+class SummaryCallsBuilder;
 
 template<typename Map>
 auto containing(Map const &M, typename Map::key_type const &K) {
@@ -57,7 +60,7 @@ auto containing(Map &M, typename Map::key_type const &K) {
   return M.end();
 }
 
-/// \brief Transform constant writes to the PC in jumps
+/// Transform constant writes to the PC in jumps
 ///
 /// This pass looks for all the calls to the `ExitTB` function calls, looks for
 /// the last write to the PC before them, checks if the written value is
@@ -76,11 +79,11 @@ public:
   bool runOnModule(llvm::Module &M) override;
 
 private:
-  /// \brief Remove all the constant writes to the PC
+  /// Remove all the constant writes to the PC
   bool pinConstantStore(llvm::Function &F);
 
-  /// \brief Pin PC-stores for which AVI provided useful results
-  bool pinAVIResults(llvm::Function &F);
+  /// Pin PC-stores for which ValueMaterializer provided useful results
+  bool pinMaterializedValues(llvm::Function &F);
 
   /// Introduces a fallthrough branch if there's no store to PC before the last
   /// call to an helper
@@ -92,8 +95,8 @@ private:
   void pinExitTB(llvm::CallInst *ExitTBCall,
                  ProgramCounterHandler::DispatcherTargets &Destinations);
 
-  void
-  pinConstantStoreInternal(MetaAddress Address, llvm::CallInst *ExitTBCall);
+  void pinConstantStoreInternal(MetaAddress Address,
+                                llvm::CallInst *ExitTBCall);
 
 public:
   static char ID;
@@ -105,7 +108,7 @@ private:
 
 namespace CFGForm {
 
-/// \brief Possible forms the CFG we're building can assume.
+/// Possible forms the CFG we're building can assume.
 ///
 /// Generally the CFG should stay in the SemanticPreserving state, but it
 /// can be temporarily changed to make certain analysis (e.g., computation of
@@ -151,7 +154,9 @@ class JumpTargetManager {
 private:
   using interval_set = boost::icl::interval_set<MetaAddress, CompareAddress>;
   using interval = boost::icl::interval<MetaAddress, CompareAddress>;
-  using MetaAddressSet = std::set<MetaAddress>;
+  using MetaAddressSet = std::unordered_set<MetaAddress>;
+  using GlobalToAllocaTy = llvm::DenseMap<llvm::GlobalVariable *,
+                                          llvm::AllocaInst *>;
 
 public:
   using BlockWithAddress = std::pair<MetaAddress, llvm::BasicBlock *>;
@@ -222,14 +227,16 @@ public:
                     const TupleTree<model::Binary> &Model,
                     const RawBinaryView &BinaryView);
 
-  /// \brief Transform the IR to represent the request form of CFG
+  /// Transform the IR to represent the request form of CFG
   void setCFGForm(CFGForm::Values NewForm,
                   MetaAddressSet *JumpTargetsWhitelist = nullptr);
 
   CFGForm::Values cfgForm() const { return CurrentCFGForm; }
 
-  /// \brief Collect jump targets from the program's segments
+  /// Collect jump targets from the program's segments
   void harvestGlobalData();
+
+  auto createCSAA() { return CreateCSAA(); }
 
   /// Handle a new program counter. We might already have a basic block for that
   /// program counter, or we could even have a translation for it. Return one
@@ -245,26 +252,29 @@ public:
   // TODO: return pair
   llvm::BasicBlock *newPC(MetaAddress PC, bool &ShouldContinue);
 
-  /// \brief Save the PC-Instruction association for future use
+  /// Save the PC-Instruction association for future use
   void registerInstruction(MetaAddress PC, llvm::Instruction *Instruction);
 
-  /// \brief Return a pointer to the `exitTB` function
+  auto &module() { return TheModule; }
+  const auto &model() const { return Model; }
+
+  /// Return a pointer to the `exitTB` function
   ///
   /// `exitTB` is called when jump to the current value of the PC must be
   /// performed.
   llvm::Function *exitTB() { return ExitTB; }
 
-  /// \brief Pop from the list of program counters to explore
+  /// Pop from the list of program counters to explore
   ///
   /// \return a pair containing the PC and the initial block to use, or
   ///         JumpTarget::NoMoreTargets if we're done.
   BlockWithAddress peek();
 
-  /// \brief Return true if no unexplored jump targets are available
+  /// Return true if no unexplored jump targets are available
   bool empty() { return Unexplored.empty(); }
 
-  /// \brief Return true if the whole [\p Start,\p End) range is in an
-  ///        executable segment
+  /// Return true if the whole [\p Start,\p End) range is in an executable
+  /// segment
   bool isExecutableRange(MetaAddress Start, MetaAddress End) const {
     revng_assert(Start.isValid() and End.isValid());
 
@@ -276,35 +286,50 @@ public:
         return true;
       }
     }
+
     return false;
   }
 
-  /// \brief Return true if the given PC can be executed by the current
-  ///        architecture
+  bool isMapped(MetaAddress Start, MetaAddress End) const {
+    revng_assert(Start.isValid() and End.isValid());
+
+    for (const model::Segment &Segment : Model->Segments()) {
+      if (Segment.StartAddress().addressLowerThanOrEqual(Start)
+          and Start.addressLowerThan(Segment.endAddress())
+          and Segment.StartAddress().addressLowerThanOrEqual(End)
+          and End.addressLowerThan(Segment.endAddress())) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /// Return true if the given PC can be executed by the current architecture
   bool isPC(MetaAddress PC) const {
     revng_assert(PC.isValid());
     return isExecutableAddress(PC);
   }
 
-  /// \brief Return true if the given PC is a jump target
+  /// Return true if the given PC is a jump target
   bool isJumpTarget(MetaAddress PC) const {
     revng_assert(PC.isValid());
-    return JumpTargets.count(PC);
+    return JumpTargets.contains(PC);
   }
 
-  /// \brief Return true if the given basic block corresponds to a jump target
+  /// Return true if the given basic block corresponds to a jump target
   bool isJumpTarget(llvm::BasicBlock *BB) {
     if (BB->empty())
       return false;
 
-    MetaAddress PC = getPCFromNewPCCall(&*BB->begin());
+    MetaAddress PC = getBasicBlockAddress(BB);
     if (PC.isValid())
       return isJumpTarget(PC);
 
     return false;
   }
 
-  /// \brief Return true if \p PC is in an executable segment
+  /// Return true if \p PC is in an executable segment
   bool isExecutableAddress(MetaAddress PC) const {
     revng_assert(PC.isValid());
 
@@ -317,15 +342,14 @@ public:
     return false;
   }
 
-  /// \brief Get the basic block associated to the original address \p PC
+  /// Get the basic block associated to the original address \p PC
   ///
   /// If the given address has never been met, assert.
   ///
   /// \param PC the PC for which a `BasicBlock` is requested.
   llvm::BasicBlock *getBlockAt(MetaAddress PC);
 
-  /// \brief Return, and, if necessary, register the basic block associated to
-  ///        \p PC
+  /// Return, and, if necessary, register the basic block associated to \p PC
   ///
   /// This function can return `nullptr`.
   ///
@@ -339,7 +363,7 @@ public:
 
   bool hasJT(MetaAddress PC) {
     revng_assert(PC.isValid());
-    return JumpTargets.count(PC) != 0;
+    return JumpTargets.contains(PC);
   }
 
   BlockMap::const_iterator begin() const { return JumpTargets.begin(); }
@@ -347,42 +371,49 @@ public:
   BlockMap::const_iterator end() const { return JumpTargets.end(); }
 
   void registerJT(llvm::BasicBlock *BB, JTReason::Values Reason) {
-    registerJT(getBasicBlockPC(notNull(BB)), Reason);
+    registerJT(getBasicBlockAddress(notNull(BB)), Reason);
   }
 
   // TODO: this is a likely approach is broken, it depends on the order
-  /// \brief As registerJT, but only if the JT has already been registered
-  void markJT(MetaAddress PC, JTReason::Values Reason) {
+  /// As registerJT, but only if the JT has already been registered
+  ///
+  /// \return true if the given PC did not already have such reason
+  bool markJT(MetaAddress PC, JTReason::Values Reason) {
+    bool Result = false;
     revng_assert(PC.isValid());
 
-    if (isJumpTarget(PC))
+    if (isJumpTarget(PC)) {
+      Result = not JumpTargets.at(PC).hasReason(Reason);
       registerJT(PC, Reason);
+    }
+
+    return Result;
   }
 
-  /// \brief Checks if \p BB is a basic block generated during translation
+  /// Checks if \p BB is a basic block generated during translation
   bool isTranslatedBB(llvm::BasicBlock *BB) const {
     return BB != anyPC() && BB != unexpectedPC() && BB != dispatcher()
            && BB != dispatcherFail();
   }
 
-  /// \brief Return the dispatcher basic block.
+  /// Return the dispatcher basic block.
   ///
   /// \note Do not use this for comparison with successors of translated code,
   ///       use isTranslatedBB instead.
   llvm::BasicBlock *dispatcher() const { return Dispatcher; }
 
-  /// \brief Return the basic block handling an unknown PC in the dispatcher
+  /// Return the basic block handling an unknown PC in the dispatcher
   llvm::BasicBlock *dispatcherFail() const { return DispatcherFail; }
 
-  /// \brief Return the basic block handling a jump to any PC
+  /// Return the basic block handling a jump to any PC
   llvm::BasicBlock *anyPC() const { return AnyPC; }
 
-  /// \brief Return the basic block handling a jump to an unexpected PC
+  /// Return the basic block handling a jump to an unexpected PC
   llvm::BasicBlock *unexpectedPC() const { return UnexpectedPC; }
 
   // TODO: can this be replaced by the corresponding method in
   // GeneratedCodeBasicInfo?
-  /// \brief Get the PC associated and the size of the original instruction
+  /// Get the PC associated and the size of the original instruction
   std::pair<MetaAddress, uint64_t>
   getPC(llvm::Instruction *TheInstruction) const;
 
@@ -393,16 +424,25 @@ public:
     return Pair.first + Pair.second;
   }
 
-  MaterializedValue
-  readFromPointer(llvm::Constant *Pointer, bool IsLittleEndian);
+  MaterializedValue readFromPointer(MetaAddress LoadAddress,
+                                    unsigned LoadSize,
+                                    bool IsLittleEndian);
 
-  /// \brief Increment the counter of emitted branches since the last reset
+  /// Increment the counter of emitted branches since the last reset
   void recordNewBranches(llvm::BasicBlock *Source, size_t Count) {
-    AVIPCWhiteList.insert(getPC(Source->getTerminator()).first);
+    ValueMaterializerPCWhiteList.insert(getPC(Source->getTerminator()).first);
     NewBranches += Count;
   }
 
-  /// \brief Finalizes information about the jump targets
+  bool isInValueMaterializerPCWhitelist(MetaAddress Address) const {
+    return ValueMaterializerPCWhiteList.contains(Address);
+  }
+
+  void clearValueMaterializerPCWhitelist() {
+    ValueMaterializerPCWhiteList.clear();
+  }
+
+  /// Finalizes information about the jump targets
   ///
   /// Call this function once no more jump targets can be discovered.  It will
   /// fix all the pending information. In particular, those pointers to code
@@ -417,9 +457,9 @@ public:
     translateIndirectJumps();
 
     using namespace model::Architecture;
-    unsigned ReadSize = getPointerSize(Model->Architecture);
+    unsigned ReadSize = getPointerSize(Model->Architecture());
     for (MetaAddress MemoryAddress : UnusedCodePointers) {
-      // Read using the original endianess, we want the correct address
+      // Read using the original endianness, we want the correct address
       auto MaybeRawPC = BinaryView.readInteger(MemoryAddress, ReadSize);
       MetaAddress PC = MetaAddress::invalid();
       if (MaybeRawPC)
@@ -442,13 +482,13 @@ public:
 
   MetaAddress fromPC(uint64_t PC) const {
     using namespace model::Architecture;
-    auto Architecture = toLLVMArchitecture(Model->Architecture);
+    auto Architecture = toLLVMArchitecture(Model->Architecture());
     return MetaAddress::fromPC(Architecture, PC);
   }
 
   MetaAddress fromGeneric(uint64_t Address) const {
     using namespace model::Architecture;
-    auto Architecture = toLLVMArchitecture(Model->Architecture);
+    auto Architecture = toLLVMArchitecture(Model->Architecture());
     return MetaAddress::fromGeneric(Architecture, Address);
   }
 
@@ -488,7 +528,7 @@ public:
     }
   }
 
-  void registerReadRange(MetaAddress Address, uint64_t Size);
+  void registerReadRange(MetaAddress StartAddress, MetaAddress EndAddress);
 
   const interval_set &readRange() const { return ReadIntervalSet; }
 
@@ -498,11 +538,10 @@ public:
     return Address.toString();
   }
 
-  /// \brief Register a simple literal collected during translation for
-  ///        harvesting
+  /// Register a simple literal collected during translation for harvesting
   ///
   /// A simple literal is a literal value found in the input program that is
-  /// simple enough not to require more sophisticated analyses. The typcal
+  /// simple enough not to require more sophisticated analyses. The typical
   /// example is the return address of a function call, that is provided to use
   /// by libtinycode in full.
   ///
@@ -514,49 +553,31 @@ public:
 
   ProgramCounterHandler *programCounterHandler() { return PCH; }
 
+  llvm::DenseSet<llvm::BasicBlock *> computeUnreachable() const;
+
 private:
   void fixPostHelperPC();
 
-  std::set<llvm::BasicBlock *> computeUnreachable() const;
-
-  void assertNoUnreachable() const;
-
-  /// \brief Translate the non-constant jumps into jumps to the dispatcher
+  /// Translate the non-constant jumps into jumps to the dispatcher
   void translateIndirectJumps();
 
-  /// \brief Helper function to check if an instruction is a call to `newpc`
-  ///
-  /// \return 0 if \p I is not a call to `newpc`, otherwise the PC address of
-  ///         associated to the call to `newpc`
-  MetaAddress getPCFromNewPCCall(const llvm::Instruction *I) {
-    if (auto *CallNewPC = llvm::dyn_cast<llvm::CallInst>(I)) {
-      if (CallNewPC->getCalledFunction() == nullptr
-          || CallNewPC->getCalledFunction()->getName() != "newpc")
-        return MetaAddress::invalid();
-
-      return MetaAddress::fromConstant(CallNewPC->getArgOperand(0));
-    }
-
-    return MetaAddress::invalid();
-  }
-
-  /// \brief Erase \p I, and deregister it in case it's a call to `newpc`
+  /// Erase \p I, and deregister it in case it's a call to `newpc`
   void eraseInstruction(llvm::Instruction *I) {
     revng_assert(I->use_empty());
 
-    MetaAddress PC = getPCFromNewPCCall(I);
+    MetaAddress PC = getBasicBlockAddress(I->getParent());
     if (PC.isValid())
       OriginalInstructionAddresses.erase(PC);
     eraseFromParent(I);
   }
 
-  /// \brief Drop \p Start and all the descendants, stopping when a JT is met
+  /// Drop \p Start and all the descendants, stopping when a JT is met
   void purgeTranslation(llvm::BasicBlock *Start);
 
-  /// \brief Check if \p BB has at least a predecessor, excluding the dispatcher
+  /// Check if \p BB has at least a predecessor, excluding the dispatcher
   bool hasPredecessors(llvm::BasicBlock *BB) const;
 
-  /// \brief Rebuild the dispatcher switch
+  /// Rebuild the dispatcher switch
   ///
   /// Depending on the CFG form we're currently adopting the dispatcher might go
   /// to all the jump targets or only to those who have no other predecessor.
@@ -569,11 +590,7 @@ private:
                         const unsigned char *Start,
                         const unsigned char *End);
 
-  void harvestWithAVI();
-
   void harvest();
-
-  MetaAddressSet inflateAVIWhitelist();
 
   llvm::CallInst *getJumpTarget(llvm::BasicBlock *Target);
 
@@ -612,7 +629,7 @@ private:
 
   ProgramCounterHandler *PCH;
 
-  MetaAddressSet AVIPCWhiteList;
+  MetaAddressSet ValueMaterializerPCWhiteList;
   const TupleTree<model::Binary> &Model;
   const RawBinaryView &BinaryView;
 };

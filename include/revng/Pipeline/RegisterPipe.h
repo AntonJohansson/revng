@@ -26,14 +26,15 @@ public:
     Name(Name), Pipe(std::forward<Args>(Arguments)...) {}
 
   template<typename... Args>
-  RegisterPipe(Args &&...Arguments) requires HasName<PipeT>
+  RegisterPipe(Args &&...Arguments)
+    requires HasName<PipeT>
     : Name(PipeT::Name), Pipe(std::forward<Args>(Arguments)...) {}
 
   ~RegisterPipe() override = default;
 
 public:
   void registerContainersAndPipes(Loader &Loader) override {
-    Loader.registerPipe(Name, Pipe);
+    Loader.registerPipe<PipeT>(Name);
   }
 
   void registerKinds(KindsRegistry &KindDictionary) override {}

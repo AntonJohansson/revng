@@ -1,6 +1,6 @@
 /// \file EnforceABI.cpp
-/// \brief Promotes global variables CSV to function arguments or local
-///        variables, according to the ABI analysis.
+/// Promotes global variables CSV to function arguments or local variables,
+/// according to the ABI analysis.
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
@@ -19,11 +19,11 @@
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 
 #include "revng/ABI/DefaultFunctionPrototype.h"
-#include "revng/ABI/FunctionType.h"
+#include "revng/ABI/FunctionType/Layout.h"
 #include "revng/ADT/LazySmallBitVector.h"
 #include "revng/ADT/SmallMap.h"
 #include "revng/EarlyFunctionAnalysis/CallEdge.h"
-#include "revng/EarlyFunctionAnalysis/IRHelpers.h"
+#include "revng/EarlyFunctionAnalysis/FunctionMetadataCache.h"
 #include "revng/FunctionIsolation/EnforceABI.h"
 #include "revng/FunctionIsolation/StructInitializers.h"
 #include "revng/Model/Register.h"
@@ -55,7 +55,6 @@ struct EnforceABIPipe {
     using namespace pipeline;
     using namespace ::revng::kinds;
     return { ContractGroup::transformOnlyArgument(Isolated,
-                                                  Exactness::Exact,
                                                   ABIEnforced,
                                                   InputPreservation::Erase) };
   }
@@ -71,23 +70,26 @@ class EnforceABIImpl {
 public:
   EnforceABIImpl(Module &M,
                  GeneratedCodeBasicInfo &GCBI,
-                 const model::Binary &Binary) :
+                 const model::Binary &Binary,
+                 FunctionMetadataCache &Cache) :
     M(M),
     GCBI(GCBI),
     FunctionDispatcher(M.getFunction("function_dispatcher")),
     Context(M.getContext()),
     Initializers(&M),
     Binary(Binary),
-    MetaAddressStruct(MetaAddress::getStruct(&M)) {}
+    Cache(&Cache) {}
 
   void run();
 
 private:
-  Function *
-  handleFunction(Function &OldFunction, const model::Function &FunctionModel);
+  Function *handleFunction(Function &OldFunction,
+                           const model::Function &FunctionModel);
+
   Function *recreateFunction(Function &OldFunction, const FTLayout &Prototype);
-  void
-  createPrologue(Function *NewFunction, const model::Function &FunctionModel);
+
+  void createPrologue(Function *NewFunction,
+                      const model::Function &FunctionModel);
 
   void handleRegularFunctionCall(CallInst *Call);
   CallInst *generateCall(IRBuilder<> &Builder,
@@ -105,7 +107,7 @@ private:
   LLVMContext &Context;
   StructInitializers Initializers;
   const model::Binary &Binary;
-  StructType *MetaAddressStruct;
+  FunctionMetadataCache *Cache;
 };
 
 bool EnforceABI::runOnModule(Module &M) {
@@ -115,7 +117,10 @@ bool EnforceABI::runOnModule(Module &M) {
   //       const
   const model::Binary &Binary = *ModelWrapper.getReadOnlyModel().get();
 
-  EnforceABIImpl Impl(M, GCBI, Binary);
+  EnforceABIImpl Impl(M,
+                      GCBI,
+                      Binary,
+                      getAnalysis<FunctionMetadataCachePass>().get());
   Impl.run();
   return false;
 }
@@ -127,9 +132,9 @@ void EnforceABIImpl::run() {
 
   // Recreate dynamic functions with arguments
   for (const model::DynamicFunction &FunctionModel :
-       Binary.ImportedDynamicFunctions) {
+       Binary.ImportedDynamicFunctions()) {
     // TODO: have an API to go from model to llvm::Function
-    auto OldFunctionName = (Twine("dynamic_") + FunctionModel.OriginalName)
+    auto OldFunctionName = (Twine("dynamic_") + FunctionModel.OriginalName())
                              .str();
     Function *OldFunction = M.getFunction(OldFunctionName);
     if (not OldFunction or OldFunction->isDeclaration())
@@ -152,12 +157,10 @@ void EnforceABIImpl::run() {
   }
 
   // Recreate isolated functions with arguments
-  for (const model::Function &FunctionModel : Binary.Functions) {
+  for (const model::Function &FunctionModel : Binary.Functions()) {
     revng_assert(not FunctionModel.name().empty());
     auto OldFunctionName = (Twine("local_") + FunctionModel.name()).str();
     Function *OldFunction = M.getFunction(OldFunctionName);
-    if (not OldFunction or OldFunction->isDeclaration())
-      continue;
     revng_assert(OldFunction != nullptr);
     OldFunctions.push_back(OldFunction);
 
@@ -168,7 +171,7 @@ void EnforceABIImpl::run() {
   }
 
   auto IsInIsolatedFunction = [this](Instruction *I) -> bool {
-    return FunctionsMap.count(I->getParent()->getParent()) != 0;
+    return FunctionsMap.contains(I->getParent()->getParent());
   };
 
   // Handle function calls in isolated functions
@@ -188,12 +191,10 @@ void EnforceABIImpl::run() {
 
   // Quick and dirty DCE
   for (auto [F, _] : FunctionsMap)
-    EliminateUnreachableBlocks(*F, nullptr, false);
+    if (not F->isDeclaration())
+      EliminateUnreachableBlocks(*F, nullptr, false);
 
-  if (VerifyLog.isEnabled()) {
-    raw_os_ostream Stream(dbg);
-    revng_assert(not verifyModule(M, &Stream));
-  }
+  revng::verify(&M);
 }
 
 static Type *getLLVMTypeForRegister(Module *M, model::Register::Values V) {
@@ -212,11 +213,10 @@ getLLVMReturnTypeAndArguments(llvm::Module *M, const FTLayout &Prototype) {
   SmallVector<llvm::Type *, 8> ArgumentsTypes;
   SmallVector<llvm::Type *, 8> ReturnTypes;
 
-  for (const auto &ArgumentLayout : Prototype.Arguments)
-    for (model::Register::Values Register : ArgumentLayout.Registers)
-      ArgumentsTypes.push_back(getLLVMTypeForRegister(M, Register));
+  for (model::Register::Values Register : Prototype.argumentRegisters())
+    ArgumentsTypes.push_back(getLLVMTypeForRegister(M, Register));
 
-  for (model::Register::Values Register : Prototype.ReturnValue.Registers)
+  for (model::Register::Values Register : Prototype.returnValueRegisters())
     ReturnTypes.push_back(getLLVMTypeForRegister(M, Register));
 
   // Create the return type
@@ -234,11 +234,17 @@ getLLVMReturnTypeAndArguments(llvm::Module *M, const FTLayout &Prototype) {
 
 Function *EnforceABIImpl::handleFunction(Function &OldFunction,
                                          const model::Function &FunctionModel) {
+  bool IsDeclaration = OldFunction.isDeclaration();
+
   auto Prototype = FunctionModel.prototype(Binary);
   auto Layout = abi::FunctionType::Layout::make(Prototype);
   Function *NewFunction = recreateFunction(OldFunction, Layout);
+
   FunctionTags::ABIEnforced.addTo(NewFunction);
-  createPrologue(NewFunction, FunctionModel);
+
+  if (not IsDeclaration)
+    createPrologue(NewFunction, FunctionModel);
+
   return NewFunction;
 }
 
@@ -259,16 +265,34 @@ Function *EnforceABIImpl::recreateFunction(Function &OldFunction,
   return NewFunction;
 }
 
-static Constant *getCSVOrUndef(Module *M, model::Register::Values Register) {
+static GlobalVariable *tryGetCSV(Module *M, model::Register::Values Register) {
   auto Name = model::Register::getCSVName(Register);
-  Constant *CSV = M->getGlobalVariable(Name, true);
+  return M->getGlobalVariable(Name, true);
+}
+
+static Value *loadCSVOrUndef(IRBuilder<> &Builder,
+                             Module *M,
+                             model::Register::Values Register) {
+  GlobalVariable *CSV = tryGetCSV(M, Register);
   if (CSV == nullptr) {
     auto Size = model::Register::getSize(Register);
-    auto *Type = IntegerType::get(M->getContext(), Size * 8)->getPointerTo();
-    CSV = UndefValue::get(Type);
+    auto *Type = IntegerType::get(M->getContext(), Size * 8);
+    return UndefValue::get(Type);
+  } else {
+    return createLoad(Builder, CSV);
   }
+}
 
-  return CSV;
+static std::pair<Type *, Constant *>
+getCSVOrUndef(Module *M, model::Register::Values Register) {
+  GlobalVariable *CSV = tryGetCSV(M, Register);
+  if (CSV == nullptr) {
+    auto Size = model::Register::getSize(Register);
+    auto *Type = IntegerType::get(M->getContext(), Size * 8);
+    return { Type, UndefValue::get(PointerType::get(M->getContext(), 0)) };
+  } else {
+    return { CSV->getValueType(), CSV };
+  }
 }
 
 void EnforceABIImpl::createPrologue(Function *NewFunction,
@@ -280,14 +304,13 @@ void EnforceABIImpl::createPrologue(Function *NewFunction,
   auto Prototype = FTLayout::make(FunctionModel.prototype(Binary));
 
   SmallVector<Constant *, 8> ArgumentCSVs;
-  SmallVector<Constant *, 8> ReturnCSVs;
+  SmallVector<std::pair<Type *, Constant *>, 8> ReturnCSVs;
 
   // We sort arguments by their CSV name
-  for (const FTLayout::Argument &TR : Prototype.Arguments)
-    for (model::Register::Values Register : TR.Registers)
-      ArgumentCSVs.push_back(getCSVOrUndef(&M, Register));
+  for (model::Register::Values Register : Prototype.argumentRegisters())
+    ArgumentCSVs.push_back(getCSVOrUndef(&M, Register).second);
 
-  for (model::Register::Values Register : Prototype.ReturnValue.Registers)
+  for (model::Register::Values Register : Prototype.returnValueRegisters())
     ReturnCSVs.push_back(getCSVOrUndef(&M, Register));
 
   // Store arguments to CSVs
@@ -302,8 +325,8 @@ void EnforceABIImpl::createPrologue(Function *NewFunction,
       if (auto *Return = dyn_cast<ReturnInst>(BB.getTerminator())) {
         IRBuilder<> Builder(Return);
         std::vector<Value *> ReturnValues;
-        for (Constant *ReturnCSV : ReturnCSVs)
-          ReturnValues.push_back(Builder.CreateLoad(ReturnCSV));
+        for (auto [Type, ReturnCSV] : ReturnCSVs)
+          ReturnValues.push_back(Builder.CreateLoad(Type, ReturnCSV));
 
         if (ReturnValues.size() == 1)
           Builder.CreateRet(ReturnValues[0]);
@@ -317,6 +340,7 @@ void EnforceABIImpl::createPrologue(Function *NewFunction,
 }
 
 void EnforceABIImpl::handleRegularFunctionCall(CallInst *Call) {
+  revng_assert(Call->getDebugLoc());
   Function *Caller = Call->getParent()->getParent();
   const model::Function &FunctionModel = *FunctionsMap.at(Caller);
 
@@ -328,14 +352,14 @@ void EnforceABIImpl::handleRegularFunctionCall(CallInst *Call) {
     Callee = OldToNew.at(Callee);
 
   // Identify the corresponding call site in the model
-  efa::FunctionMetadata FM = *extractFunctionMetadata(CallerFunction).get();
+  const efa::FunctionMetadata &FM = Cache->getFunctionMetadata(CallerFunction);
 
   const efa::BasicBlock *CallerBlock = FM.findBlock(GCBI, Call->getParent());
   revng_assert(CallerBlock != nullptr);
 
   // Find the CallEdge
   const efa::CallEdge *CallSite = nullptr;
-  for (const auto &Edge : CallerBlock->Successors) {
+  for (const auto &Edge : CallerBlock->Successors()) {
     using namespace efa::FunctionEdgeType;
     CallSite = dyn_cast<efa::CallEdge>(Edge.get());
     if (CallSite != nullptr)
@@ -366,14 +390,15 @@ void EnforceABIImpl::handleRegularFunctionCall(CallInst *Call) {
   // Generate the call
   IRBuilder<> Builder(Call);
   CallInst *NewCall = generateCall(Builder,
-                                   FunctionModel.Entry,
+                                   FunctionModel.Entry(),
                                    Callee,
                                    *CallerBlock,
                                    *CallSite);
   NewCall->copyMetadata(*Call);
+  NewCall->setAttributes(Call->getAttributes());
 
   // Set PC to the expected value
-  GCBI.programCounterHandler()->setPC(Builder, CallerBlock->Start);
+  GCBI.programCounterHandler()->setPC(Builder, CallerBlock->ID().start());
 
   // Drop the original call
   eraseFromParent(Call);
@@ -404,7 +429,7 @@ CallInst *EnforceABIImpl::generateCall(IRBuilder<> &Builder,
 
   model::TypePath PrototypePath = getPrototype(Binary,
                                                Entry,
-                                               CallSiteBlock.Start,
+                                               CallSiteBlock.ID(),
                                                CallSite);
   auto Prototype = abi::FunctionType::Layout::make(PrototypePath);
   revng_assert(Prototype.verify());
@@ -427,20 +452,18 @@ CallInst *EnforceABIImpl::generateCall(IRBuilder<> &Builder,
   //
   // Collect arguments and returns
   //
-  for (const auto &ArgumentLayout : Prototype.Arguments)
-    for (model::Register::Values Register : ArgumentLayout.Registers)
-      Arguments.push_back(Builder.CreateLoad(getCSVOrUndef(&M, Register)));
+  for (model::Register::Values Register : Prototype.argumentRegisters())
+    Arguments.push_back(loadCSVOrUndef(Builder, &M, Register));
 
-  for (model::Register::Values Register : Prototype.ReturnValue.Registers)
-    ReturnCSVs.push_back(getCSVOrUndef(&M, Register));
+  for (model::Register::Values Register : Prototype.returnValueRegisters())
+    ReturnCSVs.push_back(getCSVOrUndef(&M, Register).second);
 
   //
   // Produce the call
   //
   auto *Result = Builder.CreateCall(Callee, Arguments);
-  GCBI.setMetaAddressMetadata(Result,
-                              CallerBlockStartMDName,
-                              CallSiteBlock.Start);
+  revng_assert(Result->getDebugLoc());
+
   if (ReturnCSVs.size() != 1) {
     unsigned I = 0;
     for (Constant *ReturnCSV : ReturnCSVs) {
@@ -452,4 +475,11 @@ CallInst *EnforceABIImpl::generateCall(IRBuilder<> &Builder,
   }
 
   return Result;
+}
+
+void EnforceABI::getAnalysisUsage(llvm::AnalysisUsage &AU) const {
+  AU.addRequired<GeneratedCodeBasicInfoWrapperPass>();
+  AU.addRequired<LoadModelWrapperPass>();
+  AU.addRequired<FunctionMetadataCachePass>();
+  AU.setPreservesAll();
 }

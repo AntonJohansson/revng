@@ -4,24 +4,16 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
-#include <csignal>
-#include <cstdlib>
 #include <map>
 #include <string>
 #include <vector>
 
-#include "llvm/ADT/Twine.h"
-#include "llvm/Support/ManagedStatic.h"
-
 #include "revng/Support/Debug.h"
+#include "revng/Support/OnQuit.h"
 
 const size_t MaxCounterMapDump = 32;
 
-class OnQuitInteraface {
-public:
-  virtual void onQuit() = 0;
-  virtual ~OnQuitInteraface();
-};
+extern llvm::cl::opt<bool> Statistics;
 
 template<typename T>
 inline size_t digitsCount(T Value) {
@@ -36,22 +28,24 @@ inline size_t digitsCount(T Value) {
 }
 
 template<typename K, typename T = uint64_t>
-class CounterMap : public OnQuitInteraface {
+class CounterMap {
 private:
   using Container = std::map<K, T>;
   Container Map;
   std::string Name;
 
 public:
-  CounterMap(const llvm::Twine &Name) : Name(Name.str()) { init(); }
-  virtual ~CounterMap() {}
+  CounterMap(const llvm::StringRef Name) : Name(Name.str()) {
+    OnQuit->add([this] {
+      if (Statistics)
+        dump();
+    });
+  }
 
   void push(K Key) { Map[Key]++; }
   void push(K Key, T Value) { Map[Key] += Value; }
   void clear(K Key) { Map.erase(Key); }
   void clear() { Map.clear(); }
-
-  virtual void onQuit() { dump(); }
 
   template<typename O>
   void dump(size_t Max, O &Output) {
@@ -87,12 +81,9 @@ public:
 
   void dump(size_t Max) { dump(Max, dbg); }
   void dump() { dump(MaxCounterMapDump, dbg); }
-
-private:
-  void init();
 };
 
-/// \brief Collect mean and variance about a certain event.
+/// Collect mean and variance about a certain event.
 ///
 /// To use this class, simply create a global variable, call push with the value
 /// you want to record, when you're done use the various methods to obtain mean
@@ -100,28 +91,30 @@ private:
 ///
 /// If a name is provided, the results will be registered for printing at
 /// program termination.
-class RunningStatistics : public OnQuitInteraface {
+class RunningStatistics {
+private:
+  std::string Name;
+  int N = 0;
+  double OldM = 0.0;
+  double NewM = 0.0;
+  double OldS = 0.0;
+  double NewS = 0.0;
+  double Sum = 0.0;
+
 public:
-  RunningStatistics() : RunningStatistics(llvm::Twine(), false) {}
+  RunningStatistics() = default;
 
-  RunningStatistics(const llvm::Twine &Name) : RunningStatistics(Name, true) {}
-
-  /// \arg Name the name to use when printing the statistics.
-  /// \arg Register whether this object should be registered for being printed
-  ///      upon program termination or not.
-  RunningStatistics(const llvm::Twine &Name, bool Register) :
-    Name(Name.str()), N(0) {
-
-    if (Register)
-      init();
+  RunningStatistics(const llvm::StringRef Name) : Name(Name.str()) {
+    OnQuit->add([this] {
+      if (Statistics)
+        dump();
+    });
   }
-
-  virtual ~RunningStatistics() {}
 
   void clear() { N = 0; }
 
   // TODO: make a template
-  /// \brief Record a new value
+  /// Record a new value
   void push(double X) {
     N++;
     Sum += X;
@@ -153,60 +146,12 @@ public:
 
   template<typename T>
   void dump(T &Output) {
-    if (not Name.empty())
-      Output << Name << ": ";
-    Output << "{ s: " << sum() << " "
+    Output << Name << ": "
+           << "{ s: " << sum() << " "
            << "n: " << size() << " "
            << "u: " << mean() << " "
-           << "o: " << variance() << " }";
+           << "o: " << variance() << " }\n";
   }
 
   void dump() { dump(dbg); }
-
-  virtual void onQuit();
-
-private:
-  void init();
-
-private:
-  std::string Name;
-  int N;
-  double OldM, NewM, OldS, NewS;
-  double Sum;
 };
-
-// TODO: this is duplicated
-template<typename T, typename... ArgTypes>
-inline std::array<T, sizeof...(ArgTypes)> make_array(ArgTypes &&...Args) {
-  return { { std::forward<ArgTypes>(Args)... } };
-}
-
-class OnQuitRegistry {
-public:
-  void install();
-
-  /// \brief Registers an object for having its onQuit method called upon
-  ///        program termination
-  void add(OnQuitInteraface *S) { Register.push_back(S); }
-
-  void dump() {
-    for (OnQuitInteraface *S : Register)
-      S->onQuit();
-  }
-
-private:
-  std::vector<OnQuitInteraface *> Register;
-};
-
-extern llvm::ManagedStatic<OnQuitRegistry> OnQuitStatistics;
-
-inline void RunningStatistics::init() {
-  OnQuitStatistics->add(this);
-}
-
-template<typename K, typename T>
-inline void CounterMap<K, T>::init() {
-  OnQuitStatistics->add(this);
-}
-
-extern void installStatistics();

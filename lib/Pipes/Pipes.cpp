@@ -1,11 +1,12 @@
 /// \file Pipes.cpp
-/// \brief Pipes contains all the various pipes and kinds exposed by revng
+/// Contains the definition of the pipe registry.
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
 #include <array>
+#include <memory>
 #include <string>
 
 #include "llvm/ADT/StringMap.h"
@@ -14,6 +15,7 @@
 #include "llvm/CodeGen/CommandFlags.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/Pass.h"
 #include "llvm/PassRegistry.h"
@@ -24,13 +26,10 @@
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/TargetSelect.h"
 
-#include "revng/EarlyFunctionAnalysis/CollectFunctionsFromCalleesPass.h"
-#include "revng/EarlyFunctionAnalysis/CollectFunctionsFromUnusedAddressesPass.h"
-#include "revng/EarlyFunctionAnalysis/DetectABI.h"
 #include "revng/Model/LoadModelPass.h"
 #include "revng/Pipeline/AllRegistries.h"
 #include "revng/Pipeline/Context.h"
-#include "revng/Pipeline/LLVMGlobalKindBase.h"
+#include "revng/Pipeline/LLVMKind.h"
 #include "revng/Pipeline/Target.h"
 #include "revng/Pipes/FileContainer.h"
 #include "revng/Pipes/ModelGlobal.h"
@@ -47,13 +46,10 @@ namespace revng::pipes {
 
 static RegisterLLVMPass<O2Pipe> P2;
 
-static RegisterContainerFactory
-  F1("Binary", makeFileContainerFactory(Binary, "application/x-executable"));
-static RegisterContainerFactory
-  F2("Object", makeFileContainerFactory(Object, "application/x-object", ".o"));
-static RegisterContainerFactory
-  F3("Translated",
-     makeFileContainerFactory(Translated, "application/x-executable"));
+static RegisterDefaultConstructibleContainer<BinaryFileContainer> F1;
+static RegisterDefaultConstructibleContainer<ObjectFileContainer> F2;
+static RegisterDefaultConstructibleContainer<TranslatedFileContainer> F4;
+static RegisterDefaultConstructibleContainer<HexDumpFileContainer> F5;
 
 class LLVMPipelineRegistry : public Registry {
 
@@ -68,7 +64,8 @@ public:
 
     auto &PipeContext = Loader.getContext();
     auto &LLVMContext = **MaybeLLVMContext;
-    auto Factory = makeDefaultLLVMContainerFactory(PipeContext, LLVMContext);
+    auto Factory = ContainerFactory::fromGlobal<LLVMContainer>(&PipeContext,
+                                                               &LLVMContext);
 
     Loader.addContainerFactory("LLVMContainer", std::move(Factory));
   }
@@ -88,16 +85,11 @@ public:
     llvm::initializeScalarOpts(Registry);
     llvm::initializeVectorization(Registry);
     llvm::initializeInstCombine(Registry);
-    llvm::initializeAggressiveInstCombine(Registry);
     llvm::initializeIPO(Registry);
-    llvm::initializeInstrumentation(Registry);
     llvm::initializeAnalysis(Registry);
-    llvm::initializeCoroutines(Registry);
     llvm::initializeCodeGen(Registry);
     llvm::initializeGlobalISel(Registry);
     llvm::initializeTarget(Registry);
-
-    installStatistics();
   }
 
   ~LLVMPipelineRegistry() override = default;

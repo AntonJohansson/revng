@@ -37,15 +37,8 @@ macro(revng_add_library NAME TYPE EXPORT_NAME)
     append_target_property("${NAME}" BUILD_RPATH "${CMAKE_INSTALL_RPATH}" ":")
   endif()
 
-  make_directory("${CMAKE_BINARY_DIR}/lib/")
-  set(TARGET_PATH
-      "${CMAKE_BINARY_DIR}/lib/${CMAKE_SHARED_LIBRARY_PREFIX}${NAME}${CMAKE_SHARED_LIBRARY_SUFFIX}"
-  )
-  add_custom_command(
-    TARGET "${NAME}"
-    POST_BUILD VERBATIM
-    COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:${NAME}>" "${TARGET_PATH}"
-    BYPRODUCTS "${TARGET_PATH}")
+  set_target_properties("${NAME}" PROPERTIES LIBRARY_OUTPUT_DIRECTORY
+                                             "${CMAKE_BINARY_DIR}/lib")
 
   install(
     TARGETS "${NAME}"
@@ -67,15 +60,9 @@ macro(revng_add_analyses_library NAME EXPORT_NAME)
     append_target_property("${NAME}" BUILD_RPATH "${CMAKE_INSTALL_RPATH}" ":")
   endif()
 
-  make_directory("${CMAKE_BINARY_DIR}/lib/revng/analyses/")
-  set(TARGET_PATH
-      "${CMAKE_BINARY_DIR}/lib/revng/analyses/${CMAKE_SHARED_LIBRARY_PREFIX}${NAME}${CMAKE_SHARED_LIBRARY_SUFFIX}"
-  )
-  add_custom_command(
-    TARGET "${NAME}"
-    POST_BUILD VERBATIM
-    COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:${NAME}>" "${TARGET_PATH}"
-    BYPRODUCTS "${TARGET_PATH}")
+  set_target_properties(
+    "${NAME}" PROPERTIES LIBRARY_OUTPUT_DIRECTORY
+                         "${CMAKE_BINARY_DIR}/lib/revng/analyses")
 
   install(
     TARGETS "${NAME}"
@@ -106,6 +93,7 @@ macro(revng_add_executable_internal NAME TARGET_PATH)
   endif()
 
   add_executable("${NAME}" ${ARGN})
+  append_target_property("${NAME}" "LINK_FLAGS" "-pie" " ")
 
   add_dependencies(revng-all-binaries "${NAME}")
 
@@ -170,20 +158,6 @@ endmacro()
 
 include("${CMAKE_CURRENT_LIST_DIR}/TupleTreeGenerator.cmake")
 
-function(check_python_requirements)
-  execute_process(
-    COMMAND pip3 freeze
-    RESULT_VARIABLE RETURNCODE
-    OUTPUT_VARIABLE PYTHON_PACKAGES
-    ERROR_FILE "/dev/null")
-  foreach(REQUIREMENT ${ARGN})
-    string(REGEX MATCH "\n${REQUIREMENT}" RESULT "\n${PYTHON_PACKAGES}")
-    if("${RESULT}" STREQUAL "")
-      message(FATAL_ERROR "Python requirement missing: ${REQUIREMENT}")
-    endif()
-  endforeach()
-endfunction()
-
 function(copy_to_build_and_install INSTALL_TYPE DESTINATION)
   foreach(INPUT_FILE ${ARGN})
     make_directory("${CMAKE_BINARY_DIR}/${DESTINATION}")
@@ -192,3 +166,15 @@ function(copy_to_build_and_install INSTALL_TYPE DESTINATION)
     install("${INSTALL_TYPE}" "${INPUT_FILE}" DESTINATION "${DESTINATION}")
   endforeach()
 endfunction()
+
+macro(revng_add_test)
+  set(options OPTIONAL FAST)
+  set(oneValueArgs DESTINATION RENAME)
+  set(multiValueArgs TARGETS CONFIGURATIONS)
+  cmake_parse_arguments(REVNG_TEST "" "NAME" "" ${ARGN})
+  add_test(${ARGN})
+  set_tests_properties(
+    "${REVNG_TEST_NAME}"
+    PROPERTIES ENVIRONMENT
+               "REVNG_OPTIONS=--debug-log=verify $ENV{REVNG_OPTIONS}")
+endmacro()

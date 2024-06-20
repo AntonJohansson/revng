@@ -1,11 +1,11 @@
 /// \file PDBImporter.cpp
-/// \brief
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
 #include "llvm/DebugInfo/CodeView/CVSymbolVisitor.h"
+#include "llvm/DebugInfo/CodeView/CVTypeVisitor.h"
 #include "llvm/DebugInfo/CodeView/LazyRandomTypeCollection.h"
 #include "llvm/DebugInfo/CodeView/SymbolDeserializer.h"
 #include "llvm/DebugInfo/CodeView/SymbolRecord.h"
@@ -21,8 +21,12 @@
 #include "llvm/DebugInfo/PDB/Native/PDBFile.h"
 #include "llvm/DebugInfo/PDB/Native/SymbolStream.h"
 #include "llvm/DebugInfo/PDB/PDB.h"
+#include "llvm/Support/Path.h"
+#include "llvm/Support/Process.h"
+#include "llvm/Support/Program.h"
 
 #include "revng/Model/Binary.h"
+#include "revng/Model/Importer/Binary/Options.h"
 #include "revng/Model/Importer/DebugInfo/PDBImporter.h"
 #include "revng/Model/Pass/AllPasses.h"
 #include "revng/Model/Processing.h"
@@ -31,6 +35,9 @@
 #include "revng/Support/Assert.h"
 #include "revng/Support/Debug.h"
 #include "revng/Support/MetaAddress.h"
+#include "revng/Support/ProgramRunner.h"
+
+#include "ImportDebugInfoHelper.h"
 
 using namespace llvm;
 using namespace llvm::codeview;
@@ -39,10 +46,6 @@ using namespace llvm::pdb;
 
 static Logger<> DILogger("pdb-importer");
 
-static llvm::cl::list<std::string> SearchPathPDB("search-path-pdb",
-                                                 llvm::cl::desc("path"),
-                                                 llvm::cl::ZeroOrMore,
-                                                 llvm::cl::cat(MainCategory));
 // Force using a specific PDB.
 static llvm::cl::opt<std::string> UsePDB("use-pdb",
                                          llvm::cl::desc("Path to the PDB."),
@@ -69,7 +72,7 @@ private:
 /// the `Types:` field of the `Model` is being populated. Since each CodeView
 /// type in the PDB has unique `TypeIndex` that will be used when a symbol from
 /// PDB symbol stream uses a certain type, we also keep a map of such
-/// `TypeIndex` to corresponging type generated within the `Model` (it is done
+/// `TypeIndex` to corresponding type generated within the `Model` (it is done
 /// by using `ProcessedTypes`), so it can be used when connecting functions from
 /// `Model` with corresponding prototypes.
 class PDBImporterTypeVisitor : public TypeVisitorCallbacks {
@@ -84,7 +87,7 @@ private:
     InProgressEnumeratorTypes;
   std::map<TypeIndex, ArgListRecord> InProgressArgumentsTypes;
 
-  // Methods of a Class type. It references conrete MemberFunctionRecord.
+  // Methods of a Class type. It references concrete MemberFunctionRecord.
   std::map<TypeIndex, SmallVector<OneMethodRecord, 8>>
     InProgressFunctionMemberTypes;
   DenseMap<TypeIndex, MemberFunctionRecord>
@@ -103,23 +106,23 @@ public:
   Error visitTypeBegin(CVType &Record, TypeIndex TI) override;
 
   Error visitKnownRecord(CVType &Record, ClassRecord &Class) override;
-  Error
-  visitKnownMember(CVMemberRecord &Record, EnumeratorRecord &Member) override;
+  Error visitKnownMember(CVMemberRecord &Record,
+                         EnumeratorRecord &Member) override;
   Error visitKnownRecord(CVType &Record, EnumRecord &Enum) override;
   Error visitKnownRecord(CVType &Record, ProcedureRecord &Proc) override;
   Error visitKnownRecord(CVType &Record, UnionRecord &Union) override;
   Error visitKnownRecord(CVType &Record, ArgListRecord &Args) override;
-  Error
-  visitKnownMember(CVMemberRecord &Record, DataMemberRecord &Member) override;
+  Error visitKnownMember(CVMemberRecord &Record,
+                         DataMemberRecord &Member) override;
   Error visitKnownRecord(CVType &Record, FieldListRecord &FieldList) override;
   Error visitKnownRecord(CVType &Record, PointerRecord &Ptr) override;
   Error visitKnownRecord(CVType &Record, ModifierRecord &Modifier) override;
   Error visitKnownRecord(CVType &Record, ArrayRecord &Array) override;
 
-  Error
-  visitKnownMember(CVMemberRecord &Record, OneMethodRecord &FnMember) override;
-  Error
-  visitKnownRecord(CVType &CVR, MemberFunctionRecord &MemberFnRecord) override;
+  Error visitKnownMember(CVMemberRecord &Record,
+                         OneMethodRecord &FnMember) override;
+  Error visitKnownRecord(CVType &CVR,
+                         MemberFunctionRecord &MemberFnRecord) override;
 
   std::optional<TupleTreeReference<model::Type, model::Binary>>
   getModelTypeForIndex(TypeIndex Index);
@@ -233,6 +236,7 @@ void PDBImporterImpl::populateSymbolsWithTypes(NativeSession &Session) {
     return;
   }
 
+  FilterOptions Filters{};
   LinePrinter Printer(/*Indent=*/2, false, nulls(), Filters);
   const PrintScope HeaderScope(Printer, /*IndentLevel=*/2);
   PDBSymbolHandler SymbolHandler(Importer, ProcessedTypes, Session, *InputFile);
@@ -270,34 +274,167 @@ void PDBImporter::loadDataFromPDB(std::string PDBFileName) {
   }
 }
 
-void PDBImporter::import(const COFFObjectFile &TheBinary) {
+// At first, check if we can find the file path on this device as is.
+// If the XDG_CACHE_HOME was set, we will find there, if not, try finding it in
+// the `~/.local/share/revng/debug-symbols/pe/`.
+std::optional<std::string>
+PDBImporter::getCachedPDBFilePath(std::string PDBFileID,
+                                  StringRef PDBFilePath,
+                                  StringRef InputFileName) {
+  llvm::SmallString<128> ResultPath;
+  if (llvm::sys::fs::exists(ResultPath.str()))
+    return std::string(ResultPath.str());
+
+  ResultPath.clear();
+  // Check in the same directory as InputFileName.
+  if (sys::path::is_absolute(InputFileName)) {
+    llvm::sys::path::append(ResultPath,
+                            llvm::sys::path::parent_path(InputFileName),
+                            PDBFilePath);
+  } else {
+    // Relative path.
+    llvm::SmallString<64> CurrentDirectory;
+    auto ErrorCode = llvm::sys::fs::current_path(CurrentDirectory);
+    if (!ErrorCode) {
+      llvm::sys::path::append(ResultPath,
+                              CurrentDirectory,
+                              llvm::sys::path::parent_path(InputFileName),
+                              PDBFilePath);
+    } else {
+      revng_log(DILogger, "Can't get current working path.");
+    }
+  }
+
+  if (llvm::sys::fs::exists(ResultPath.str()))
+    return std::string(ResultPath.str());
+
+  ResultPath.clear();
+  auto XDGCacheHome = llvm::sys::Process::GetEnv("XDG_CACHE_HOME");
+  if (!XDGCacheHome) {
+    SmallString<64> PathHome;
+    sys::path::home_directory(PathHome);
+    // Default debug directory.
+    llvm::sys::path::append(ResultPath,
+                            PathHome.str(),
+                            ".local/share/revng/debug-symbols/pe/",
+                            PDBFileID,
+                            PDBFilePath);
+  } else {
+    llvm::sys::path::append(ResultPath,
+                            *XDGCacheHome,
+                            ".local/share/revng/debug-symbols/pe/",
+                            PDBFileID,
+                            PDBFilePath);
+  }
+
+  if (llvm::sys::fs::exists(ResultPath.str()))
+    return std::string(ResultPath.str());
+
+  return std::nullopt;
+}
+
+// Construct PDB file ID.
+static std::string formatPDBFileID(ArrayRef<uint8_t> Bytes, uint16_t Age) {
+  std::string PDBGUID;
+  raw_string_ostream StringPDBGUID(PDBGUID);
+  StringPDBGUID << format_bytes(Bytes,
+                                /*FirstByteOffset*/ {},
+                                /*NumPerLine*/ 16,
+                                /*ByteGroupSize*/ 16);
+  StringPDBGUID.flush();
+
+  // Let's format the PDB file ID.
+  // The PDB GUID is `7209ac2725e5fe841a88b1fe70d1603b` and `Age` is 2.
+  // The PDB ID `Hash` is: `27ac0972e52584fe1a88b1fe70d1603b2`.
+  std::string PDBFileID;
+  PDBFileID += PDBGUID[6];
+  PDBFileID += PDBGUID[7];
+  PDBFileID += PDBGUID[4];
+  PDBFileID += PDBGUID[5];
+  PDBFileID += PDBGUID[2];
+  PDBFileID += PDBGUID[3];
+  PDBFileID += PDBGUID[0];
+  PDBFileID += PDBGUID[1];
+
+  PDBFileID += PDBGUID[10];
+  PDBFileID += PDBGUID[11];
+  PDBFileID += PDBGUID[8];
+  PDBFileID += PDBGUID[9];
+  PDBFileID += PDBGUID[14];
+  PDBFileID += PDBGUID[15];
+  PDBFileID += PDBGUID[12];
+  PDBFileID += PDBGUID[13];
+
+  PDBFileID += PDBGUID.substr(16);
+  PDBFileID += ('0' + Age);
+
+  return PDBFileID;
+}
+
+void PDBImporter::import(const COFFObjectFile &TheBinary,
+                         const ImporterOptions &Options) {
   // Parse debug info and populate types to Model.
   const codeview::DebugInfo *DebugInfo;
   StringRef PDBFilePath;
 
   auto EC = TheBinary.getDebugPDBInfo(DebugInfo, PDBFilePath);
   if (not EC and DebugInfo != nullptr and not PDBFilePath.empty()) {
-    if (llvm::sys::fs::exists(PDBFilePath)) {
+    if (not UsePDB.empty()) {
+      // Sometimes we may rename a PDB file, so we can force using that one.
+      loadDataFromPDB(UsePDB);
+    } else if (llvm::sys::fs::exists(PDBFilePath)) {
+      // Use the path of the PDB file if it exists on the device.
       loadDataFromPDB(PDBFilePath.str());
     } else {
-      // Usualy the PDB files will be generated on a different machine,
-      // so the location read from the debug directory wont be up to date. At
-      // first try to find it in the current `.` dir.
-      auto PDBFileNameOnly = PDBFilePath.substr(PDBFilePath.find_last_of('\\')
-                                                + 1);
-      if (llvm::sys::fs::exists(PDBFileNameOnly.str())) {
-        loadDataFromPDB(PDBFileNameOnly.str());
-      } else if (not UsePDB.empty()) {
-        // Sometimes we may rename a PDB file, so we can force using that one.
-        loadDataFromPDB(UsePDB);
-      } else if (SearchPathPDB.size() > 0) {
-        // Otherwise, try to find the PDB in user defined paths.
-        for (const std::string &Path : SearchPathPDB) {
-          std::string UserDefinedPDBFilePath = Path + PDBFileNameOnly.str();
-          if (llvm::sys::fs::exists(UserDefinedPDBFilePath)) {
-            loadDataFromPDB(UserDefinedPDBFilePath);
-            break;
+      if (Options.DebugInfo != DebugInfoLevel::No) {
+        // Usually the PDB files will be generated on a different machine,
+        // so the location read from the debug directory won't be up to date.
+
+        auto PositionOfLastDirectoryChar = PDBFilePath.rfind("\\");
+        if (PositionOfLastDirectoryChar != llvm::StringRef::npos) {
+          PDBFilePath = PDBFilePath.slice(PositionOfLastDirectoryChar + 1,
+                                          PDBFilePath.size());
+        }
+
+        // TODO: Handle PDB signature types other then PDB70, e.g. PDB20.
+        if (DebugInfo->Signature.CVSignature == OMF::Signature::PDB70) {
+          // Get debug info from canonical places.
+          auto PDBFileID = formatPDBFileID(DebugInfo->PDB70.Signature,
+                                           DebugInfo->PDB70.Age);
+
+          auto DebugInfoPath = getCachedPDBFilePath(PDBFileID,
+                                                    PDBFilePath,
+                                                    TheBinary.getFileName());
+          if (DebugInfoPath) {
+            loadDataFromPDB(*DebugInfoPath);
+          } else {
+            // Let's try finding it on web with the `fetch-debuginfo` tool.
+            // If the `revng` cannot be found, avoid finding debug info.
+            if (!::Runner.isProgramAvailable("revng")) {
+              revng_log(DILogger,
+                        "Can't find `revng` binary to run `fetch-debuginfo`.");
+              return;
+            }
+            int ExitCode = runFetchDebugInfoWithLevel(TheBinary.getFileName());
+            if (ExitCode != 0) {
+              revng_log(DILogger,
+                        "Failed to find debug info with `revng model "
+                        "fetch-debuginfo`.");
+              return;
+            }
+
+            DebugInfoPath = getCachedPDBFilePath(PDBFileID,
+                                                 PDBFilePath,
+                                                 TheBinary.getFileName());
+            if (!DebugInfoPath) {
+              revng_log(DILogger, "Unable to find PDB file.");
+              return;
+            }
+            loadDataFromPDB(*DebugInfoPath);
           }
+        } else {
+          revng_log(DILogger, "Handle signatures other than PDB70.");
+          return;
         }
       }
     }
@@ -314,19 +451,24 @@ void PDBImporter::import(const COFFObjectFile &TheBinary) {
     revng_log(DILogger, "Unable to find PDB file.");
     return;
   } else {
-    // According to llvm/docs/PDB/PdbStream.rst, the `Signature` was never
-    // used the way as it was the initial idea. Instead, GUID is a 128-bit
-    // identifier guaranteed to be unique ID for both executable and
-    // corresponding PDB.
-    codeview::GUID GUIDFromExe;
-    llvm::copy(DebugInfo->PDB70.Signature, std::begin(GUIDFromExe.Guid));
-    auto PDBInfoStrm = ThePDBFile->getPDBInfoStream();
-    if (!PDBInfoStrm)
-      revng_log(DILogger, "No PDB Info stream found.");
-    else {
-      codeview::GUID GUIDFromPDBFIle = PDBInfoStrm->getGuid();
-      if (GUIDFromExe != GUIDFromPDBFIle)
-        revng_log(DILogger, "Signatures from exe and PDB file mismatch.");
+    // TODO: Handle PDB signature types other then PDB70, e.g. PDB20.
+    if (DebugInfo->Signature.CVSignature == OMF::Signature::PDB70) {
+      // According to llvm/docs/PDB/PdbStream.rst, the `Signature` was never
+      // used the way as it was the initial idea. Instead, GUID is a 128-bit
+      // identifier guaranteed to be unique ID for both executable and
+      // corresponding PDB.
+      codeview::GUID GUIDFromExe;
+      llvm::copy(DebugInfo->PDB70.Signature, std::begin(GUIDFromExe.Guid));
+      auto PDBInfoStrm = ThePDBFile->getPDBInfoStream();
+      if (!PDBInfoStrm)
+        revng_log(DILogger, "No PDB Info stream found.");
+      else {
+        codeview::GUID GUIDFromPDBFIle = PDBInfoStrm->getGuid();
+        if (GUIDFromExe != GUIDFromPDBFIle)
+          revng_log(DILogger, "Signatures from exe and PDB file mismatch.");
+      }
+    } else {
+      revng_log(DILogger, "Handle signatures other than PDB70.");
     }
   }
 
@@ -383,7 +525,7 @@ Error PDBImporterTypeVisitor::visitKnownRecord(CVType &Record,
     QualifiedType TheUnderlyingType(*ReferencedTypeFromModel, Qualifiers);
 
     auto TheTypeTypeDef = cast<TypedefType>(TypeTypedef.get());
-    TheTypeTypeDef->UnderlyingType = TheUnderlyingType;
+    TheTypeTypeDef->UnderlyingType() = TheUnderlyingType;
 
     auto TypePath = Model->recordNewType(std::move(TypeTypedef));
     ProcessedTypes[CurrentTypeIndex] = TypePath;
@@ -416,7 +558,7 @@ Error PDBImporterTypeVisitor::visitKnownRecord(CVType &Record,
     QualifiedType TheUnderlyingType(*ElementTypeFromModel, Qualifiers);
 
     auto TheTypeTypeDef = cast<TypedefType>(TypeTypedef.get());
-    TheTypeTypeDef->UnderlyingType = TheUnderlyingType;
+    TheTypeTypeDef->UnderlyingType() = TheUnderlyingType;
 
     auto TypePath = Model->recordNewType(std::move(TypeTypedef));
     ProcessedTypes[CurrentTypeIndex] = TypePath;
@@ -447,7 +589,7 @@ Error PDBImporterTypeVisitor::visitKnownRecord(CVType &Record,
                                              Qualifiers);
 
       auto TheTypeTypeDef = cast<model::TypedefType>(TypeTypedef.get());
-      TheTypeTypeDef->UnderlyingType = TheUnderlyingType;
+      TheTypeTypeDef->UnderlyingType() = TheUnderlyingType;
 
       auto TypePath = Model->recordNewType(std::move(TypeTypedef));
       ProcessedTypes[CurrentTypeIndex] = TypePath;
@@ -494,13 +636,13 @@ Error PDBImporterTypeVisitor::visitKnownRecord(CVType &Record,
   // 0-sized structs are typedefed to void.
   if (not Class.getSize()) {
     auto TypeTypedef = makeType<TypedefType>();
-    TypeTypedef->OriginalName = Class.getName();
+    TypeTypedef->OriginalName() = Class.getName();
 
     using Values = model::PrimitiveTypeKind::Values;
     QualifiedType TheUnderlyingType(Model->getPrimitiveType(Values::Void, 0),
                                     {});
     auto TheTypeTypeDef = cast<TypedefType>(TypeTypedef.get());
-    TheTypeTypeDef->UnderlyingType = TheUnderlyingType;
+    TheTypeTypeDef->UnderlyingType() = TheUnderlyingType;
 
     auto TypePath = Model->recordNewType(std::move(TypeTypedef));
     ProcessedTypes[CurrentTypeIndex] = TypePath;
@@ -509,12 +651,12 @@ Error PDBImporterTypeVisitor::visitKnownRecord(CVType &Record,
   }
 
   TypeIndex FieldsTypeIndex = Class.getFieldList();
-  if (InProgressMemberTypes.count(FieldsTypeIndex)) {
+  if (InProgressMemberTypes.count(FieldsTypeIndex) != 0) {
     auto NewType = makeType<model::StructType>();
-    NewType->OriginalName = Class.getName();
+    NewType->OriginalName() = Class.getName();
     auto Struct = cast<model::StructType>(NewType.get());
 
-    Struct->Size = Class.getSize();
+    Struct->Size() = Class.getSize();
     auto &TheFields = InProgressMemberTypes[FieldsTypeIndex];
     uint64_t MaxOffset = 0;
 
@@ -549,19 +691,19 @@ Error PDBImporterTypeVisitor::visitKnownRecord(CVType &Record,
         else
           continue;
 
-        // TODO: How is this posible?
-        // Trigers:
+        // TODO: How is this possible?
+        // Triggers:
         // `Last field ends outside the struct`.
-        if (CurrFieldOffset > Struct->Size) {
+        if (CurrFieldOffset > Struct->Size()) {
           revng_log(DILogger,
                     "Skipping struct field that is outside the struct.");
           continue;
         }
 
-        auto &FieldType = Struct->Fields[Offset];
-        FieldType.OriginalName = Field.getName().str();
+        auto &FieldType = Struct->Fields()[Offset];
+        FieldType.OriginalName() = Field.getName().str();
         QualifiedType TheUnderlyingType(*FiledTypeFromModel, {});
-        FieldType.Type = TheUnderlyingType;
+        FieldType.Type() = TheUnderlyingType;
       }
     }
     auto TypePath = Model->recordNewType(std::move(NewType));
@@ -569,11 +711,11 @@ Error PDBImporterTypeVisitor::visitKnownRecord(CVType &Record,
   }
 
   // Process methods. Create C-like function prototype for it.
-  if (InProgressFunctionMemberTypes.count(FieldsTypeIndex)) {
+  if (InProgressFunctionMemberTypes.contains(FieldsTypeIndex)) {
     auto &TheFunctions = InProgressFunctionMemberTypes[FieldsTypeIndex];
     for (auto &Function : TheFunctions) {
       TypeIndex FnTypeIndex = Function.getType();
-      if (not InProgressConcreteFunctionMemberTypes.count(FnTypeIndex))
+      if (InProgressConcreteFunctionMemberTypes.count(FnTypeIndex) == 0)
         continue;
 
       // Get the proper LF_MFUNCTION.
@@ -589,13 +731,13 @@ Error PDBImporterTypeVisitor::visitKnownRecord(CVType &Record,
 
       auto NewType = makeType<CABIFunctionType>();
       auto TypeFunction = cast<CABIFunctionType>(NewType.get());
-      TypeFunction->ABI = Model->DefaultABI;
+      TypeFunction->ABI() = Model->DefaultABI();
 
       QualifiedType TheReturnType(*ReferencedTypeFromModel, {});
-      TypeFunction->ReturnType = TheReturnType;
+      TypeFunction->ReturnType() = TheReturnType;
 
       TypeIndex ArgListTyIndex = MemberFunction.getArgumentList();
-      revng_assert(InProgressArgumentsTypes.count(ArgListTyIndex));
+      revng_assert(InProgressArgumentsTypes.contains(ArgListTyIndex));
       auto ArgList = InProgressArgumentsTypes[ArgListTyIndex];
 
       auto Indices = ArgList.getIndices();
@@ -606,14 +748,14 @@ Error PDBImporterTypeVisitor::visitKnownRecord(CVType &Record,
       // as `static` or `friend`.
       if (Function.getMethodKind() != MethodKind::Static
           and Function.getMethodKind() != MethodKind::Friend
-          and ProcessedTypes.count(CurrentTypeIndex)) {
+          and ProcessedTypes.count(CurrentTypeIndex) != 0) {
         auto MaybeSize = ProcessedTypes[CurrentTypeIndex].get()->size();
         if (MaybeSize and *MaybeSize != 0) {
-          Argument &NewArgument = TypeFunction->Arguments[Index];
-          auto PointerSize = getPointerSize(Model->Architecture);
+          Argument &NewArgument = TypeFunction->Arguments()[Index];
+          auto PointerSize = getPointerSize(Model->Architecture());
           QualifiedType TheType(ProcessedTypes[CurrentTypeIndex],
                                 { Qualifier::createPointer(PointerSize) });
-          NewArgument.Type = TheType;
+          NewArgument.Type() = TheType;
           ++Index;
         } else {
           revng_log(DILogger, "Skipping 0-sized argument.");
@@ -636,10 +778,10 @@ Error PDBImporterTypeVisitor::visitKnownRecord(CVType &Record,
             continue;
           }
 
-          Argument &NewArgument = TypeFunction->Arguments[Index];
+          Argument &NewArgument = TypeFunction->Arguments()[Index];
 
           QualifiedType TheUnderlyingType(*ArgumentTypeFromModel, {});
-          NewArgument.Type = TheUnderlyingType;
+          NewArgument.Type() = TheUnderlyingType;
           ++Index;
         }
       }
@@ -657,7 +799,7 @@ Error PDBImporterTypeVisitor::visitKnownRecord(CVType &Record,
                                                EnumRecord &Enum) {
   TypeIndex FieldsTypeIndex = Enum.getFieldList();
   auto NewType = model::makeType<model::EnumType>();
-  NewType->OriginalName = Enum.getName();
+  NewType->OriginalName() = Enum.getName();
 
   TypeIndex UnderlyingTypeIndex = Enum.getUnderlyingType();
   auto UnderlynigTypeFromModel = getModelTypeForIndex(UnderlyingTypeIndex);
@@ -670,15 +812,15 @@ Error PDBImporterTypeVisitor::visitKnownRecord(CVType &Record,
 
   model::QualifiedType TheUnderlyingType(*UnderlynigTypeFromModel, {});
   auto TypeEnum = cast<model::EnumType>(NewType.get());
-  TypeEnum->UnderlyingType = TheUnderlyingType;
+  TypeEnum->UnderlyingType() = TheUnderlyingType;
 
   auto &TheFields = InProgressEnumeratorTypes[FieldsTypeIndex];
   if (TheFields.empty())
     return Error::success();
 
   for (const auto &Entry : TheFields) {
-    auto &EnumEntry = TypeEnum->Entries[Entry.getValue().getExtValue()];
-    EnumEntry.OriginalName = Entry.getName().str();
+    auto &EnumEntry = TypeEnum->Entries()[Entry.getValue().getExtValue()];
+    EnumEntry.OriginalName() = Entry.getName().str();
   }
 
   auto TypePath = Model->recordNewType(std::move(NewType));
@@ -696,10 +838,12 @@ getMicrosoftABI(CallingConvention CallConv, model::Architecture::Values Arch) {
     case CallingConvention::NearStdCall:
     case CallingConvention::NearSysCall:
     case CallingConvention::ThisCall:
-    case CallingConvention::ClrCall:
     case CallingConvention::NearPascal:
-    case CallingConvention::NearVector:
       return model::ABI::Microsoft_x86_64;
+    case CallingConvention::NearVector:
+      return model::ABI::Microsoft_x86_64_vectorcall;
+    case CallingConvention::ClrCall:
+      return model::ABI::Microsoft_x86_64_clrcall;
     default:
       revng_abort();
     }
@@ -753,11 +897,11 @@ Error PDBImporterTypeVisitor::visitKnownRecord(CVType &Record,
   } else {
     auto NewType = model::makeType<model::CABIFunctionType>();
     auto TypeFunction = cast<model::CABIFunctionType>(NewType.get());
-    TypeFunction->ABI = getMicrosoftABI(Proc.getCallConv(),
-                                        Model->Architecture);
+    TypeFunction->ABI() = getMicrosoftABI(Proc.getCallConv(),
+                                          Model->Architecture());
 
     model::QualifiedType TheReturnType(*ReturnTypeFromModel, {});
-    TypeFunction->ReturnType = TheReturnType;
+    TypeFunction->ReturnType() = TheReturnType;
 
     TypeIndex ArgListTyIndex = Proc.getArgumentList();
     auto ArgumentList = InProgressArgumentsTypes[ArgListTyIndex];
@@ -781,10 +925,10 @@ Error PDBImporterTypeVisitor::visitKnownRecord(CVType &Record,
           continue;
         }
 
-        model::Argument &NewArgument = TypeFunction->Arguments[Index];
+        model::Argument &NewArgument = TypeFunction->Arguments()[Index];
         model::QualifiedType TheArgumentType(*ArgumentTypeFromModel, {});
 
-        NewArgument.Type = TheArgumentType;
+        NewArgument.Type() = TheArgumentType;
         ++Index;
       }
     }
@@ -801,7 +945,7 @@ Error PDBImporterTypeVisitor::visitKnownRecord(CVType &Record,
                                                UnionRecord &Union) {
   TypeIndex FieldsTypeIndex = Union.getFieldList();
   auto NewType = model::makeType<model::UnionType>();
-  NewType->OriginalName = Union.getName().str();
+  NewType->OriginalName() = Union.getName().str();
 
   uint64_t Index = 0;
   auto &TheFields = InProgressMemberTypes[FieldsTypeIndex];
@@ -810,13 +954,13 @@ Error PDBImporterTypeVisitor::visitKnownRecord(CVType &Record,
   // Typedef it to void.
   if (TheFields.size() == 0) {
     auto TypeTypedef = model::makeType<model::TypedefType>();
-    TypeTypedef->OriginalName = Union.getName().str();
+    TypeTypedef->OriginalName() = Union.getName().str();
 
     auto TheTypeTypeDef = cast<model::TypedefType>(TypeTypedef.get());
     using Values = model::PrimitiveTypeKind::Values;
     auto ThePrimitiveType = Model->getPrimitiveType(Values::Void, 0);
     model::QualifiedType TheUnderlyingType(ThePrimitiveType, {});
-    TheTypeTypeDef->UnderlyingType = TheUnderlyingType;
+    TheTypeTypeDef->UnderlyingType() = TheUnderlyingType;
 
     auto TypePath = Model->recordNewType(std::move(TypeTypedef));
     ProcessedTypes[CurrentTypeIndex] = TypePath;
@@ -827,7 +971,6 @@ Error PDBImporterTypeVisitor::visitKnownRecord(CVType &Record,
   bool GeneratedOneFieldAtleast = false;
   for (const auto &Field : TheFields) {
     // Create new field.
-    uint64_t Offset = Field.getFieldOffset();
     auto FiledTypeFromModel = getModelTypeForIndex(Field.getType());
     if (!FiledTypeFromModel) {
       revng_log(DILogger,
@@ -843,10 +986,10 @@ Error PDBImporterTypeVisitor::visitKnownRecord(CVType &Record,
 
       GeneratedOneFieldAtleast = true;
       auto TypeUnion = cast<model::UnionType>(NewType.get());
-      auto &FieldType = TypeUnion->Fields[Index];
-      FieldType.OriginalName = Field.getName().str();
+      auto &FieldType = TypeUnion->Fields()[Index];
+      FieldType.OriginalName() = Field.getName().str();
       model::QualifiedType TheFieldType(*FiledTypeFromModel, {});
-      FieldType.Type = TheFieldType;
+      FieldType.Type() = TheFieldType;
 
       Index++;
     }
@@ -866,7 +1009,7 @@ Error PDBImporterTypeVisitor::visitKnownRecord(CVType &Record,
   return Error::success();
 }
 
-// TODO: This can go into LLVM, but thre is an ongoing review that should
+// TODO: This can go into LLVM, but there is an ongoing review that should
 // implement this.
 static std::optional<uint64_t> getSizeinBytes(TypeIndex TI) {
   if (not TI.isSimple())
@@ -1066,7 +1209,7 @@ void PDBImporterTypeVisitor::createPrimitiveType(TypeIndex SimpleType) {
     auto TypeTypedef = makeType<TypedefType>();
     auto TheTypeTypeDef = cast<TypedefType>(TypeTypedef.get());
     QualifiedType TheUnderlyingType(VoidModelType, {});
-    TheTypeTypeDef->UnderlyingType = TheUnderlyingType;
+    TheTypeTypeDef->UnderlyingType() = TheUnderlyingType;
     ProcessedTypes[SimpleType] = VoidModelType;
   } else {
 
@@ -1095,7 +1238,7 @@ void PDBImporterTypeVisitor::createPrimitiveType(TypeIndex SimpleType) {
       Qualifiers.push_back({ Qualifier::createPointer(*PointerSize) });
 
       QualifiedType TheUnderlyingType(PrimitiveModelType, Qualifiers);
-      TheTypeTypeDef->UnderlyingType = TheUnderlyingType;
+      TheTypeTypeDef->UnderlyingType() = TheUnderlyingType;
 
       auto TypePath = Model->recordNewType(std::move(TypeTypedef));
       ProcessedTypes[SimpleType] = TypePath;
@@ -1131,31 +1274,27 @@ Error PDBImporterSymbolVisitor::visitSymbolBegin(CVSymbol &Record,
 
 Error PDBImporterSymbolVisitor::visitKnownRecord(CVSymbol &Record,
                                                  ProcSym &Proc) {
+  revng_log(DILogger, "Importing " << Proc.Name);
+
   // If it is not in the .idata already, we assume it is a static symbol.
-  if (not Model->ImportedDynamicFunctions.count(Proc.Name.str())) {
+  if (not Model->ImportedDynamicFunctions().contains(Proc.Name.str())) {
     uint64_t FunctionVirtualAddress = Session
                                         .getRVAFromSectOffset(Proc.Segment,
                                                               Proc.CodeOffset);
     // Relocate the symbol.
     MetaAddress FunctionAddress = ImageBase + FunctionVirtualAddress;
 
-    if (not Model->Functions.count(FunctionAddress)) {
-      model::Function &Function = Model->Functions[FunctionAddress];
-      Function.OriginalName = Proc.Name;
+    if (not Model->Functions().contains(FunctionAddress)) {
+      model::Function &Function = Model->Functions()[FunctionAddress];
+      Function.OriginalName() = Proc.Name;
       TypeIndex FunctionTypeIndex = Proc.FunctionType;
-      if (ProcessedTypes.count(FunctionTypeIndex)) {
-        model::QualifiedType ThePrototype(ProcessedTypes[FunctionTypeIndex],
-                                          {});
-        Function.Prototype = ThePrototype.UnqualifiedType;
-      }
+      if (ProcessedTypes.find(FunctionTypeIndex) != ProcessedTypes.end())
+        Function.Prototype() = ProcessedTypes[FunctionTypeIndex];
     } else {
-      auto It = Model->Functions.find(FunctionAddress);
+      auto It = Model->Functions().find(FunctionAddress);
       TypeIndex FunctionTypeIndex = Proc.FunctionType;
-      if (ProcessedTypes.count(FunctionTypeIndex)) {
-        model::QualifiedType ThePrototype(ProcessedTypes[FunctionTypeIndex],
-                                          {});
-        It->Prototype = ThePrototype.UnqualifiedType;
-      }
+      if (ProcessedTypes.find(FunctionTypeIndex) != ProcessedTypes.end())
+        It->Prototype() = ProcessedTypes[FunctionTypeIndex];
     }
   }
 

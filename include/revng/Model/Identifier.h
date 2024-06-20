@@ -13,6 +13,7 @@
 namespace model {
 
 extern const std::set<llvm::StringRef> ReservedKeywords;
+inline const char *PrefixForReservedNames = "unreserved_";
 
 /// \note Zero-sized identifiers are valid
 class Identifier : public llvm::SmallString<16> {
@@ -24,35 +25,14 @@ public:
   static const Identifier Empty;
 
 public:
-  static Identifier fromString(llvm::StringRef Name) {
-    revng_assert(not Name.empty());
-    Identifier Result;
+  /// Produce a (locally) valid identifier from an arbitrary string
+  static Identifier fromString(llvm::StringRef Name);
 
-    // For reserved C keywords prepend a non-reserved prefix and we're done.
-    if (ReservedKeywords.count(Name)) {
-      Result += "prefix_";
-      Result += Name;
-      return Result;
-    }
-
-    const auto BecomesUnderscore = [](const char C) {
-      return not std::isalnum(C) or C == '_';
-    };
-
-    // For invalid C identifiers prepend the our reserved prefix.
-    if (std::isdigit(Name[0]) or BecomesUnderscore(Name[0]))
-      Result += "prefix_";
-
-    // Append the rest of the name
-    Result += Name;
-
-    // Convert all non-alphanumeric chars to underscores
-    for (char &C : Result)
-      if (not std::isalnum(C))
-        C = '_';
-
-    return Result;
-  }
+  /// Produce a string without any character that's invalid for an identifier
+  ///
+  /// \note: given that reserved keywords are not considered by this function,
+  ///        it does not necessarily emit a valid identifier.
+  static Identifier sanitize(llvm::StringRef Name);
 
 public:
   bool verify() const debug_function;

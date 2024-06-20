@@ -8,10 +8,12 @@
 #include <string>
 
 #include "revng/ADT/SortedVector.h"
-#include "revng/EarlyFunctionAnalysis/BasicBlock.h"
 #include "revng/Model/VerifyHelper.h"
 #include "revng/Support/MetaAddress.h"
 #include "revng/Support/MetaAddress/YAMLTraits.h"
+#include "revng/Yield/CallEdge.h"
+#include "revng/Yield/FunctionEdge.h"
+#include "revng/Yield/FunctionEdgeBase.h"
 #include "revng/Yield/Instruction.h"
 
 /* TUPLE-TREE-YAML
@@ -19,9 +21,8 @@
 name: BasicBlock
 type: struct
 fields:
-  - name: Start
-    doc: Start address of the basic block
-    type: MetaAddress
+  - name: ID
+    type: BasicBlockID
 
   - name: End
     doc: |
@@ -29,12 +30,16 @@ fields:
       instruction ends
     type: MetaAddress
 
+  - name: InlinedFrom
+    type: MetaAddress
+    doc: Address of the function this basic block has been inlined from
+
   - name: Successors
     doc: List of successor edges
     sequence:
       type: SortedVector
       upcastable: true
-      elementType: efa::FunctionEdgeBase
+      elementType: FunctionEdgeBase
 
   - name: Instructions
     sequence:
@@ -60,7 +65,7 @@ fields:
     optional: true
 
 key:
-  - Start
+  - ID
 
 TUPLE-TREE-YAML */
 
@@ -71,6 +76,11 @@ namespace yield {
 class BasicBlock : public generated::BasicBlock {
 public:
   using generated::BasicBlock::BasicBlock;
+
+public:
+  BasicBlockID nextBlock() const {
+    return BasicBlockID(End(), ID().inliningIndex());
+  }
 
 public:
   bool verify(model::VerifyHelper &VH) const;

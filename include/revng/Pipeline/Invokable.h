@@ -23,7 +23,7 @@
 #include "revng/Pipeline/CLOption.h"
 #include "revng/Pipeline/Container.h"
 #include "revng/Pipeline/ContainerSet.h"
-#include "revng/Pipeline/Context.h"
+#include "revng/Pipeline/ExecutionContext.h"
 #include "revng/Pipeline/Option.h"
 #include "revng/Pipeline/Target.h"
 #include "revng/Support/Assert.h"
@@ -36,28 +36,24 @@ concept HasName = requires() {
   { T::Name } -> convertible_to<const char *>;
 };
 
-// clang-format off
 template<typename T>
-concept IsContainer = derived_from<std::decay_t<T>, ContainerBase>;
+concept IsContainer = std::derived_from<std::decay_t<T>, ContainerBase>;
 
 template<typename T>
 concept IsNotContainer = not IsContainer<T>;
 
-template<typename InvokableType, typename... Args>
-constexpr bool
-invokableTypeReturnsErrorImpl(void (InvokableType::*F)(Args...)) {
-  return false;
+template<typename InvokableType, typename ReturnType, typename... Args>
+constexpr ReturnType
+invokableReturnTypeImpl(ReturnType (InvokableType::*F)(Args...)) {
+  return ReturnType();
 }
 
-template<typename InvokableType, typename... Args>
-constexpr bool
-invokableTypeReturnsErrorImpl(llvm::Error (InvokableType::*F)(Args...)) {
-  return true;
-}
+template<typename Type>
+using invokableReturnType = decltype(invokableReturnTypeImpl(&Type::run));
 
 template<typename Invokable>
 constexpr bool invokableTypeReturnsError() {
-  return invokableTypeReturnsErrorImpl(&Invokable::run);
+  return std::is_same_v<invokableReturnType<Invokable>, llvm::Error>;
 }
 
 template<typename Invokable>
@@ -67,9 +63,9 @@ concept ReturnsError = invokableTypeReturnsError<Invokable>();
 ///
 /// * It must have a static constexpr field named Name that is a string
 ///   describing its name. Mostly used for debug purposes.
-/// * a RetT run(T...) method where the first argument must be a Context& or
-///   const Context&, arguments after the first must be K& or const K& where
-///   K is derived from a container.
+/// * a RetT run(T...) method where the first argument must be a
+///   ExecutionContext& or const ExecutionContext&, arguments after the first
+///   must be K& or const K& where K is derived from a container.
 ///
 ///   Options after the last container can be of any type, but for each of
 ///   them there must exists an entry in a constexpr tuple named Options that
@@ -78,16 +74,9 @@ concept ReturnsError = invokableTypeReturnsError<Invokable>();
 ///   RetT can either be llvm::Error or void, if it is void then the invokable
 ///   never fails.
 ///
-template<typename InvokableType, typename FirstRunArg, typename... Rest>
-concept Invokable = convertible_to<Context &, std::remove_cv_t<FirstRunArg>>
+template<typename InvokableType, typename First, typename... Rest>
+concept Invokable = convertible_to<ExecutionContext &, std::remove_cv_t<First>>
                     and HasName<InvokableType>;
-
-// clang-format on
-
-/// TODO: Remove after updating to clang-format with concept support.
-struct ClangFormatPleaseDoNotBreakMyCode2;
-// clang-format off
-// clang-format on
 
 namespace detail {
 using StringArrayRef = llvm::ArrayRef<std::string>;
@@ -98,24 +87,40 @@ auto &getContainer(ContainerSet &Containers, llvm::StringRef Name) {
 }
 
 template<typename T, size_t I>
+  requires PipelineOptionType<OptionType<T, I>>
 OptionType<T, I> deserializeImpl(llvm::StringRef Value) {
   using ReturnType = OptionType<T, I>;
 
-  if constexpr (std::is_same_v<const char *, ReturnType>)
-    return Value.data();
-  else
-    return llvm::cantFail(deserialize<ReturnType>(Value));
+  if constexpr (std::is_same_v<std::string, ReturnType>) {
+    return Value.str();
+  } else {
+    ReturnType Result;
+    revng_assert(not Value.consumeInteger(10, Result));
+    return Result;
+  }
 }
 
 template<typename T, size_t I>
 OptionType<T, I> getOption(const llvm::StringMap<std::string> &Map) {
-  auto Name = getOptionName<T, I>();
+  using OptionT = OptionType<T, I>;
+  using llvm::StringRef;
+  std::string Name = (StringRef(T::Name) + "-" + getOptionName<T, I>()).str();
+
   if (auto Iter = Map.find(Name); Iter != Map.end()) {
     return deserializeImpl<T, I>(Iter->second);
-  } else if (CLOptionBase::hasOption(Name)
-             and CLOptionBase::getOption(Name).isSet()) {
-    const CLOptionBase &Option = CLOptionBase::getOption(Name);
-    return deserializeImpl<T, I>(Option.get());
+  } else if (auto &Option = CLOptionBase::getOption<OptionT>(Name);
+             Option.isSet()) {
+    if constexpr (std::is_same_v<OptionT, std::string>) {
+      auto &PathOpt = CLOptionBase::getOption<std::string>(Name + "-path");
+      if (not PathOpt.get().empty()) {
+        using llvm::MemoryBuffer;
+        auto MaybeBuffer = MemoryBuffer::getFile(PathOpt.get());
+        revng_assert(MaybeBuffer);
+        return MaybeBuffer->get()->getBuffer().str();
+      }
+    }
+
+    return Option.get();
   } else {
     return getOptionDefault<T, I>();
   }
@@ -168,22 +173,26 @@ using ConcatImpl = std::decay_t<decltype(*concatImpl(std::declval<T1 *>(),
                                                      std::declval<T2 *>()))>;
 
 template<typename First, typename... Rest>
-auto *concantMultiImp(const First *, const Rest *...Others) {
+auto *concatMultiple(const First *, const Rest *...Others) {
   if constexpr (sizeof...(Rest) == 0) {
     return static_cast<First *>(nullptr);
   } else {
-    auto *Recurred = concantMultiImp<Rest...>(Others...);
+    auto *Recurred = concatMultiple<Rest...>(Others...);
     using TupleType = std::decay_t<decltype(*Recurred)>;
     using Concatted = ConcatImpl<First, TupleType>;
     return static_cast<Concatted *>(nullptr);
   }
 }
 
+inline std::tuple<> *concatMultiple() {
+  return nullptr;
+}
+
 template<typename T>
 using Decay = std::decay_t<T>;
 
 template<typename... T>
-using TupleConcat = Decay<decltype(*concantMultiImp(std::declval<T *>()...))>;
+using TupleConcat = Decay<decltype(*concatMultiple(std::declval<T *>()...))>;
 
 template<typename... T>
 using FilterContainers = TupleConcat<ContainerToTuple<T>...>;
@@ -198,12 +207,26 @@ void createAndAppend(std::vector<std::unique_ptr<CLOptionBase>> &Out,
   Out.emplace_back(std::make_unique<Wrapper>(std::forward<ArgsT>(Args)...));
 }
 
+template<typename T, size_t S, typename... ArgsT>
+void createAndAppendPathSwitch(std::vector<std::unique_ptr<CLOptionBase>> &Out,
+                               ArgsT &&...Args) {
+  if constexpr (std::is_same_v<OptionType<T, S>, std::string>) {
+    using Wrapper = CLOptionWrapper<std::string>;
+    Out.emplace_back(std::make_unique<Wrapper>(std::forward<ArgsT>(Args)...));
+  }
+}
+
 template<typename T, size_t... S>
 void createCLOption(std::vector<std::unique_ptr<CLOptionBase>> &Out,
                     const std::integer_sequence<size_t, S...> &,
                     llvm::cl::OptionCategory *Cat = nullptr) {
   using cat = llvm::cl::cat;
   (createAndAppend<T, S>(Out, T::Name, getOptionName<T, S>(), cat(*Cat)), ...);
+  (createAndAppendPathSwitch<T, S>(Out,
+                                   T::Name,
+                                   getOptionName<T, S>().str() + "-path",
+                                   cat(*Cat)),
+   ...);
 }
 
 template<typename T, typename DeducedContextType, typename... AllArgs>
@@ -260,14 +283,36 @@ std::vector<std::string> getOptionsTypesImpl(auto (T::*F)(CtxT &, Args...)) {
     OptionArgsIndexes = std::make_integer_sequence<size_t, OptionArgsCount>();
 
   std::vector<std::string> Out;
-  getOptionNamesFromIndexes<T>(Out, OptionArgsIndexes);
+  getOptionTypeFromIndexes<T>(Out, OptionArgsIndexes);
 
   return Out;
 }
 
 template<typename T>
 std::vector<std::string> getOptionsTypes() {
-  return getOptionsNamesImpl<T>(&T::run);
+  return getOptionsTypesImpl<T>(&T::run);
+}
+
+template<typename First, typename... Rest>
+constexpr bool isNthTypeConst(size_t I) {
+  if (I == 0)
+    return std::is_const_v<std::remove_reference_t<First>>;
+
+  if constexpr (sizeof...(Rest) == 0)
+    return false;
+  else
+    return isNthTypeConst<Rest...>(I - 1);
+}
+
+template<typename InvokableType, typename... Args>
+constexpr bool
+isRunArgumentConstImpl(auto (InvokableType::*F)(Args...), size_t Index) {
+  return isNthTypeConst<Args...>(Index);
+}
+
+template<typename InvokableType>
+constexpr bool isRunArgumentConst(size_t ArgumentIndex) {
+  return isRunArgumentConstImpl(&InvokableType::run, ArgumentIndex);
 }
 } // namespace detail
 
@@ -280,7 +325,7 @@ createCLOptions(llvm::cl::OptionCategory *Category = nullptr) {
 /// Invokes the F member function on the Pipe Pipe passing as nth argument the
 /// container with the name equal to the nth element of ArgsNames.
 template<typename InvokableType, typename ContextT, typename... Args>
-auto invokePipeFunction(Context &Ctx,
+auto invokePipeFunction(ExecutionContext &Ctx,
                         InvokableType &Pipe,
                         auto (InvokableType::*F)(ContextT &, Args...),
                         ContainerSet &Containers,
@@ -317,20 +362,23 @@ concept Dumpable = requires(T D) {
 
 template<typename InvokableType>
 concept Printable = requires(InvokableType Pipe) {
-  { Pipe.print(std::declval<const Context &>(),
+  {
+    Pipe.print(std::declval<const Context &>(),
                llvm::outs(),
-               std::declval<llvm::ArrayRef<std::string>>()) };
+               std::declval<llvm::ArrayRef<std::string>>())
+  };
 };
 
 class InvokableWrapperBase {
 public:
-  virtual llvm::Error run(Context &Ctx,
+  virtual llvm::Error run(ExecutionContext &Ctx,
                           ContainerSet &Containers,
                           const llvm::StringMap<std::string> &Options = {}) = 0;
   virtual ~InvokableWrapperBase() = default;
   virtual std::vector<std::string> getRunningContainersNames() const = 0;
   virtual std::string getName() const = 0;
   virtual void dump(std::ostream &OS, size_t Indents) const = 0;
+  virtual bool isContainerArgumentConst(size_t ArgumentIndex) const = 0;
   virtual void
   print(const Context &Ctx, llvm::raw_ostream &OS, size_t Indents) const = 0;
   virtual std::vector<std::string> getOptionsNames() const = 0;
@@ -353,13 +401,18 @@ public:
     ActualPipe(std::move(ActualPipe)),
     RunningContainersNames(std::move(RunningContainersNames)) {}
 
+  InvokableWrapperImpl(const InvokableWrapperImpl &Other,
+                       std::vector<std::string> RunningContainersNames) :
+    ActualPipe(Other.ActualPipe),
+    RunningContainersNames(std::move(RunningContainersNames)) {}
+
   ~InvokableWrapperImpl() override = default;
 
 public:
   std::string getName() const override { return InvokableType::Name; }
 
 public:
-  llvm::Error run(Context &Ctx,
+  llvm::Error run(ExecutionContext &Ctx,
                   ContainerSet &Containers,
                   const llvm::StringMap<std::string> &OptionArgs) override {
     if constexpr (invokableTypeReturnsError<InvokableType>()) {
@@ -400,11 +453,15 @@ public:
     indent(OS, Indentation);
     OS << getName() << "\n";
     indent(OS, Indentation + 1);
-    OS << "Containers\n";
-    for (const auto &Name : getRunningContainersNames()) {
-      indent(OS, Indentation + 2);
-      OS << Name;
-      OS << "\n";
+    if (const auto &Names = getRunningContainersNames(); !Names.empty()) {
+      OS << "Containers:\n";
+      for (const auto &Name : Names) {
+        indent(OS, Indentation + 2);
+        OS << Name;
+        OS << "\n";
+      }
+    } else {
+      OS << "No containers.\n";
     }
     if constexpr (Dumpable<InvokableType>)
       ActualPipe.dump(OS, Indentation);
@@ -424,6 +481,10 @@ public:
         OS << Name << " ";
     }
   }
+
+  bool isContainerArgumentConst(size_t ArgumentIndex) const override {
+    return detail::isRunArgumentConst<InvokableType>(ArgumentIndex + 1);
+  }
 };
 
 /// This class is used to hide the unique ptr and expose a concrete class
@@ -440,6 +501,9 @@ private:
   std::unique_ptr<BaseInterface> Pipe;
 
 public:
+  InvokableWrapper(const InvokableWrapper &Other,
+                   std::vector<std::string> RunningContainersNames) :
+    Pipe(Other.Pipe->clone(std::move(RunningContainersNames))) {}
   InvokableWrapper(const InvokableWrapper &Other) : Pipe(Other.Pipe->clone()) {}
   InvokableWrapper(InvokableWrapper &&Other) = default;
 

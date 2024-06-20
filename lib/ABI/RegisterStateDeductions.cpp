@@ -1,5 +1,4 @@
 /// \file ApplyRegisterStateDeductions.cpp
-/// \brief
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
@@ -9,8 +8,7 @@
 
 #include "llvm/ADT/ArrayRef.h"
 
-#include "revng/ABI/RegisterStateDeductions.h"
-#include "revng/ABI/Trait.h"
+#include "revng/ABI/Definition.h"
 #include "revng/Model/Binary.h"
 #include "revng/Model/Types.h"
 
@@ -52,18 +50,22 @@ size_t findLastUsedIndex(llvm::ArrayRef<model::Register::Values> Registers,
   return 0;
 }
 
-template<model::ABI::Values ABI, bool EnforceABIConformance>
+template<bool EnforceABIConformance>
 struct DeductionImpl {
-  static std::optional<StateMap> run(const StateMap &InputState) {
-    if constexpr (abi::Trait<ABI>::ArgumentsArePositionBased)
+  const abi::Definition &ABI;
+  const std::string_view ABIName;
+  explicit DeductionImpl(const abi::Definition &ABI) :
+    ABI(ABI), ABIName(model::ABI::getName(ABI.ABI())) {}
+
+  std::optional<StateMap> run(const StateMap &InputState) {
+    if (ABI.ArgumentsArePositionBased())
       return runForPositionBasedABIs(InputState);
     else
       return runForNonPositionBasedABIs(InputState);
   }
 
 private:
-  static std::optional<StateMap>
-  runForPositionBasedABIs(const StateMap &State) {
+  std::optional<StateMap> runForPositionBasedABIs(const StateMap &State) {
     // Copy the state to serve as a return value.
     StateMap Result = State;
 
@@ -73,7 +75,7 @@ private:
     if (!runForPositionBasedReturnValues(Result))
       return std::nullopt;
 
-    // Detect possible state problems and set all the registers still
+    // Check whether the input state is valid and set all the registers still
     // remaining as "unknown" to `No`.
     for (auto [Register, RegisterState] : Result) {
       if (auto &A = accessArgument(RegisterState))
@@ -93,11 +95,11 @@ private:
     return Result;
   }
 
-  static bool checkPositionBasedABIConformance(StateMap &State) {
-    llvm::ArrayRef GPAR = abi::Trait<ABI>::GeneralPurposeArgumentRegisters;
-    llvm::ArrayRef VAR = abi::Trait<ABI>::VectorArgumentRegisters;
-    llvm::ArrayRef GPRV = abi::Trait<ABI>::GeneralPurposeReturnValueRegisters;
-    llvm::ArrayRef VRVR = abi::Trait<ABI>::VectorReturnValueRegisters;
+  bool checkPositionBasedABIConformance(StateMap &State) {
+    llvm::ArrayRef GPAR = ABI.GeneralPurposeArgumentRegisters();
+    llvm::ArrayRef VAR = ABI.VectorArgumentRegisters();
+    llvm::ArrayRef GPRV = ABI.GeneralPurposeReturnValueRegisters();
+    llvm::ArrayRef VRVR = ABI.VectorReturnValueRegisters();
 
     auto AllowedArgumentRegisters = llvm::concat<CRegister>(GPAR, VAR);
     auto AllowedReturnValueRegisters = llvm::concat<CRegister>(GPRV, VRVR);
@@ -111,7 +113,7 @@ private:
             revng_log(Log,
                       "Enforcing `model::Register::"
                         << model::Register::getName(Register).data()
-                        << "` to `No` as `" << model::ABI::getName(ABI).data()
+                        << "` to `No` as `" << ABIName
                         << "` ABI doesn't allow it to be used.");
             UsedForPassingArguments = abi::RegisterState::No;
           } else {
@@ -119,7 +121,7 @@ private:
                       "Aborting, `model::Register::"
                         << model::Register::getName(Register).data()
                         << "` register is used despite not being allowed by `"
-                        << model::ABI::getName(ABI).data() << "` ABI.");
+                        << ABIName << "` ABI.");
             return false;
           }
         }
@@ -132,7 +134,7 @@ private:
             revng_log(Log,
                       "Enforcing `model::Register::"
                         << model::Register::getName(Register).data()
-                        << "` to `No` as `" << model::ABI::getName(ABI).data()
+                        << "` to `No` as `" << ABIName
                         << "` ABI doesn't allow it to be used.");
             UsedForReturningValues = abi::RegisterState::No;
           } else {
@@ -140,7 +142,7 @@ private:
                       "Aborting, `model::Register::"
                         << model::Register::getName(Register).data()
                         << "` register is used despite not being allowed by `"
-                        << model::ABI::getName(ABI).data() << "` ABI.");
+                        << ABIName << "` ABI.");
             return false;
           }
         }
@@ -151,9 +153,9 @@ private:
   }
 
   template<AccessorType Accessor>
-  static void offsetPositionBasedArgument(model::Register::Values Register,
-                                          bool &IsRequired,
-                                          StateMap &State) {
+  void offsetPositionBasedArgument(model::Register::Values Register,
+                                   bool &IsRequired,
+                                   StateMap &State) {
     auto &Accessed = Accessor(State[Register]);
     if (Accessed == abi::RegisterState::Invalid)
       Accessed = abi::RegisterState::Maybe;
@@ -175,18 +177,22 @@ private:
     }
   }
 
-  static bool runForPositionBasedArguments(StateMap &State) {
-    llvm::ArrayRef GPAR = abi::Trait<ABI>::GeneralPurposeArgumentRegisters;
-    llvm::ArrayRef VAR = abi::Trait<ABI>::VectorArgumentRegisters;
+  bool runForPositionBasedArguments(StateMap &State) {
+    llvm::ArrayRef GPAR = ABI.GeneralPurposeArgumentRegisters();
+    llvm::ArrayRef VAR = ABI.VectorArgumentRegisters();
 
     bool IsRequired = false;
     if (GPAR.size() > VAR.size()) {
-      for (auto Regist : llvm::reverse(GPAR.drop_front(VAR.size())))
-        offsetPositionBasedArgument<accessArgument>(Regist, IsRequired, State);
+      for (auto Register : llvm::reverse(GPAR.drop_front(VAR.size())))
+        offsetPositionBasedArgument<accessArgument>(Register,
+                                                    IsRequired,
+                                                    State);
       GPAR = GPAR.take_front(VAR.size());
     } else if (VAR.size() > GPAR.size()) {
-      for (auto Regist : llvm::reverse(VAR.drop_front(GPAR.size())))
-        offsetPositionBasedArgument<accessArgument>(Regist, IsRequired, State);
+      for (auto Register : llvm::reverse(VAR.drop_front(GPAR.size())))
+        offsetPositionBasedArgument<accessArgument>(Register,
+                                                    IsRequired,
+                                                    State);
       VAR = VAR.take_front(GPAR.size());
     }
 
@@ -206,9 +212,9 @@ private:
     return true;
   }
 
-  static bool runForPositionBasedReturnValues(StateMap &State) {
-    llvm::ArrayRef GPRV = abi::Trait<ABI>::GeneralPurposeReturnValueRegisters;
-    llvm::ArrayRef VRVR = abi::Trait<ABI>::VectorReturnValueRegisters;
+  bool runForPositionBasedReturnValues(StateMap &State) {
+    llvm::ArrayRef GPRV = ABI.GeneralPurposeReturnValueRegisters();
+    llvm::ArrayRef VRVR = ABI.VectorReturnValueRegisters();
 
     size_t GPRVCount = findLastUsedIndex<accessCReturnValue>(GPRV, State);
     auto UsedGPRV = llvm::ArrayRef(GPRV).take_front(GPRVCount);
@@ -247,7 +253,7 @@ private:
                     "Impossible to differentiate whether the return value is "
                     "passed in a general purpose register or in vector ones. "
                     "The ABI is "
-                      << model::ABI::getName(ABI).data() << ".");
+                      << ABIName << ".");
           return false;
         } else {
           // The return value is in GPRs, mark all the vector register as `No`.
@@ -276,7 +282,7 @@ private:
     abi::RegisterState::Values VR;
   };
   template<CAccessorType Accessor>
-  static std::optional<PositionBasedDeductionResult>
+  std::optional<PositionBasedDeductionResult>
   singlePositionBasedDeduction(model::Register::Values GPRegister,
                                model::Register::Values VRegister,
                                bool &IsRequired,
@@ -323,13 +329,12 @@ private:
           // Report the problem and abort.
           revng_log(Log,
                     "Impossible to differentiate which one of the two "
-                    "registers "
-                    "(`model::Register::"
+                    "registers (`model::Register::"
                       << model::Register::getName(GPRegister).data()
                       << "` and `model::Register::"
                       << model::Register::getName(VRegister).data()
                       << "`) should be used: both are `YesOrDead`. The ABI is "
-                      << model::ABI::getName(ABI).data() << ".");
+                      << ABIName << ".");
           return std::nullopt;
         }
       } else {
@@ -353,14 +358,12 @@ private:
             // Report the problem and abort.
             revng_log(Log,
                       "Impossible to differentiate which one of the two "
-                      "registers "
-                      "(`model::Register::"
+                      "registers (`model::Register::"
                         << model::Register::getName(GPRegister).data()
                         << "` and `model::Register::"
                         << model::Register::getName(VRegister).data()
-                        << "`) should be used: neither is `YesOrDead`. The ABI "
-                           "is "
-                        << model::ABI::getName(ABI).data() << ".");
+                        << "`) should be used: neither is `YesOrDead`. "
+                        << "The ABI is " << ABIName << ".");
             return std::nullopt;
           }
         }
@@ -370,10 +373,8 @@ private:
     return Result;
   }
 
-  static std::optional<StateMap>
-  runForNonPositionBasedABIs(const StateMap &State) {
-    using CC = abi::Trait<ABI>;
-    if constexpr (CC::OnlyStartDoubleArgumentsFromAnEvenRegister) {
+  std::optional<StateMap> runForNonPositionBasedABIs(const StateMap &State) {
+    if (ABI.OnlyStartDoubleArgumentsFromAnEvenRegister()) {
       // There's a possibility for more in-depth deductions taking the register
       // alignment into consideration.
       // TODO: Investigate this further.
@@ -382,19 +383,19 @@ private:
     // Separate all the registers before the "last used one" into separate
     // sub-ranges.
 
-    auto &GPAR = abi::Trait<ABI>::GeneralPurposeArgumentRegisters;
+    auto &GPAR = ABI.GeneralPurposeArgumentRegisters();
     size_t GPARCount = findLastUsedIndex<accessCArgument>(GPAR, State);
     auto UsedGPAR = llvm::ArrayRef(GPAR).take_front(GPARCount);
 
-    auto &VAR = abi::Trait<ABI>::VectorArgumentRegisters;
+    auto &VAR = ABI.VectorArgumentRegisters();
     size_t VARCount = findLastUsedIndex<accessCArgument>(VAR, State);
     auto UsedVAR = llvm::ArrayRef(VAR).take_front(VARCount);
 
-    auto &GPRVR = abi::Trait<ABI>::GeneralPurposeReturnValueRegisters;
+    auto &GPRVR = ABI.GeneralPurposeReturnValueRegisters();
     size_t GPRVRCount = findLastUsedIndex<accessCReturnValue>(GPRVR, State);
     auto UsedGPRVR = llvm::ArrayRef(GPRVR).take_front(GPRVRCount);
 
-    auto &VRVR = abi::Trait<ABI>::VectorReturnValueRegisters;
+    auto &VRVR = ABI.VectorReturnValueRegisters();
     size_t VRVRCount = findLastUsedIndex<accessCReturnValue>(VRVR, State);
     auto UsedVRVR = llvm::ArrayRef(VRVR).take_front(VRVRCount);
 
@@ -437,7 +438,7 @@ private:
     return Result;
   }
 
-  static abi::RegisterState::Values
+  abi::RegisterState::Values
   singleNonPositionBasedDeduction(const abi::RegisterState::Values &Input,
                                   bool IsAllowed,
                                   bool IsRequired,
@@ -454,17 +455,17 @@ private:
         revng_log(Log,
                   "Enforcing `model::Register::"
                     << model::Register::getName(Register).data()
-                    << "` to `No` as `" << model::ABI::getName(ABI).data()
+                    << "` to `No` as `" << ABIName
                     << "` ABI doesn't allow it to be used.");
         return abi::RegisterState::No;
       } else {
         using namespace abi::RegisterState;
-        if (Result != Maybe && Result != No) {
+        if (Result != Maybe && Result != No && Result != NoOrDead) {
           revng_log(Log,
                     "Aborting, `model::Register::"
                       << model::Register::getName(Register).data()
                       << "` register is used despite not being allowed by `"
-                      << model::ABI::getName(ABI).data() << "` ABI.");
+                      << ABIName << "` ABI.");
           return abi::RegisterState::Invalid;
         } else {
           return abi::RegisterState::No;
@@ -529,22 +530,15 @@ private:
   }
 };
 
+using Def = abi::Definition;
 std::optional<abi::RegisterState::Map>
-abi::tryApplyRegisterStateDeductions(const abi::RegisterState::Map &State,
-                                     model::ABI::Values ABI) {
-  revng_assert(ABI != model::ABI::Invalid);
-  return skippingEnumSwitch<1>(ABI, [&]<model::ABI::Values A>() {
-    return DeductionImpl<A, false>::run(State);
-  });
+Def::tryDeducingRegisterState(const abi::RegisterState::Map &State) const {
+  return DeductionImpl<false>(*this).run(State);
 }
 
 abi::RegisterState::Map
-abi::enforceRegisterStateDeductions(const abi::RegisterState::Map &State,
-                                    model::ABI::Values ABI) {
-  revng_assert(ABI != model::ABI::Invalid);
-  return skippingEnumSwitch<1>(ABI, [&]<model::ABI::Values A>() {
-    auto Result = DeductionImpl<A, true>::run(State);
-    revng_assert(Result != std::nullopt);
-    return Result.value();
-  });
+Def::enforceRegisterState(const abi::RegisterState::Map &State) const {
+  auto Result = DeductionImpl<true>(*this).run(State);
+  revng_assert(Result != std::nullopt);
+  return Result.value();
 }

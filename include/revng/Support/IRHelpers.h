@@ -9,6 +9,7 @@
 #include <sstream>
 #include <type_traits>
 
+#include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/iterator_range.h"
 #include "llvm/Analysis/ConstantFolding.h"
@@ -24,12 +25,23 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include "revng/ADT/Concepts.h"
+#include "revng/Support/BasicBlockID.h"
 #include "revng/Support/Debug.h"
 #include "revng/Support/FunctionTags.h"
 #include "revng/Support/Generator.h"
 #include "revng/Support/MetaAddress.h"
 
 extern void dumpUsers(llvm::Value *V) debug_function;
+
+namespace NewPCArguments {
+enum {
+  InstructionID,
+  InstructionSize,
+  IsJumpTarget,
+  DissassembledInstruction,
+  FirstLocalVariable
+};
+} // namespace NewPCArguments
 
 /// Given \p V, checks if there are uses left and then calls eraseFromParent.
 /// In case of leftover uses, they are pretty printed.
@@ -59,7 +71,6 @@ inline void eraseFromParent(llvm::Value *V) {
 }
 
 constexpr const char *FunctionEntryMDNName = "revng.function.entry";
-constexpr const char *CallerBlockStartMDName = "revng.callerblock.start";
 constexpr const char *JTReasonMDName = "revng.jt.reasons";
 constexpr const char *FunctionMetadataMDName = "revng.function.metadata";
 
@@ -94,8 +105,8 @@ inline void purgeBranch(llvm::BasicBlock::iterator I) {
       eraseFromParent(BB);
 }
 
-inline llvm::ConstantInt *
-getConstValue(llvm::Constant *C, const llvm::DataLayout &DL) {
+inline llvm::ConstantInt *getConstValue(llvm::Constant *C,
+                                        const llvm::DataLayout &DL) {
   while (auto *Expr = llvm::dyn_cast<llvm::ConstantExpr>(C)) {
     C = ConstantFoldConstant(Expr, DL);
 
@@ -153,7 +164,7 @@ inline bool findOperand(llvm::Value *Op, T &Result) {
   }
 }
 
-/// \brief Return a tuple of \p V's operands of the requested types
+/// Return a tuple of \p V's operands of the requested types
 /// \return a tuple with the operands of the specified type in the specified
 ///         order, or, if not possible, a nullptr tuple.
 template<typename... T>
@@ -169,7 +180,7 @@ inline std::tuple<T...> operandsByType(llvm::User *V) {
   return Result;
 }
 
-/// \brief Checks the instruction type and its operands
+/// Checks the instruction type and its operands
 /// \return the instruction casted to I, or nullptr if not possible.
 template<typename I, typename F, typename S>
 inline I *isa_with_op(llvm::Instruction *Inst) {
@@ -197,7 +208,7 @@ protected:
   C Obj;
 };
 
-/// \brief Trait to wrap an object of type C that can act as a blacklist for B
+/// Trait to wrap an object of type C that can act as a blacklist for B
 template<typename C, typename B>
 struct BlackListTrait : BlackListTraitBase<C> {};
 
@@ -220,7 +231,7 @@ template<typename B>
 struct BlackListTrait<const std::set<B> &, B>
   : BlackListTraitBase<const std::set<B> &> {
   using BlackListTraitBase<const std::set<B> &>::BlackListTraitBase;
-  bool isBlacklisted(B Value) const { return this->Obj.count(Value) != 0; }
+  bool isBlacklisted(B Value) const { return this->Obj.contains(Value); }
 };
 
 template<typename B, typename C>
@@ -234,8 +245,7 @@ make_blacklist(const std::set<B> &Obj) {
   return BlackListTrait<const std::set<B> &, B>(Obj);
 }
 
-/// \brief Possible way to continue (or stop) exploration in a breadth-first
-///        visit
+/// Possible way to continue (or stop) exploration in a breadth-first visit
 enum VisitAction {
   Continue, ///< Visit also the successor basic blocks
   NoSuccessors, ///< Do not visit the successors of this basic block
@@ -329,7 +339,7 @@ public:
       case Continue:
         if (not ExhaustOnly) {
           for (auto *Successor : ThisDerived.successors(Item.BB)) {
-            if (Visited.count(Successor) == 0) {
+            if (!Visited.contains(Successor)) {
               Visited.insert(Successor);
               Queue.push(WorkItem(Successor));
             }
@@ -374,12 +384,12 @@ struct ForwardBFSVisitor
 
 inline std::string getName(const llvm::Value *V);
 
-/// \brief Return a string with the value of a given integer constant.
+/// Return a string with the value of a given integer constant.
 inline std::string getName(const llvm::ConstantInt *I) {
   return std::to_string(I->getValue().getZExtValue());
 }
 
-/// \brief Return a sensible name for the given basic block
+/// Return a sensible name for the given basic block
 /// \return the name of the basic block, if available, its pointer value
 ///         otherwise.
 inline std::string getName(const llvm::BasicBlock *BB) {
@@ -396,9 +406,9 @@ inline std::string getName(const llvm::BasicBlock *BB) {
   }
 }
 
-/// \brief Return a sensible name for the given instruction
+/// Return a sensible name for the given instruction
 /// \return the name of the instruction, if available, a
-///         [basic blockname]:[instruction index] string otherwise.
+///         [basic block name]:[instruction index] string otherwise.
 inline std::string getName(const llvm::Instruction *I) {
   llvm::StringRef Result = I->getName();
   if (!Result.empty()) {
@@ -414,7 +424,7 @@ inline std::string getName(const llvm::Instruction *I) {
   }
 }
 
-/// \brief Return a sensible name for the given function
+/// Return a sensible name for the given function
 /// \return the name of the function, if available, its pointer value otherwise.
 inline std::string getName(const llvm::Function *F) {
   if (F == nullptr)
@@ -428,7 +438,7 @@ inline std::string getName(const llvm::Function *F) {
   return SS.str();
 }
 
-/// \brief Return a sensible name for the given argument
+/// Return a sensible name for the given argument
 /// \return the name of the argument, if available, a
 ///         [function name]:[argument index] string otherwise.
 inline std::string getName(const llvm::Argument *A) {
@@ -444,7 +454,7 @@ inline std::string getName(const llvm::Argument *A) {
   }
 }
 
-/// \brief Return a sensible name for the given Value
+/// Return a sensible name for the given Value
 /// \return if \p V is an Instruction, call the appropriate getName function,
 ///         otherwise return a pointer to \p V.
 inline std::string getName(const llvm::Value *V) {
@@ -480,9 +490,9 @@ inline llvm::BasicBlock *blockByName(llvm::Function *F, const char *Name) {
   return nullptr;
 }
 
-/// \brief Specialization of writeToLog for llvm::Value-derived types
+/// Specialization of writeToLog for llvm::Value-derived types
 template<typename T>
-requires derived_from<llvm::Value, std::remove_const_t<T>>
+  requires std::derived_from<llvm::Value, std::remove_const_t<T>>
 inline void writeToLog(Logger<true> &This, T *I, int) {
   if (I != nullptr)
     This << getName(I);
@@ -563,7 +573,7 @@ inline llvm::Module *getModule(llvm::Value *I) {
   return getModule(llvm::cast<llvm::Instruction>(I));
 }
 
-/// \brief Helper class to easily create and use LLVM metadata
+/// Helper class to easily create and use LLVM metadata
 class QuickMetadata {
 public:
   QuickMetadata(llvm::LLVMContext &Context) :
@@ -754,8 +764,7 @@ QuickMetadata::extract<llvm::MDString *>(llvm::Metadata *MD) {
   return llvm::cast<llvm::MDString>(MD);
 }
 
-/// \brief Return the instruction coming before \p I, or nullptr if it's the
-///        first.
+/// Return the instruction coming before \p I, or nullptr if it's the first.
 inline llvm::Instruction *getPrevious(llvm::Instruction *I) {
   llvm::BasicBlock::reverse_iterator It(++I->getReverseIterator());
   if (It == I->getParent()->rend())
@@ -764,8 +773,7 @@ inline llvm::Instruction *getPrevious(llvm::Instruction *I) {
   return &*It;
 }
 
-/// \brief Return the instruction coming after \p I, or nullptr if it's the
-///        last.
+/// Return the instruction coming after \p I, or nullptr if it's the last.
 inline llvm::Instruction *getNext(llvm::Instruction *I) {
   llvm::BasicBlock::iterator It(I);
   if (It == I->getParent()->end())
@@ -775,22 +783,21 @@ inline llvm::Instruction *getNext(llvm::Instruction *I) {
   return &*It;
 }
 
-/// \brief Check whether the instruction/basic block is the first in its
-///        container or not
+/// Check whether the instruction/basic block is the first in its container
 template<typename T>
 inline bool isFirst(T *I) {
   revng_assert(I != nullptr);
   return I == &*I->getParent()->begin();
 }
 
-static std::array<unsigned, 3> CastOpcodes = {
+inline std::array<unsigned, 3> CastOpcodes = {
   llvm::Instruction::BitCast,
   llvm::Instruction::PtrToInt,
   llvm::Instruction::IntToPtr,
 };
 
-// \brief If \p V is a cast Instruction or a cast ConstantExpr, return its only
-//        operand (recursively)
+// If \p V is a cast Instruction or a cast ConstantExpr, return its only operand
+// (recursively)
 inline const llvm::Value *skipCasts(const llvm::Value *V) {
   using namespace llvm;
   while (isa<CastInst>(V) or isa<IntToPtrInst>(V) or isa<PtrToIntInst>(V)
@@ -800,8 +807,8 @@ inline const llvm::Value *skipCasts(const llvm::Value *V) {
   return V;
 }
 
-// \brief If \p V is a cast Instruction or a cast ConstantExpr, return its only
-//        operand (recursively)
+// If \p V is a cast Instruction or a cast ConstantExpr, return its only operand
+// (recursively)
 inline llvm::Value *skipCasts(llvm::Value *V) {
   using namespace llvm;
   while (isa<CastInst>(V) or isa<IntToPtrInst>(V) or isa<PtrToIntInst>(V)
@@ -809,6 +816,12 @@ inline llvm::Value *skipCasts(llvm::Value *V) {
              and contains(CastOpcodes, cast<ConstantExpr>(V)->getOpcode())))
     V = cast<User>(V)->getOperand(0);
   return V;
+}
+
+inline bool isMemory(llvm::Value *V) {
+  using namespace llvm;
+  V = skipCasts(V);
+  return not(isa<GlobalVariable>(V) or isa<AllocaInst>(V));
 }
 
 inline const llvm::Function *getCallee(const llvm::Instruction *I) {
@@ -831,15 +844,25 @@ inline llvm::Function *getCallee(llvm::Instruction *I) {
     return nullptr;
 }
 
-inline bool isCallTo(const llvm::Instruction *I, llvm::StringRef Name) {
+inline bool isCallTo(const llvm::Value *I, llvm::StringRef Name) {
   revng_assert(I != nullptr);
-  const llvm::Function *Callee = getCallee(I);
+
+  auto *Call = llvm::dyn_cast<llvm::Instruction>(I);
+  if (not Call)
+    return false;
+
+  const llvm::Function *Callee = getCallee(Call);
   return Callee != nullptr && Callee->getName() == Name;
 }
 
-inline bool isCallTo(const llvm::Instruction *I, llvm::Function *F) {
+inline bool isCallTo(const llvm::Value *I, llvm::Function *F) {
   revng_assert(I != nullptr);
-  const llvm::Function *Callee = getCallee(I);
+
+  auto *Call = llvm::dyn_cast<llvm::Instruction>(I);
+  if (not Call)
+    return false;
+
+  const llvm::Function *Callee = getCallee(Call);
   return Callee != nullptr && Callee == F;
 }
 
@@ -865,7 +888,7 @@ inline llvm::CallInst *getCallToHelper(llvm::Instruction *I) {
     return nullptr;
 }
 
-/// \brief Is \p I a call to an helper function?
+/// Is \p I a call to an helper function?
 inline bool isCallToHelper(const llvm::Instruction *I) {
   return getCallToHelper(I) != nullptr;
 }
@@ -884,24 +907,24 @@ inline llvm::CallInst *getCallTo(llvm::Instruction *I, llvm::Function *F) {
     return nullptr;
 }
 
-inline const llvm::CallInst *
-getCallTo(const llvm::Instruction *I, llvm::StringRef Name) {
+inline const llvm::CallInst *getCallTo(const llvm::Instruction *I,
+                                       llvm::StringRef Name) {
   if (isCallTo(I, Name))
     return llvm::cast<llvm::CallInst>(I);
   else
     return nullptr;
 }
 
-inline const llvm::CallInst *
-getCallTo(const llvm::Instruction *I, llvm::Function *F) {
+inline const llvm::CallInst *getCallTo(const llvm::Instruction *I,
+                                       llvm::Function *F) {
   if (isCallTo(I, F))
     return llvm::cast<llvm::CallInst>(I);
   else
     return nullptr;
 }
 
-inline std::vector<llvm::GlobalVariable *>
-extractCSVs(llvm::Instruction *Call, unsigned MDKindID) {
+inline std::vector<llvm::GlobalVariable *> extractCSVs(llvm::Instruction *Call,
+                                                       unsigned MDKindID) {
   using namespace llvm;
 
   std::vector<GlobalVariable *> Result;
@@ -932,7 +955,7 @@ public:
   std::vector<llvm::GlobalVariable *> Written;
 };
 
-inline llvm::Optional<CSVsUsage>
+inline std::optional<CSVsUsage>
 getCSVUsedByHelperCallIfAvailable(llvm::Instruction *Call) {
   revng_assert(isCallToHelper(Call));
 
@@ -955,19 +978,6 @@ inline CSVsUsage getCSVUsedByHelperCall(llvm::Instruction *Call) {
   return *getCSVUsedByHelperCallIfAvailable(Call);
 }
 
-inline MetaAddress getBasicBlockPC(llvm::BasicBlock *BB) {
-  using namespace llvm;
-
-  Instruction *I = BB->getFirstNonPHI();
-  if (I == nullptr)
-    return MetaAddress::invalid();
-
-  if (llvm::CallInst *Call = getCallTo(I, "newpc"))
-    return MetaAddress::fromConstant(Call->getOperand(0));
-
-  return MetaAddress::invalid();
-}
-
 inline MetaAddress getBasicBlockJumpTarget(llvm::BasicBlock *BB) {
   using namespace llvm;
 
@@ -977,7 +987,7 @@ inline MetaAddress getBasicBlockJumpTarget(llvm::BasicBlock *BB) {
 
   if (llvm::CallInst *Call = getCallTo(I, "newpc")) {
     if (getLimitedValue(Call->getOperand(2)) == 1) {
-      return MetaAddress::fromConstant(Call->getOperand(0));
+      return MetaAddress::fromValue(Call->getOperand(0));
     }
   }
 
@@ -994,14 +1004,12 @@ concept ModFunLikePrintable = requires(F Fun) {
   Fun.print(std::declval<llvm::raw_ostream &>(), nullptr, false, true);
 };
 
-// clang-format off
 template<typename T>
 concept LLVMRawOStreamPrintable = not ValueLikePrintable<T>
-    and not ModFunLikePrintable<T>
-    and requires(T TheT) {
-  TheT.print(std::declval<llvm::raw_ostream &>());
-};
-// clang-format on
+                                  and not ModFunLikePrintable<T>
+                                  and requires(T V, llvm::raw_ostream &S) {
+                                        V.print(S);
+                                      };
 
 // This is enabled only for references to types that inherit from llvm::Value
 // but not from llvm::Function, since llvm::Function has a different prototype
@@ -1037,14 +1045,13 @@ inline std::string dumpToString(T &TheT) {
   return Result;
 }
 
-// clang-format off
 template<typename T>
 concept LLVMRawOStreamDumpable = not ValueLikePrintable<T>
                                  and not ModFunLikePrintable<T>
                                  and requires(T TheT) {
-  TheT.dump(std::declval<llvm::raw_ostream &>());
-};
-// clang-format on
+                                       TheT.dump(std::declval<
+                                                 llvm::raw_ostream &>());
+                                     };
 
 template<bool B, LLVMRawOStreamDumpable Dumpable>
 inline void writeToLog(Logger<B> &L, const Dumpable &P, int /* Ignore */) {
@@ -1059,7 +1066,7 @@ inline void writeToLog(Logger<B> &L, const Dumpable &P, int /* Ignore */) {
 }
 
 template<typename T>
-requires std::is_pointer_v<T>
+  requires std::is_pointer_v<T>
 inline std::string dumpToString(T TheT) {
   if (TheT == nullptr)
     return "nullptr";
@@ -1073,14 +1080,9 @@ llvm::PointerType *getStringPtrType(llvm::LLVMContext &C);
 llvm::GlobalVariable *
 buildString(llvm::Module *M, llvm::StringRef String, const llvm::Twine &Name);
 
-llvm::Constant *buildStringPtr(llvm::Module *M,
-                               llvm::StringRef String,
-                               const llvm::Twine &Name);
-
 llvm::Constant *getUniqueString(llvm::Module *M,
-                                llvm::StringRef Namespace,
                                 llvm::StringRef String,
-                                const llvm::Twine &Name = llvm::Twine());
+                                llvm::StringRef Namespace = "revng.const.");
 
 llvm::StringRef extractFromConstantStringPtr(llvm::Value *V);
 
@@ -1097,17 +1099,56 @@ inline llvm::User *getUniqueUser(llvm::Value *V) {
   return Result;
 }
 
-/// \brief Find the first call to newpc starting from \p TheInstruction
+const llvm::BasicBlock *getJumpTargetBlock(const llvm::BasicBlock *BB);
+
+inline BasicBlockID blockIDFromNewPC(const llvm::CallBase *Call) {
+  revng_assert(isCallTo(Call, "newpc"));
+  using namespace NewPCArguments;
+  auto *Argument = Call->getArgOperand(InstructionID);
+  return BasicBlockID::fromValue(Argument);
+}
+
+inline BasicBlockID blockIDFromNewPC(const llvm::Instruction *I) {
+  return blockIDFromNewPC(llvm::cast<llvm::CallBase>(I));
+}
+
+inline MetaAddress addressFromNewPC(const llvm::CallBase *Call) {
+  return blockIDFromNewPC(Call).notInlinedAddress();
+}
+inline MetaAddress addressFromNewPC(const llvm::Instruction *I) {
+  return addressFromNewPC(llvm::cast<llvm::CallBase>(I));
+}
+
+inline BasicBlockID getBasicBlockID(const llvm::BasicBlock *BB) {
+  using namespace llvm;
+
+  revng_assert(BB != nullptr);
+
+  const Instruction *I = BB->getFirstNonPHI();
+  if (I == nullptr)
+    return BasicBlockID::invalid();
+
+  if (const llvm::CallInst *Call = getCallTo(I, "newpc"))
+    return blockIDFromNewPC(Call);
+
+  return BasicBlockID::invalid();
+}
+
+inline MetaAddress getBasicBlockAddress(const llvm::BasicBlock *BB) {
+  return getBasicBlockID(BB).notInlinedAddress();
+}
+
+/// Find the first call to NewPC starting from \p TheInstruction
 ///
 llvm::CallInst *getLastNewPC(llvm::Instruction *TheInstruction);
 
-/// \brief Find the PC which lead to generated \p TheInstruction
+/// Find the PC which lead to generated \p TheInstruction
 ///
 /// \return a pair of integers: the first element represents the PC and the
 ///         second the size of the instruction.
 std::pair<MetaAddress, uint64_t> getPC(llvm::Instruction *TheInstruction);
 
-/// \brief Replace all uses of \Old, with \New in \F.
+/// Replace all uses of \Old, with \New in \F.
 ///
 /// \return true if it changes something, false otherwise.
 inline bool replaceAllUsesInFunctionWith(llvm::Function *F,
@@ -1171,7 +1212,7 @@ inline bool replaceAllUsesInFunctionWith(llvm::Function *F,
   return Changed;
 }
 
-/// \brief Checks if \p I is a marker
+/// Checks if \p I is a marker
 ///
 /// A marker a function call to an empty function acting as meta-information,
 /// for example the `function_call` marker.
@@ -1207,13 +1248,13 @@ inline llvm::CallInst *getMarker(llvm::Instruction *T, llvm::Function *Marker) {
   return nullptr;
 }
 
-inline llvm::CallInst *
-getMarker(llvm::Instruction *I, llvm::StringRef MarkerName) {
+inline llvm::CallInst *getMarker(llvm::Instruction *I,
+                                 llvm::StringRef MarkerName) {
   return getMarker(I, getModule(I)->getFunction(MarkerName));
 }
 
-inline llvm::CallInst *
-getMarker(llvm::BasicBlock *BB, llvm::StringRef MarkerName) {
+inline llvm::CallInst *getMarker(llvm::BasicBlock *BB,
+                                 llvm::StringRef MarkerName) {
   return getMarker(BB->getTerminator(), MarkerName);
 }
 
@@ -1237,7 +1278,7 @@ inline bool hasMarker(llvm::BasicBlock *BB, llvm::Function *Marker) {
   return getMarker(BB->getTerminator(), Marker);
 }
 
-/// \brief Return the callee basic block given a function_call marker.
+/// Return the callee basic block given a function_call marker.
 inline llvm::BasicBlock *getFunctionCallCallee(llvm::Instruction *T) {
   if (auto *Call = getMarker(T, "function_call")) {
     if (auto *Callee = llvm::dyn_cast<llvm::BlockAddress>(Call->getOperand(0)))
@@ -1251,7 +1292,7 @@ inline llvm::BasicBlock *getFunctionCallCallee(llvm::BasicBlock *BB) {
   return getFunctionCallCallee(BB->getTerminator());
 }
 
-/// \brief Return the fall-through basic block given a function_call marker.
+/// Return the fall-through basic block given a function_call marker.
 inline llvm::BasicBlock *getFallthrough(llvm::Instruction *T) {
   if (auto *Call = getMarker(T, "function_call")) {
     auto *Fallthrough = llvm::cast<llvm::BlockAddress>(Call->getOperand(1));
@@ -1265,7 +1306,7 @@ inline llvm::BasicBlock *getFallthrough(llvm::BasicBlock *BB) {
   return getFallthrough(BB->getTerminator());
 }
 
-/// \brief Return true if \p T is has a fallthrough basic block.
+/// Return true if \p T is has a fallthrough basic block.
 inline bool isFallthrough(llvm::Instruction *T) {
   return getFallthrough(T) != nullptr;
 }
@@ -1317,6 +1358,13 @@ inline cppcoro::generator<llvm::CallBase *> callers(llvm::Function *F) {
   }
 }
 
+inline cppcoro::generator<llvm::CallBase *>
+callersIn(llvm::Function *F, llvm::Function *ContainingFunction) {
+  for (llvm::CallBase *Call : callers(F))
+    if (Call->getParent()->getParent() == ContainingFunction)
+      co_yield Call;
+}
+
 template<typename T>
 concept HasMetadata = requires(T &Value,
                                const T &ConstValue,
@@ -1334,15 +1382,41 @@ static_assert(HasMetadata<llvm::Function>);
 static_assert(HasMetadata<llvm::GlobalVariable>);
 static_assert(not HasMetadata<llvm::Constant>);
 
+template<typename R, HasMetadata T>
+R fromStringMetadata(const T *U, llvm::StringRef Name) {
+  using namespace llvm;
+
+  if (auto *MD = dyn_cast_or_null<MDTuple>(U->getMetadata(Name)))
+    if (auto *String = dyn_cast<MDString>(MD->getOperand(0)))
+      return R::fromString(String->getString());
+
+  return R::invalid();
+}
+
+template<HasMetadata T>
+void setStringMetadata(T *U, llvm::StringRef Name, llvm::StringRef Value) {
+  llvm::LLVMContext &C = getContext(U);
+  U->setMetadata(Name,
+                 llvm::MDTuple::get(C, { llvm::MDString::get(C, Value) }));
+}
+
 template<HasMetadata T>
 MetaAddress getMetaAddressMetadata(const T *U, llvm::StringRef Name) {
   using namespace llvm;
 
   if (auto *MD = dyn_cast_or_null<MDTuple>(U->getMetadata(Name)))
     if (auto *VAM = dyn_cast<ValueAsMetadata>(MD->getOperand(0)))
-      return MetaAddress::fromConstant(VAM->getValue());
+      return MetaAddress::fromValue(VAM->getValue());
 
   return MetaAddress::invalid();
+}
+
+template<HasMetadata T>
+void setMetaAddressMetadata(T *U, llvm::StringRef Name, const MetaAddress &MA) {
+  using namespace llvm;
+  auto *VAM = ValueAsMetadata::get(MA.toValue(getModule(U)));
+  auto *MD = MDTuple::get(getContext(U), VAM);
+  U->setMetadata(Name, MD);
 }
 
 template<typename T>
@@ -1381,26 +1455,12 @@ inline llvm::Value *getPointer(llvm::User *U) {
     return nullptr;
 }
 
-inline unsigned getPointeeSize(llvm::Value *Pointer) {
-  using namespace llvm;
-
-  revng_assert(Pointer->getType()->isPointerTy());
-  Type *Pointee = Pointer->getType()->getPointerElementType();
-  unsigned Size = Pointee->getIntegerBitWidth();
-  revng_assert(Size % 8 == 0);
-  return Pointer->getType()->getPointerElementType()->getIntegerBitWidth() / 8;
-}
-
-inline unsigned getMemoryAccessSize(llvm::Instruction *I) {
-  return getPointeeSize(getPointer(I));
-}
-
 /// Steal the body of \p OldFunction and move it into \p NewFunction
 void moveBlocksInto(llvm::Function &OldFunction, llvm::Function &NewFunction);
 
 /// Create a function identical to \p OldFunction but use \p NewType as type
-llvm::Function &
-moveToNewFunctionType(llvm::Function &OldFunction, llvm::FunctionType &NewType);
+llvm::Function &moveToNewFunctionType(llvm::Function &OldFunction,
+                                      llvm::FunctionType &NewType);
 
 /// Adds NewArguments and changes the return type of \p OldFunction
 ///
@@ -1416,3 +1476,74 @@ moveToNewFunctionType(llvm::Function &OldFunction, llvm::FunctionType &NewType);
 llvm::Function *changeFunctionType(llvm::Function &OldFunction,
                                    llvm::Type *NewReturnType,
                                    llvm::ArrayRef<llvm::Type *> NewArguments);
+
+template<typename T, typename Inserter>
+llvm::SmallVector<llvm::Value *, 4>
+unpack(llvm::IRBuilder<T, Inserter> &Builder, llvm::Value *V) {
+  using namespace llvm;
+  Type *Type = V->getType();
+  if (isa<IntegerType>(Type)) {
+    return { V };
+  } else if (auto *StructType = dyn_cast<llvm::StructType>(Type)) {
+    llvm::SmallVector<llvm::Value *, 4> Result;
+    for (unsigned I = 0; I < StructType->getNumElements(); ++I)
+      Result.push_back(Builder.CreateExtractValue(V, { I }));
+    return Result;
+  } else {
+    revng_abort("Cannot unpack the given type");
+  }
+}
+
+template<typename T, typename Inserter>
+llvm::Instruction *
+createLoad(llvm::IRBuilder<T, Inserter> &Builder, llvm::GlobalVariable *GV) {
+  return Builder.CreateLoad(GV->getValueType(), GV);
+}
+
+template<typename T, typename Inserter>
+llvm::Instruction *
+createLoad(llvm::IRBuilder<T, Inserter> &Builder, llvm::AllocaInst *Alloca) {
+  return Builder.CreateLoad(Alloca->getAllocatedType(), Alloca);
+}
+
+template<typename T, typename Inserter>
+llvm::Instruction *createLoadVariable(llvm::IRBuilder<T, Inserter> &Builder,
+                                      llvm::Value *Variable) {
+  if (auto *Alloca = llvm::dyn_cast<llvm::AllocaInst>(Variable))
+    return createLoad(Builder, Alloca);
+  else if (auto *GV = llvm::dyn_cast<llvm::GlobalVariable>(Variable))
+    return createLoad(Builder, GV);
+  else
+    revng_abort("Either GlobalVariable or AllocaInst expected");
+}
+
+inline llvm::Type *getVariableType(const llvm::Value *Variable) {
+  if (auto *Alloca = llvm::dyn_cast<llvm::AllocaInst>(Variable))
+    return Alloca->getAllocatedType();
+  else if (auto *GV = llvm::dyn_cast<llvm::GlobalVariable>(Variable))
+    return GV->getValueType();
+  else
+    revng_abort("Either GlobalVariable or AllocaInst expected");
+}
+
+void pruneDICompileUnits(llvm::Module &M);
+
+llvm::SmallSet<llvm::Value *, 2> findPhiTreeLeaves(llvm::Value *Root);
+
+namespace revng {
+
+/// If the verify logger is enabled, assert the module is valid
+void verify(const llvm::Module *M);
+
+/// If the verify logger is enabled, assert the function is valid
+void verify(const llvm::Function *F);
+
+/// Assert the module is valid
+void forceVerify(const llvm::Module *M);
+
+/// Assert the function is valid
+void forceVerify(const llvm::Function *F);
+
+} // namespace revng
+
+void collectTypes(llvm::Type *Root, std::set<llvm::Type *> &Set);

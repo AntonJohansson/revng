@@ -7,11 +7,11 @@
 #include "revng/Support/Assert.h"
 #include "revng/Support/IRHelpers.h"
 
-static const char *BlockTypeMDName = "revng.block.type";
+inline const char *BlockTypeMDName = "revng.block.type";
 
 namespace BlockType {
 
-/// \brief Classification of the various basic blocks we are creating
+/// Classification of the various basic blocks we are creating
 enum Values {
   /// A basic block generated during translation representing a jump target
   JumpTargetBlock,
@@ -104,8 +104,8 @@ inline void setBlockType(llvm::Instruction *T, BlockType::Values Value) {
   T->setMetadata(BlockTypeMDName, QMD.tuple(BlockType::getName(Value)));
 }
 
-inline llvm::BasicBlock *
-findByBlockType(llvm::Function *F, BlockType::Values Value) {
+inline llvm::BasicBlock *findByBlockType(llvm::Function *F,
+                                         BlockType::Values Value) {
   using namespace llvm;
   QuickMetadata QMD(getContext(F));
   for (BasicBlock &BB : *F) {
@@ -120,22 +120,24 @@ findByBlockType(llvm::Function *F, BlockType::Values Value) {
   return nullptr;
 }
 
-inline BlockType::Values getType(llvm::Instruction *T) {
+inline BlockType::Values getType(const llvm::Instruction *T) {
   using namespace llvm;
 
   revng_assert(T != nullptr);
   revng_assert(T->isTerminator());
   MDNode *MD = T->getMetadata(BlockTypeMDName);
 
-  BasicBlock *BB = T->getParent();
+  const BasicBlock *BB = T->getParent();
   if (BB == &BB->getParent()->getEntryBlock())
     return BlockType::EntryPoint;
 
   if (MD == nullptr) {
-    Instruction *First = &*T->getParent()->begin();
-    if (CallInst *Call = getCallTo(First, "newpc"))
-      if (getLimitedValue(Call->getArgOperand(2)) == 1)
+    const Instruction *First = &*T->getParent()->begin();
+    if (const CallInst *Call = getCallTo(First, "newpc")) {
+      auto *Argument = Call->getArgOperand(NewPCArguments::IsJumpTarget);
+      if (getLimitedValue(Argument) == 1)
         return BlockType::JumpTargetBlock;
+    }
 
     return BlockType::TranslatedBlock;
   }
@@ -146,14 +148,19 @@ inline BlockType::Values getType(llvm::Instruction *T) {
   return BlockType::fromName(QMD.extract<llvm::StringRef>(BlockTypeMD, 0));
 }
 
-/// \brief Return the type of basic block, see BlockType.
-inline BlockType::Values getType(llvm::BasicBlock *BB) {
+/// Return the type of basic block, see BlockType.
+inline BlockType::Values getType(const llvm::BasicBlock *BB) {
   return getType(BB->getTerminator());
 }
 
-/// \brief Return the type of basic block, see BlockType.
+/// Return the type of basic block, see BlockType.
 inline bool isPartOfRootDispatcher(llvm::BasicBlock *BB) {
   auto Type = getType(BB->getTerminator());
   return (Type == BlockType::RootDispatcherBlock
           or Type == BlockType::RootDispatcherHelperBlock);
+}
+
+/// Return true if the basic block is a jump target
+inline bool isJumpTarget(const llvm::BasicBlock *BB) {
+  return getType(BB->getTerminator()) == BlockType::JumpTargetBlock;
 }

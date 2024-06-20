@@ -10,10 +10,12 @@
 #include <stdint.h>
 #include <stdnoreturn.h>
 
+#include "revng/Runtime/PlainMetaAddress.h"
+
 // Handle target specific information:
 //
 // * Register size
-// * Macro to swap endianess from the host one
+// * Macro to swap endianness from the host one
 #if defined(TARGET_arm)
 
 typedef uint32_t target_reg;
@@ -85,11 +87,20 @@ typedef uint64_t target_reg;
 #define SWAP(x) (htobe64(x))
 #define TARGET_REG_FORMAT PRIx64
 
+#elif defined(TARGET_HEXAGON)
+
+typedef uint32_t target_reg;
+#define SWAP(x) (htole32(x))
+#define TARGET_REG_FORMAT PRIx32
+
 #else
 
 #error "Architecture not supported"
 
 #endif
+
+extern PlainMetaAddress last_pc;
+extern PlainMetaAddress current_pc;
 
 // Register values before the signal was triggered
 extern target_reg *saved_registers;
@@ -107,7 +118,8 @@ extern jmp_buf jmp_buffer;
 
 bool is_executable(uint64_t pc);
 void set_register(uint32_t register_id, uint64_t value);
+void unknown_pc();
 
-noreturn void raise_exception_helper(const char *reason,
-                                     PlainMetaAddress *source,
-                                     PlainMetaAddress *destination);
+noreturn void _abort(const char *reason);
+
+noreturn void _unreachable(const char *reason);

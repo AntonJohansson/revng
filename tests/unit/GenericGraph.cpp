@@ -1,5 +1,4 @@
 /// \file GenericGraph.cpp
-/// \brief Test the GenericGraph
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
@@ -54,14 +53,12 @@ BOOST_AUTO_TEST_CASE(TestCompile) {
       Node->addSuccessor(Node, {});
       Node->addPredecessor(Node);
       Node->addPredecessor(Node, {});
-      MyBidirectionalNode *Neighbor = *Node->successors().begin();
-      Neighbor = *Node->predecessors().begin();
       Node->removePredecessor(Node->predecessors().begin());
       Node->removePredecessorEdge(Node->predecessor_edges().begin());
     }
 
     struct EdgeLabel {
-      int X;
+      int X = 0;
     };
 
     {
@@ -96,6 +93,7 @@ BOOST_AUTO_TEST_CASE(TestCompile) {
       Node->addPredecessor(Node);
       Node->addPredecessor(Node, { 99 });
       NodeType *Neighbor = *Node->successors().begin();
+      (void) Neighbor;
       Neighbor = *Node->predecessors().begin();
       Graph.removeNode(Graph.nodes().begin());
 
@@ -151,6 +149,134 @@ struct KeyedObjectTraits<TestNodeData> {
 
 SERIALIZABLEGRAPH_INTROSPECTION(TestNodeData, TestEdgeLabel);
 
+using BidirectionalTestNode = BidirectionalNode<TestNodeData, TestEdgeLabel>;
+
+void compare(auto &&Range,
+             std::vector<std::decay_t<decltype(*Range.begin())>> Reference) {
+  using Element = std::decay_t<decltype(*Range.begin())>;
+  std::vector<Element> Result;
+  llvm::copy(Range, std::back_inserter(Result));
+  revng_check(Result == Reference);
+}
+
+BOOST_AUTO_TEST_CASE(TestBidirectionalNode) {
+  // Test removePredecessor
+  {
+    GenericGraph<BidirectionalTestNode> Graph;
+    auto *Node = Graph.addNode(0);
+    auto *PredecessorToRemove = Graph.addNode(0);
+    auto *PredecessorToKeep = Graph.addNode(0);
+
+    Node->addPredecessor(PredecessorToRemove);
+    Node->addPredecessor(PredecessorToKeep);
+
+    revng_check(Node->predecessorCount() == 2);
+
+    compare(PredecessorToRemove->successors(), { Node });
+    compare(PredecessorToKeep->successors(), { Node });
+    compare(Node->predecessors(), { PredecessorToRemove, PredecessorToKeep });
+
+    auto Range = Node->predecessors();
+    bool Found = false;
+    for (auto It = Range.begin(), Last = Range.end(); It != Last; ++It) {
+      if (*It == PredecessorToRemove) {
+        Node->removePredecessor(It);
+        revng_check(not Found);
+        Found = true;
+      }
+    }
+    revng_check(Found);
+
+    compare(PredecessorToRemove->successors(), {});
+    compare(PredecessorToKeep->successors(), { Node });
+    compare(Node->predecessors(), { PredecessorToKeep });
+  }
+
+  // Test removeSuccessor
+  {
+    GenericGraph<BidirectionalTestNode> Graph;
+    auto *Node = Graph.addNode(0);
+    auto *SuccessorToRemove = Graph.addNode(0);
+    auto *SuccessorToKeep = Graph.addNode(0);
+
+    Node->addSuccessor(SuccessorToRemove);
+    Node->addSuccessor(SuccessorToKeep);
+
+    revng_check(Node->successorCount() == 2);
+
+    auto Range = Node->successors();
+    bool Found = false;
+    for (auto It = Range.begin(), Last = Range.end(); It != Last; ++It) {
+      if (*It == SuccessorToRemove) {
+        Node->removeSuccessor(It);
+        revng_check(not Found);
+        Found = true;
+      }
+    }
+    revng_check(Found);
+
+    compare(SuccessorToRemove->predecessors(), {});
+    compare(SuccessorToKeep->predecessors(), { Node });
+    compare(Node->successors(), { SuccessorToKeep });
+  }
+
+  // Test removePredecessorEdge
+  {
+    GenericGraph<BidirectionalTestNode> Graph;
+    auto *Node = Graph.addNode(0);
+    auto *SuccessorToRemove = Graph.addNode(0);
+    auto *SuccessorToKeep = Graph.addNode(0);
+
+    Node->addSuccessor(SuccessorToRemove, { 10 });
+    Node->addSuccessor(SuccessorToRemove, { 20 });
+    Node->addSuccessor(SuccessorToKeep, { 0 });
+
+    auto Range = SuccessorToRemove->predecessor_edges();
+    bool Found = false;
+    for (auto It = Range.begin(), Last = Range.end(); It != Last; ++It) {
+      if (It->Weight == 20) {
+        SuccessorToRemove->removePredecessorEdge(It);
+        revng_check(not Found);
+        Found = true;
+      }
+    }
+    revng_check(Found);
+
+    compare(SuccessorToRemove->predecessor_edges(), { { Node, { 10 } } });
+    compare(SuccessorToKeep->predecessor_edges(), { { Node, { 0 } } });
+    compare(Node->successor_edges(),
+            { { SuccessorToRemove, { 10 } }, { Node, { 0 } } });
+  }
+
+  // Test removeSuccessorEdge
+  {
+    GenericGraph<BidirectionalTestNode> Graph;
+    auto *Node = Graph.addNode(0);
+    auto *SuccessorToRemove = Graph.addNode(0);
+    auto *SuccessorToKeep = Graph.addNode(0);
+
+    Node->addSuccessor(SuccessorToRemove, { 10 });
+    Node->addSuccessor(SuccessorToRemove, { 20 });
+    Node->addSuccessor(SuccessorToKeep, { 0 });
+
+    auto Range = Node->successor_edges();
+    bool Found = false;
+    for (auto It = Range.begin(), Last = Range.end(); It != Last; ++It) {
+      if (It->Weight == 20) {
+        Node->removeSuccessorEdge(It);
+        revng_check(not Found);
+        Found = true;
+      }
+    }
+    revng_check(Found);
+
+    compare(SuccessorToRemove->predecessor_edges(), { { Node, { 10 } } });
+    compare(SuccessorToKeep->predecessor_edges(), { { Node, { 0 } } });
+    compare(Node->successor_edges(),
+            { { SuccessorToRemove, { 10 } }, { Node, { 0 } } });
+  }
+}
+
 template<typename NodeType>
 struct DiamondGraph {
   using Node = NodeType;
@@ -193,8 +319,6 @@ static DiamondGraph<NodeType> createGraph() {
 
   return DG;
 }
-
-using BidirectionalTestNode = BidirectionalNode<TestNodeData, TestEdgeLabel>;
 
 BOOST_AUTO_TEST_CASE(TestRPOT) {
   auto DG = createGraph<BidirectionalTestNode>();

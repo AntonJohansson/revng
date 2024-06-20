@@ -1,5 +1,4 @@
 /// \file ZipMapIterator.cpp
-/// \brief Tests for ZipMapIterator
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
@@ -43,7 +42,10 @@ struct KeyContainer<T> {
   static void sort(T &) {}
 };
 
-template<SetLike T>
+template<typename T>
+concept SetOrKOC = SetLike<T> or KeyedObjectContainer<T>;
+
+template<SetOrKOC T>
 struct KeyContainer<T> {
   using key_type = const typename T::key_type;
 
@@ -91,7 +93,7 @@ template<typename LeftType, typename RightType>
 static void
 compare(LeftType &Left,
         RightType &Right,
-        std::vector<std::pair<Optional<int>, Optional<int>>> &&Expected) {
+        std::vector<std::pair<optional<int>, optional<int>>> &&Expected) {
   using LeftKE = KeyContainer<LeftType>;
   using RightKE = KeyContainer<RightType>;
   using left_pointer = element_pointer_t<LeftType>;

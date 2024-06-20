@@ -1,5 +1,4 @@
 /// \file MetaAddress.cpp
-/// \brief Implementation of MetaAddress.
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
@@ -11,65 +10,17 @@
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include "revng/Support/IRHelpers.h"
 #include "revng/Support/MetaAddress.h"
 
 using namespace llvm;
 
-const char *MetaAddressTypeHolderName = "metaaddress_type_holder";
-
-Constant *MetaAddress::toConstant(llvm::Type *Type) const {
-  using namespace llvm;
-
-  auto *Struct = cast<StructType>(Type);
-
-  auto GetInt = [Struct](unsigned Index, uint64_t Value) {
-    return ConstantInt::get(cast<IntegerType>(Struct->getElementType(Index)),
-                            Value);
-  };
-
-  return ConstantStruct::get(Struct,
-                             GetInt(0, this->Epoch),
-                             GetInt(1, this->AddressSpace),
-                             GetInt(2, this->Type),
-                             GetInt(3, this->Address));
+Constant *MetaAddress::toValue(llvm::Module *M) const {
+  return getUniqueString(M, toString());
 }
 
-GlobalVariable *
-MetaAddress::createStructVariableInternal(Module *M,
-                                          StringRef Name,
-                                          StructType *MetaAddressStruct) {
-  using namespace llvm;
-  return new GlobalVariable(*M,
-                            MetaAddressStruct,
-                            false,
-                            GlobalValue::InternalLinkage,
-                            invalid().toConstant(MetaAddressStruct),
-                            Name);
-}
-
-StructType *MetaAddress::getStruct(Module *M) {
-  using namespace llvm;
-  auto *TypeHolder = M->getGlobalVariable(MetaAddressTypeHolderName, true);
-  return cast<StructType>(TypeHolder->getType()->getPointerElementType());
-}
-
-MetaAddress MetaAddress::fromConstant(Value *V) {
-  using namespace llvm;
-  using namespace MetaAddressType;
-
-  auto *Struct = cast<ConstantStruct>(V);
-  revng_assert(Struct->getNumOperands() == 4);
-
-  auto CI = [](Value *V) { return cast<ConstantInt>(V)->getLimitedValue(); };
-
-  MetaAddress Result;
-  Result.Epoch = CI(Struct->getOperand(0));
-  Result.AddressSpace = CI(Struct->getOperand(1));
-  Result.Type = static_cast<Values>(CI(Struct->getOperand(2)));
-  Result.Address = CI(Struct->getOperand(3));
-  Result.validate();
-
-  return Result;
+MetaAddress MetaAddress::fromValue(Value *V) {
+  return MetaAddress::fromString(extractFromConstantStringPtr(V));
 }
 
 Instruction *MetaAddress::composeIntegerPC(IRBuilder<> &B,
@@ -91,10 +42,13 @@ Instruction *MetaAddress::composeIntegerPC(IRBuilder<> &B,
 }
 
 MetaAddress MetaAddress::decomposeIntegerPC(ConstantInt *Value) {
-  revng_assert(Value->getType()->getBitWidth() == 128);
-  const APInt &APValue = Value->getValue();
-  uint64_t Lower = (APValue & UINT64_MAX).getLimitedValue();
-  uint64_t Upper = APValue.lshr(64).getLimitedValue();
+  return decomposeIntegerPC(Value->getValue());
+}
+
+MetaAddress MetaAddress::decomposeIntegerPC(const APInt &Value) {
+  revng_assert(Value.getBitWidth() == 128);
+  uint64_t Lower = (Value & UINT64_MAX).getLimitedValue();
+  uint64_t Upper = Value.lshr(64).getLimitedValue();
 
   MetaAddress Result;
   Result.Address = Lower;

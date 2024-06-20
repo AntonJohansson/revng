@@ -3,9 +3,13 @@
 //
 
 #include "revng/EarlyFunctionAnalysis/FunctionMetadata.h"
-#include "revng/EarlyFunctionAnalysis/IRHelpers.h"
+#include "revng/EarlyFunctionAnalysis/FunctionMetadataCache.h"
 #include "revng/Lift/LoadBinaryPass.h"
 #include "revng/Model/Binary.h"
+#include "revng/PTML/Constants.h"
+#include "revng/PTML/Doxygen.h"
+#include "revng/PTML/Tag.h"
+#include "revng/Pipeline/AllRegistries.h"
 #include "revng/Pipeline/Pipe.h"
 #include "revng/Pipeline/RegisterPipe.h"
 #include "revng/Pipes/Kinds.h"
@@ -13,15 +17,17 @@
 #include "revng/Yield/Assembly/DisassemblyHelper.h"
 #include "revng/Yield/Function.h"
 #include "revng/Yield/PTML.h"
-#include "revng/Yield/Pipes/ProcessAssemblyPipe.h"
-#include "revng/Yield/Pipes/YieldAssemblyPipe.h"
+#include "revng/Yield/Pipes/ProcessAssembly.h"
+#include "revng/Yield/Pipes/YieldAssembly.h"
+
+using ptml::PTMLBuilder;
 
 namespace revng::pipes {
 
-void ProcessAssembly::run(pipeline::Context &Context,
-                          const FileContainer &SourceBinary,
+void ProcessAssembly::run(pipeline::ExecutionContext &Context,
+                          const BinaryFileContainer &SourceBinary,
                           const pipeline::LLVMContainer &TargetList,
-                          FunctionStringMap &Output) {
+                          FunctionAssemblyStringMap &Output) {
   if (not SourceBinary.exists())
     return;
 
@@ -41,82 +47,62 @@ void ProcessAssembly::run(pipeline::Context &Context,
   // This allows it to only be created once.
   DissassemblyHelper Helper;
 
+  FunctionMetadataCache Cache;
   for (const auto &LLVMFunction : FunctionTags::Isolated.functions(&Module)) {
-    auto Metadata = extractFunctionMetadata(&LLVMFunction);
-    auto ModelFunctionIterator = Model->Functions.find(Metadata->Entry);
-    revng_assert(ModelFunctionIterator != Model->Functions.end());
+    const auto &Metadata = Cache.getFunctionMetadata(&LLVMFunction);
+    auto ModelFunctionIterator = Model->Functions().find(Metadata.Entry());
+    revng_assert(ModelFunctionIterator != Model->Functions().end());
 
     const auto &Func = *ModelFunctionIterator;
-    auto Disassembled = Helper.disassemble(Func, *Metadata, BinaryView, *Model);
-    Output.insert_or_assign(Func.Entry, serializeToString(Disassembled));
+    auto Disassembled = Helper.disassemble(Func, Metadata, BinaryView, *Model);
+    Output.insert_or_assign(Func.Entry(), serializeToString(Disassembled));
   }
 }
 
 void ProcessAssembly::print(const pipeline::Context &,
                             llvm::raw_ostream &OS,
                             llvm::ArrayRef<std::string> Files) const {
-  OS << *revng::ResourceFinder.findFile("bin/revng") << " magic ^_^\n";
+  OS << "[this is a pure pipe, no command exists for its invocation]\n";
 }
 
-std::array<pipeline::ContractGroup, 1> ProcessAssembly::getContract() const {
-  pipeline::Contract BinaryContract(kinds::Binary,
-                                    pipeline::Exactness::Exact,
-                                    0,
-                                    pipeline::InputPreservation::Preserve);
-
-  pipeline::Contract FunctionContract(kinds::Isolated,
-                                      pipeline::Exactness::Exact,
-                                      1,
-                                      kinds::FunctionAssemblyInternal,
-                                      2,
-                                      pipeline::InputPreservation::Preserve);
-
-  return { pipeline::ContractGroup{ std::move(BinaryContract),
-                                    std::move(FunctionContract) } };
-}
-
-void YieldAssembly::run(pipeline::Context &Context,
-                        const FunctionStringMap &Input,
-                        FunctionStringMap &Output) {
+void YieldAssembly::run(pipeline::ExecutionContext &Context,
+                        const FunctionAssemblyStringMap &Input,
+                        FunctionAssemblyPTMLStringMap &Output) {
   // Access the model
   const auto &Model = getModelFromContext(Context);
 
+  PTMLBuilder ThePTMLBuilder;
   for (auto [Address, S] : Input) {
     auto MaybeFunction = TupleTree<yield::Function>::deserialize(S);
     revng_assert(MaybeFunction && MaybeFunction->verify());
-    revng_assert((*MaybeFunction)->Entry == Address);
+    revng_assert((*MaybeFunction)->Entry() == Address);
 
-    Output.insert_or_assign((*MaybeFunction)->Entry,
-                            yield::ptml::functionAssembly(**MaybeFunction,
-                                                          *Model));
+    const model::Function &ModelFunction = Model->Functions().at(Address);
+    const model::Architecture::Values A = Model->Architecture();
+    auto CommentIndicator = model::Architecture::getAssemblyCommentIndicator(A);
+    std::string R = ptml::functionComment(ThePTMLBuilder,
+                                          ModelFunction,
+                                          *Model,
+                                          CommentIndicator,
+                                          0,
+                                          80);
+    R += yield::ptml::functionAssembly(ThePTMLBuilder, **MaybeFunction, *Model);
+    R = ThePTMLBuilder.getTag(ptml::tags::Div, std::move(R)).serialize();
+    Output.insert_or_assign((*MaybeFunction)->Entry(), std::move(R));
   }
 }
 
 void YieldAssembly::print(const pipeline::Context &,
                           llvm::raw_ostream &OS,
                           llvm::ArrayRef<std::string> Files) const {
-  OS << *revng::ResourceFinder.findFile("bin/revng") << " magic ^_^\n";
-}
-
-std::array<pipeline::ContractGroup, 1> YieldAssembly::getContract() const {
-  return { pipeline::ContractGroup(kinds::FunctionAssemblyInternal,
-                                   pipeline::Exactness::Exact,
-                                   0,
-                                   kinds::FunctionAssemblyPTML,
-                                   1,
-                                   pipeline::InputPreservation::Preserve) };
+  OS << "[this is a pure pipe, no command exists for its invocation]\n";
 }
 
 } // end namespace revng::pipes
 
-static revng::pipes::RegisterFunctionStringMap
-  InternalContainer("FunctionAssemblyInternal",
-                    "application/x.yaml.function-assembly.internal",
-                    revng::kinds::FunctionAssemblyInternal);
-static revng::pipes::RegisterFunctionStringMap
-  PTMLContainer("FunctionAssemblyPTML",
-                "application/x.yaml.function-assembly.ptml-body",
-                revng::kinds::FunctionAssemblyPTML);
+using namespace revng::pipes;
+static RegisterFunctionStringMap<FunctionAssemblyStringMap> X1;
+static RegisterFunctionStringMap<FunctionAssemblyPTMLStringMap> X2;
 
 static pipeline::RegisterPipe<revng::pipes::ProcessAssembly> ProcessPipe;
 static pipeline::RegisterPipe<revng::pipes::YieldAssembly> YieldPipe;

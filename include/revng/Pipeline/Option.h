@@ -10,8 +10,11 @@
 
 #include "llvm/ADT/StringRef.h"
 
+#include "revng/ADT/Concepts.h"
+
 namespace pipeline {
 template<typename T>
+  requires(anyOf<T, int, uint64_t, const char *>())
 class Option {
 public:
   constexpr Option(const char *Name, T Default) :
@@ -27,11 +30,6 @@ concept HasOptions = requires(T) {
   { T::Options };
 };
 
-/// TODO: Remove after updating to clang-format with concept support.
-struct ClangFormatPleaseDoNotBreakMyCode;
-// clang-format off
-// clang-format on
-
 namespace detail {
 
 template<typename Invokable, size_t Index>
@@ -44,20 +42,49 @@ llvm::StringRef getOptionName() {
   return getOptionInfo<Invokable, Index>().Name;
 }
 
+template<typename T>
+llvm::StringRef typeNameImpl();
+
+template<>
+inline llvm::StringRef typeNameImpl<std::string>() {
+  return "string";
+}
+
+template<>
+inline llvm::StringRef typeNameImpl<int>() {
+  return "int";
+}
+
+template<>
+inline llvm::StringRef typeNameImpl<uint64_t>() {
+  return "uint64_t";
+}
+
 template<typename T, size_t Index>
 using ArgTypeImpl = std::decay_t<decltype(getOptionInfo<T, Index>())>;
 
 template<typename InvokableType, size_t Index>
-using OptionType = typename ArgTypeImpl<InvokableType, Index>::Type;
+using OptionTypeImpl = typename ArgTypeImpl<InvokableType, Index>::Type;
+
+template<typename InvokableType, size_t Index>
+constexpr bool
+  IsConstCharPtr = std::is_same_v<OptionTypeImpl<InvokableType, Index>,
+                                  const char *>;
+
+template<typename InvokableType, size_t Index>
+using OptionType = std::conditional_t<IsConstCharPtr<InvokableType, Index>,
+                                      std::string,
+                                      OptionTypeImpl<InvokableType, Index>>;
 
 template<typename Invokable, size_t Index>
 llvm::StringRef getTypeName() {
-  return typeNameImpl<ArgTypeImpl<Invokable, Index>>();
+  return typeNameImpl<OptionType<Invokable, Index>>();
 }
 
 template<typename InvokableType, size_t Index>
-const OptionType<InvokableType, Index> &getOptionDefault() {
+OptionType<InvokableType, Index> getOptionDefault() {
   return getOptionInfo<InvokableType, Index>().Default;
 }
+
 } // namespace detail
 } // namespace pipeline

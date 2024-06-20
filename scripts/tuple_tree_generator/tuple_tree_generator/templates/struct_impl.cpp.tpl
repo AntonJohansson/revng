@@ -6,7 +6,11 @@ The notice below applies to the generated files.
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
-#include "revng/Model/Binary.h"
+/** if root_type **/
+#include "/*= generator.user_include_path =*//*= root_type =*/.h"
+/** endif **/
+#include "revng/TupleTree/VisitsImpl.h"
+#include "revng/TupleTree/TupleTreeImpl.h"
 
 /**- for child_type in upcastable **/
 #include "/*= generator.user_include_path =*//*= child_type.name =*/.h"
@@ -24,7 +28,7 @@ Key KeyedObjectTraits<UpcastablePointer</*= struct | user_fullname =*/>>::key(
 
   return {
     /**- for key_field in struct.key_fields **/
-    Obj->/*= key_field.name =*//** if not loop.last **/, /** endif **/
+    Obj->/*= key_field.name =*/()/** if not loop.last **/, /** endif **/
     /**- endfor **/
   };
 }
@@ -82,19 +86,19 @@ bool /*= struct | fullname =*/::localCompare(const /*= struct | user_fullname =*
   /**- if field.__class__.__name__ == "SimpleStructField" **/
 
   /**- if schema.get_definition_for(field.type).__class__.__name__ == "StructDefinition" -**/
-  if (not this->/*= field.name =*/.localCompare(Other./*= field.name =*/))
+  if (not this->/*= field.name =*/().localCompare(Other./*= field.name =*/()))
     return false;
   /**- else -**/
-  if (this->/*= field.name =*/ != Other./*= field.name =*/)
+  if (this->/*= field.name =*/() != Other./*= field.name =*/())
     return false;
   /**- endif -**/
 
   /**- elif field.__class__.__name__ == "SequenceStructField" -**/
-  if (this->/*= field.name =*/.size() != Other./*= field.name =*/.size())
+  if (this->/*= field.name =*/().size() != Other./*= field.name =*/().size())
     return false;
 
   /**- if schema.get_definition_for(field.element_type).__class__.__name__ == "StructDefinition" -**/
-  for (const auto &[L, R] : llvm::zip(this->/*= field.name =*/, Other./*= field.name =*/)) {
+  for (const auto &[L, R] : llvm::zip(this->/*= field.name =*/(), Other./*= field.name =*/())) {
     /** if field.upcastable **/
     if (not L->localCompare(*R))
       return false;
@@ -105,7 +109,7 @@ bool /*= struct | fullname =*/::localCompare(const /*= struct | user_fullname =*
   }
 
   /**- else -**/
-  if (this->/*= field.name =*/ != Other./*= field.name =*/)
+  if (this->/*= field.name =*/() != Other./*= field.name =*/())
     return false;
   /**- endif -**/
 
@@ -117,3 +121,32 @@ bool /*= struct | fullname =*/::localCompare(const /*= struct | user_fullname =*
   /**- endif -**/
 }
 
+/** if struct.name == root_type **/
+
+template void
+TupleTree</*= base_namespace =*/::/*= root_type =*/>::visitImpl(typename TupleTreeVisitor</*= base_namespace =*/::/*= root_type =*/>::ConstVisitorBase &Pre,
+                                    typename TupleTreeVisitor</*= base_namespace =*/::/*= root_type =*/>::ConstVisitorBase &Post) const;
+
+template
+void TupleTree</*= base_namespace =*/::/*= root_type =*/>::visitImpl(typename TupleTreeVisitor</*= base_namespace =*/::/*= root_type =*/>::VisitorBase &Pre,
+                                         typename TupleTreeVisitor</*= base_namespace =*/::/*= root_type =*/>::VisitorBase &Post);
+
+template
+void llvm::yaml::yamlize(llvm::yaml::IO &io, /*= base_namespace =*/::/*= root_type =*/ &Val, bool, llvm::yaml::EmptyContext &Ctx);
+
+template
+void llvm::yaml::yamlize(llvm::yaml::IO &io, TupleTreeDiff</*= base_namespace =*/::/*= root_type =*/> &Val, bool, llvm::yaml::EmptyContext &Ctx);
+
+template
+TupleTreeDiff</*= base_namespace =*/::/*= root_type =*/> diff(const /*= base_namespace =*/::/*= root_type =*/ &LHS, const /*= base_namespace =*/::/*= root_type =*/ &RHS);
+
+template
+std::optional<TupleTreePath> stringAsPath</*= base_namespace =*/::/*= root_type =*/>(llvm::StringRef Path);
+
+/** endif **/
+
+/**- for field in struct.fields **/
+/**- if struct | is_struct_field **/
+static_assert(not (TupleTreeCompatible</*= field | field_type =*/> and KeyedObjectContainerCompatible</*= field | field_type =*/>));
+/**- endif **/
+/**- endfor **/

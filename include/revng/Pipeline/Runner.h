@@ -13,11 +13,14 @@
 #include "llvm/Support/Error.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include "revng/Pipeline/AnalysesList.h"
 #include "revng/Pipeline/ContainerFactorySet.h"
+#include "revng/Pipeline/Description/PipelineDescription.h"
 #include "revng/Pipeline/GlobalTupleTreeDiff.h"
 #include "revng/Pipeline/KindsRegistry.h"
 #include "revng/Pipeline/Step.h"
 #include "revng/Pipeline/Target.h"
+#include "revng/Storage/Path.h"
 #include "revng/Support/Debug.h"
 
 namespace pipeline {
@@ -38,6 +41,7 @@ private:
 
   Map Steps;
   Vector ReversePostOrderIndexes;
+  llvm::StringMap<AnalysesList> AnalysesLists;
 
 public:
   template<typename T>
@@ -45,6 +49,8 @@ public:
   using iterator = DereferenceIteratorType<Vector::iterator>;
   using const_iterator = DereferenceIteratorType<Vector::const_iterator>;
 
+  /// Map from a step name, to container, to a list of targets
+  // TODO: rename
   using State = llvm::StringMap<ContainerToTargetsMap>;
 
 public:
@@ -66,9 +72,10 @@ public:
 
   const KindsRegistry &getKindsRegistry() const;
 
-  llvm::Error apply(const GlobalTupleTreeDiff &Diff);
+  llvm::Error apply(const GlobalTupleTreeDiff &Diff,
+                    pipeline::TargetInStepSet &Map);
   void getDiffInvalidations(const GlobalTupleTreeDiff &Diff,
-                            InvalidationMap &Out) const;
+                            pipeline::TargetInStepSet &Out) const;
 
 public:
   Step &operator[](llvm::StringRef Name) { return getStep(Name); }
@@ -94,28 +101,55 @@ public:
   }
 
 public:
+  bool hasAnalysesList(llvm::StringRef Name) const {
+    return AnalysesLists.find(Name) != AnalysesLists.end();
+  }
+
+  size_t getAnalysesListCount() const { return AnalysesLists.size(); }
+  const AnalysesList &getAnalysesList(size_t Index) const {
+    return std::next(AnalysesLists.begin(), Index)->second;
+  }
+
+  const AnalysesList &getAnalysesList(llvm::StringRef Name) const {
+    return AnalysesLists.find(Name)->second;
+  }
+
+  void addAnalysesList(llvm::StringRef Name,
+                       llvm::ArrayRef<AnalysisReference> Analyses) {
+    revng_assert(not hasAnalysesList(Name));
+    AnalysesLists.try_emplace(Name, pipeline::AnalysesList(Name, Analyses));
+  }
+
+  pipeline::description::PipelineDescription description() const;
+
+public:
   /// Given a target, all occurrences of that target from every container in
   /// every step will be registered in the returned invalidation map. The
   /// propagations will not be calculated.
-  llvm::Error
-  getInvalidations(const Target &Target, InvalidationMap &Invalidations) const;
+  llvm::Error getInvalidations(const Target &Target,
+                               pipeline::TargetInStepSet &Invalidations) const;
 
   /// Deduces and register in the invalidation map all the targets that have
   /// been produced starting from targets already presents in the map.
-  llvm::Error getInvalidations(InvalidationMap &Invalidated) const;
+  llvm::Error getInvalidations(pipeline::TargetInStepSet &Invalidated) const;
 
 public:
   template<typename... PipeWrappers>
   Step &emplaceStep(llvm::StringRef PreviousStepName,
                     llvm::StringRef StepName,
+                    llvm::StringRef Component,
                     PipeWrappers &&...Wrappers) {
     IsContainerFactoriesRegistryFinalized = true;
     if (PreviousStepName.empty())
-      return addStep(Step(StepName.str(),
+      return addStep(Step(*TheContext,
+                          StepName.str(),
+                          Component.str(),
                           ContainerFactoriesRegistry.createEmpty(),
                           std::forward<PipeWrappers>(Wrappers)...));
     else
-      return addStep(Step(StepName.str(),
+      return addStep(Step(*TheContext,
+                          StepName.str(),
+                          Component.str(),
                           ContainerFactoriesRegistry.createEmpty(),
                           operator[](PreviousStepName),
                           std::forward<PipeWrappers>(Wrappers)...));
@@ -123,26 +157,31 @@ public:
 
   Step &addStep(Step &&NewStep);
 
-  llvm::Error
-  run(llvm::StringRef EndingStepName, const ContainerToTargetsMap &Targets);
+  llvm::Error run(llvm::StringRef EndingStepName,
+                  const ContainerToTargetsMap &Targets);
 
-  llvm::Error run(const State &ToProduce) {
-    for (const auto &Request : ToProduce)
-      if (auto Error = run(Request.first(), Request.second))
-        return Error;
+  llvm::Error run(const State &ToProduce);
 
-    return llvm::Error::success();
+  AnalysisWrapper *findAnalysis(llvm::StringRef AnalysisName) {
+    for (auto &Step : Steps) {
+      if (Step.second.hasAnalysis(AnalysisName))
+        return &Step.second.getAnalysis(AnalysisName);
+    }
+
+    return nullptr;
   }
 
   llvm::Expected<DiffMap>
   runAnalysis(llvm::StringRef AnalysisName,
               llvm::StringRef StepName,
               const ContainerToTargetsMap &Targets,
+              pipeline::TargetInStepSet &InvalidationsMap,
               const llvm::StringMap<std::string> &Options = {});
 
-  /// Run all analysis in reverse post order (that is: parents first),
   llvm::Expected<DiffMap>
-  runAllAnalyses(const llvm::StringMap<std::string> &Options = {});
+  runAnalyses(const AnalysesList &List,
+              pipeline::TargetInStepSet &InvalidationsMap,
+              const llvm::StringMap<std::string> &Options = {});
 
   void addContainerFactory(llvm::StringRef Name, ContainerFactory Entry) {
     ContainerFactoriesRegistry.registerContainerFactory(Name, std::move(Entry));
@@ -166,16 +205,16 @@ public:
   /// Remove the provided target from all containers in all the steps, as well
   /// as all all their transitive dependencies
   llvm::Error invalidate(const Target &Target);
-  llvm::Error invalidate(const InvalidationMap &Invalidations);
+  llvm::Error invalidate(const pipeline::TargetInStepSet &Invalidations);
 
 public:
-  llvm::Error storeToDisk(llvm::StringRef DirPath) const;
-  llvm::Error storeToDiskDebug(const char *DirPath) const debug_function {
-    return storeToDisk(DirPath);
+  llvm::Error store(const revng::DirectoryPath &DirPath) const;
+  llvm::Error dump(const char *DirPath) const debug_function {
+    return store(revng::DirectoryPath::fromLocalStorage(DirPath));
   }
-  llvm::Error
-  storeStepToDisk(llvm::StringRef StepName, llvm::StringRef DirPath) const;
-  llvm::Error loadFromDisk(llvm::StringRef DirPath);
+  llvm::Error storeStepToDisk(llvm::StringRef StepName,
+                              const revng::DirectoryPath &DirPath) const;
+  llvm::Error load(const revng::DirectoryPath &DirPath);
 
 public:
   void deduceAllPossibleTargets(State &State) const;
@@ -236,20 +275,20 @@ class PipelineFileMapping {
 private:
   std::string Step;
   std::string Container;
-  std::string InputFile;
+  revng::FilePath Path;
 
 public:
   PipelineFileMapping(llvm::StringRef Step,
                       llvm::StringRef Container,
-                      llvm::StringRef InputFile) :
-    Step(Step.str()), Container(Container.str()), InputFile(InputFile.str()) {}
+                      revng::FilePath &&Path) :
+    Step(Step.str()), Container(Container.str()), Path(std::move(Path)) {}
 
 public:
   static llvm::Expected<PipelineFileMapping> parse(llvm::StringRef ToParse);
 
 public:
-  llvm::Error loadFromDisk(Runner &LoadInto) const;
-  llvm::Error storeToDisk(const Runner &LoadInto) const;
+  llvm::Error load(Runner &LoadInto) const;
+  llvm::Error store(Runner &LoadInto) const;
 };
 
 } // namespace pipeline

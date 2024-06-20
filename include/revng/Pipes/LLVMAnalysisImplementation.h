@@ -6,6 +6,7 @@
 
 #include "llvm/IR/LegacyPassManager.h"
 
+#include "revng/EarlyFunctionAnalysis/FunctionMetadataCache.h"
 #include "revng/Model/LoadModelPass.h"
 #include "revng/Pipeline/Context.h"
 #include "revng/Pipeline/LLVMContainer.h"
@@ -17,9 +18,10 @@ namespace revng::pipes {
 template<typename... Passes>
 class LLVMAnalysisImplementation {
 public:
-  void run(const pipeline::Context &Ctx, pipeline::LLVMContainer &Container) {
+  void run(const pipeline::ExecutionContext &Ctx,
+           pipeline::LLVMContainer &Container) {
     llvm::legacy::PassManager Manager;
-    registerPasses(Ctx, Manager);
+    registerPasses(Ctx.getContext(), Manager);
     Manager.run(Container.getModule());
   }
 
@@ -44,6 +46,7 @@ public:
                       llvm::legacy::PassManager &Manager) const {
     auto Global = llvm::cantFail(Ctx.getGlobal<ModelGlobal>(ModelGlobalName));
     Manager.add(new LoadModelWrapperPass(ModelWrapper(Global->get())));
+    Manager.add(new FunctionMetadataCachePass());
     (Manager.add(new Passes()), ...);
   };
 };

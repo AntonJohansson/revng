@@ -4,6 +4,8 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include <concepts>
+
 #include "revng/ADT/ConstexprString.h"
 #include "revng/ADT/STLExtras.h"
 #include "revng/Support/DynamicHierarchy.h"
@@ -39,7 +41,7 @@ public:
 /// A helper function used for defining a root rank.
 ///
 /// Root rank doesn't have corresponding storage location and is only
-/// used to defining a single logical starting poing in the rank hierarhy.
+/// used to defining a single logical starting point in the rank hierarhy.
 template<ConstexprString Name>
 pipeline::RootRank<Name> defineRootRank() {
   return pipeline::RootRank<Name>();
@@ -49,18 +51,13 @@ template<typename RankType>
 concept RankSpecialization = requires(RankType &&Rank) {
   RankType::RankTag;
 
-  { RankType::RankName } -> convertible_to<std::string_view>;
-  { RankType::Depth } -> convertible_to<std::size_t>;
+  { RankType::RankName } -> std::convertible_to<std::string_view>;
+  { RankType::Depth } -> std::convertible_to<std::size_t>;
 
   typename RankType::Type;
   typename RankType::Parent;
   typename RankType::Tuple;
 };
-
-/// TODO: Remove after updating to clang-format with concept support.
-struct ClangFormatPleaseDoNotBreakMyCode;
-// clang-format off
-// clang-format on
 
 namespace detail {
 
@@ -113,19 +110,41 @@ pipeline::TypedRank<Name, Type, Parent> defineRank(Parent &ParentObject) {
 
 namespace detail {
 
-/// A helper struct that incapsulates rechability logic for connected ranks.
+/// A helper variable that compares the depth of a rank against an expected
+/// depth while also correctly handling the corner case of the rank being a root
+/// of the rank tree.
+template<typename RankOrVoid, std::size_t ExpectedDepth>
+inline constexpr bool DepthCheck = false;
+
+template<RankSpecialization Rank, std::size_t Expected>
+constexpr bool DepthCheck<Rank, Expected> = Rank::Depth + 1 == Expected;
+
+template<std::size_t ExpectedDepth>
+inline constexpr bool DepthCheck<void, ExpectedDepth> = (ExpectedDepth == 0);
+
+/// A helper struct that incapsulates reachability logic for connected ranks.
 /// the `value` member is set to `true` if and only if the `To` rank can be
 /// reached from `From` rank by concecutive `From = From::Parent` operations.
 template<typename From, typename To>
-struct RechabilityHelper {
+struct ReachabilityHelper {
 private:
-  static constexpr bool Found = std::is_same_v<From, To>;
+  /// Make sure both parameters are in fact ranks.
   static_assert(RankSpecialization<From> && RankSpecialization<To>);
+
+  /// Mark locations as reachable, if they are the same.
+  static constexpr bool Found = std::is_same_v<From, To>;
+
+  /// Make sure the `From` rank tree is not broken (no ranks are skipped).
   static constexpr std::size_t Depth = From::Depth;
-  static_assert(Depth == From::Parent::Depth + 1);
-  using Next = std::conditional_t<(Depth <= To::Depth || Depth == 0),
-                                  std::false_type,
-                                  RechabilityHelper<typename From::Parent, To>>;
+  static_assert(DepthCheck<typename From::Parent, Depth>);
+
+  /// Decide whether the next comparison should be performed.
+  /// It's not needed if we already passed the desired depth and/or if we
+  /// reached depth 0 (the root) as depth can never increase in a valid tree.
+  using Next = std::conditional_t<
+    (Depth <= To::Depth || Depth == 0),
+    std::false_type,
+    ReachabilityHelper<typename From::Parent, To>>;
 
 public:
   static constexpr bool value = Found || Next::value;
@@ -133,14 +152,11 @@ public:
 
 } // namespace detail
 
-// clang-format off
 /// A helper concept used for checking whether two ranks have common "roots"
 /// Is evaluated to `true` if and only if the \tparam To rank can be reached
 /// from the \tparam From rank by going up the tree.
 template<typename To, typename From>
-concept RankConvertibleTo = RankSpecialization<From>
-                            && RankSpecialization<To>
-                            && detail::RechabilityHelper<From, To>::value;
-// clang-format on
+concept RankConvertibleTo = RankSpecialization<From> && RankSpecialization<To>
+                            && detail::ReachabilityHelper<From, To>::value;
 
 } // namespace pipeline

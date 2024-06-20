@@ -1,6 +1,6 @@
 /// \file externaljumpsHandler.cpp
-/// \brief Inject code to support jumping in non-translated code and handling
-///        the comeback.
+/// Inject code to support jumping in non-translated code and handling the
+/// comeback.
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
@@ -44,21 +44,26 @@ BasicBlock *ExternalJumpsHandler::createReturnFromExternal() {
   IRBuilder<> Builder(ReturnFromExternal);
 
   // Identify the global variables to be serialized
-  Constant *SavedRegistersPtr = TheModule.getGlobalVariable("saved_registers");
-  LoadInst *SavedRegisters = Builder.CreateLoad(SavedRegistersPtr);
+  GlobalVariable *SavedRegistersPtr = TheModule.getGlobalVariable("saved_"
+                                                                  "registers");
+  Instruction *SavedRegisters = createLoad(Builder, SavedRegistersPtr);
 
   // TODO: if we do not support this architecture, here things will be
   // completely broken
   using namespace model::Architecture;
   using namespace model::Register;
-  unsigned PCMContextIndex = getPCMContextIndex(Model.Architecture).value_or(0);
-  Value *GEP = Builder.CreateGEP(SavedRegisters,
+  auto Architecture = Model.Architecture();
+  unsigned PCMContextIndex = getPCMContextIndex(Architecture).value_or(0);
+  auto *RegisterType = IntegerType::get(Context,
+                                        8 * getPointerSize(Architecture));
+  Value *GEP = Builder.CreateGEP(RegisterType,
+                                 SavedRegisters,
                                  Builder.getInt32(PCMContextIndex));
-  LoadInst *PCAddress = Builder.CreateLoad(GEP);
+  Instruction *PCAddress = Builder.CreateLoad(RegisterType, GEP);
   PCH->deserializePCFromSignalContext(Builder, PCAddress, SavedRegisters);
 
   // Deserialize the ABI registers
-  for (auto Register : registers(Model.Architecture)) {
+  for (auto Register : registers(Model.Architecture())) {
     auto Name = getCSVName(Register);
     GlobalVariable *CSV = TheModule.getGlobalVariable(Name);
 
@@ -69,13 +74,15 @@ BasicBlock *ExternalJumpsHandler::createReturnFromExternal() {
       if (MaybeMContextIndex) {
 
         Constant *RegisterIndex = Builder.getInt32(*MaybeMContextIndex);
-        Value *GEP = Builder.CreateGEP(SavedRegisters, RegisterIndex);
-        LoadInst *RegisterValue = Builder.CreateLoad(GEP);
+        Value *GEP = Builder.CreateGEP(RegisterType,
+                                       SavedRegisters,
+                                       RegisterIndex);
+        LoadInst *RegisterValue = Builder.CreateLoad(RegisterType, GEP);
         Builder.CreateStore(RegisterValue, CSV);
 
       } else {
 
-        auto AsmString = getReadRegisterAssembly(Model.Architecture).str();
+        auto AsmString = getReadRegisterAssembly(Model.Architecture()).str();
         replace(AsmString, "REGISTER", getRegisterName(Register).str());
         std::stringstream ConstraintStringStream;
         ConstraintStringStream << "*m,~{},~{dirflag},~{fpsr},~{flags}";
@@ -87,7 +94,11 @@ BasicBlock *ExternalJumpsHandler::createReturnFromExternal() {
                                         ConstraintStringStream.str(),
                                         true,
                                         InlineAsm::AsmDialect::AD_ATT);
-        Builder.CreateCall(Asm, CSV);
+        CallInst *AsmCall = Builder.CreateCall(Asm, CSV);
+        AsmCall->addParamAttr(0,
+                              Attribute::get(Context,
+                                             Attribute::ElementType,
+                                             CSV->getValueType()));
       }
     }
   }
@@ -127,7 +138,7 @@ BasicBlock *ExternalJumpsHandler::createSerializeAndJumpOut() {
   Builder.CreateStore(PC, JumpablePC);
 
   // Serialize ABI CSVs
-  for (model::Register::Values Register : registers(Model.Architecture)) {
+  for (model::Register::Values Register : registers(Model.Architecture())) {
     using namespace model::Architecture;
     using namespace model::Register;
     GlobalVariable *CSV = TheModule.getGlobalVariable(getCSVName(Register));
@@ -136,7 +147,8 @@ BasicBlock *ExternalJumpsHandler::createSerializeAndJumpOut() {
     if (CSV == nullptr)
       continue;
 
-    std::string AsmString = getWriteRegisterAssembly(Model.Architecture).str();
+    std::string AsmString = getWriteRegisterAssembly(Model.Architecture())
+                              .str();
     StringRef RegisterName = getRegisterName(Register);
     replace(AsmString, "REGISTER", RegisterName);
     std::stringstream ConstraintStringStream;
@@ -151,7 +163,11 @@ BasicBlock *ExternalJumpsHandler::createSerializeAndJumpOut() {
                                     ConstraintStringStream.str(),
                                     true,
                                     InlineAsm::AsmDialect::AD_ATT);
-    Builder.CreateCall(Asm, CSV);
+    CallInst *AsmCall = Builder.CreateCall(Asm, CSV);
+    AsmCall->addParamAttr(0,
+                          Attribute::get(Context,
+                                         Attribute::ElementType,
+                                         CSV->getValueType()));
   }
 
   // Branch to the Program Counter address
@@ -159,11 +175,15 @@ BasicBlock *ExternalJumpsHandler::createSerializeAndJumpOut() {
                                { JumpablePC->getType() },
                                false);
   InlineAsm *Asm = InlineAsm::get(FT,
-                                  getJumpAssembly(Model.Architecture),
+                                  getJumpAssembly(Model.Architecture()),
                                   "*m,~{dirflag},~{fpsr},~{flags}",
                                   true,
                                   InlineAsm::AsmDialect::AD_ATT);
-  Builder.CreateCall(Asm, JumpablePC);
+  CallInst *AsmCall = Builder.CreateCall(Asm, JumpablePC);
+  AsmCall->addParamAttr(0,
+                        Attribute::get(Context,
+                                       Attribute::ElementType,
+                                       JumpablePC->getValueType()));
 
   Instruction *T = Builder.CreateUnreachable();
   setBlockType(T, BlockType::ExternalJumpsHandlerBlock);
@@ -181,7 +201,7 @@ llvm::BasicBlock *ExternalJumpsHandler::createSetjmp(BasicBlock *FirstReturn,
 
   // Call setjmp
   llvm::Function *SetjmpFunction = TheModule.getFunction("setjmp");
-  auto *SetJmpTy = SetjmpFunction->getType()->getPointerElementType();
+  auto *SetJmpTy = SetjmpFunction->getValueType();
   auto *JmpBuf = CE::getPointerCast(TheModule.getGlobalVariable("jmp_buffer"),
                                     SetJmpTy->getFunctionParamType(0));
   Value *SetjmpRes = Builder.CreateCall(SetjmpFunction, { JmpBuf });
@@ -201,9 +221,9 @@ void ExternalJumpsHandler::buildExecutableSegmentsList() {
   IntegerType *Int64 = Builder.getInt64Ty();
   SmallVector<Constant *, 10> ExecutableSegments;
   auto Int = [Int64](uint64_t V) { return ConstantInt::get(Int64, V); };
-  for (auto &Segment : Model.Segments) {
-    if (Segment.IsExecutable) {
-      ExecutableSegments.push_back(Int(Segment.StartAddress.address()));
+  for (auto &Segment : Model.Segments()) {
+    if (Segment.IsExecutable()) {
+      ExecutableSegments.push_back(Int(Segment.StartAddress().address()));
       ExecutableSegments.push_back(Int(Segment.endAddress().address()));
     }
   }
@@ -216,7 +236,8 @@ void ExternalJumpsHandler::buildExecutableSegmentsList() {
                                                SegmentsArray->getType(),
                                                true,
                                                GlobalValue::InternalLinkage,
-                                               SegmentsArray);
+                                               SegmentsArray,
+                                               "segment_boundaries_data");
 
   // Create a pointer to the array (segment_boundaries) for support.c
   // consumption
@@ -238,9 +259,9 @@ void ExternalJumpsHandler::buildExecutableSegmentsList() {
 }
 
 void ExternalJumpsHandler::createExternalJumpsHandler() {
-  auto JumpAssembly = model::Architecture::getJumpAssembly(Model.Architecture);
+  auto Assembly = model::Architecture::getJumpAssembly(Model.Architecture());
 
-  if (JumpAssembly.size() == 0) {
+  if (Assembly.size() == 0) {
     buildExecutableSegmentsList();
     return;
   }
@@ -254,7 +275,7 @@ void ExternalJumpsHandler::createExternalJumpsHandler() {
   BasicBlock *DispatcherFail = Switch->getDefaultDest();
 
   // Replace the default case of the dispatcher with the external jump handler.
-  // In practice, perfrom a blind jump, unless the target is within the
+  // In practice, it performs a blind jump, unless the target is within the
   // executable segment of the current module.
   BasicBlock *ExternalJumpHandler = BasicBlock::Create(Context,
                                                        "dispatcher.external",

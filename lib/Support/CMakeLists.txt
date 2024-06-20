@@ -7,23 +7,36 @@ revng_add_library_internal(
   SHARED
   ProgramRunner.cpp
   Assert.cpp
+  BasicBlockID.cpp
   CommandLine.cpp
   Debug.cpp
   IRAnnotators.cpp
   ExampleAnalysis.cpp
   FunctionTags.cpp
   IRHelpers.cpp
+  LDDTree.cpp
   MetaAddress.cpp
+  ModuleStatistics.cpp
+  OnQuit.cpp
   OriginalAssemblyAnnotationWriter.cpp
   PathList.cpp
+  Progress.cpp
   ProgramCounterHandler.cpp
   ResourceFinder.cpp
   SelfReferencingDbgAnnotationWriter.cpp
-  Statistics.cpp)
+  Statistics.cpp
+  GzipTarFile.cpp
+  GzipStream.cpp)
 
-llvm_map_components_to_libnames(LLVM_LIBRARIES Support Core)
+llvm_map_components_to_libnames(LLVM_LIBRARIES Support Core Object)
 
-target_link_libraries(revngSupport ${LLVM_LIBRARIES})
+include(FindLibArchive)
+
+if(NOT LibArchive_FOUND)
+  message(FATAL_ERROR "libarchive not found")
+endif()
+
+target_link_libraries(revngSupport z ${LibArchive_LIBRARIES} ${LLVM_LIBRARIES})
 
 target_include_directories(revngSupport INTERFACE $<INSTALL_INTERFACE:include/>)
 

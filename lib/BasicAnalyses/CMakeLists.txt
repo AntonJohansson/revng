@@ -7,8 +7,10 @@ revng_add_analyses_library_internal(
   EmptyNewPC.cpp
   RemoveDbgMetadata.cpp
   GeneratedCodeBasicInfo.cpp
+  MaterializedValue.cpp
   RemoveNewPCCalls.cpp
   RemoveHelperCalls.cpp
-  CSVAliasAnalysis.cpp)
+  ShrinkInstructionOperandsPass.cpp)
 
-target_link_libraries(revngBasicAnalyses revngModel revngSupport)
+target_link_libraries(revngBasicAnalyses revngModel revngSupport
+                      ${LLVM_LIBRARIES})

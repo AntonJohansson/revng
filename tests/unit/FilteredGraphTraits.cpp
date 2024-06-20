@@ -1,5 +1,5 @@
 /// \file FilteredGraphTraits.cpp
-/// \brief Tests for the FilteredGraphTraits template
+/// Tests for the FilteredGraphTraits template.
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
@@ -121,10 +121,9 @@ end:
 
   LLVMContext C;
   std::unique_ptr<llvm::Module> M = loadModule(C, Body.data());
-  revng_check(not verifyModule(*M, &dbgs()));
 
   Function *F = M->getFunction("main");
-  BasicBlock *BackBB = &F->getBasicBlockList().back();
+  BasicBlock *BackBB = &F->back();
 
   // #### Depth first visits ####
 

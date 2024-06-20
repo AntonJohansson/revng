@@ -14,6 +14,7 @@
 #include "llvm/Support/YAMLTraits.h"
 
 #include "revng/Pipeline/Analysis.h"
+#include "revng/Pipeline/ContainerFactory.h"
 #include "revng/Pipeline/GenericLLVMPipe.h"
 #include "revng/Pipeline/LLVMContainer.h"
 #include "revng/Pipeline/Runner.h"
@@ -70,10 +71,17 @@ struct BranchDeclaration {
   std::vector<StepDeclaration> Steps;
 };
 
+struct AnalysesListDeclaration {
+  std::string Name;
+  std::vector<std::string> UsedAnalysesNames;
+};
+
 struct PipelineDeclaration {
+  std::string Component;
   std::vector<ContainerDeclaration> Containers;
   std::vector<BranchDeclaration> Branches;
   std::vector<AnalysisDeclaration> Analyses = {};
+  std::vector<AnalysesListDeclaration> AnalysesLists = {};
 };
 
 class PipelineContext;
@@ -90,10 +98,8 @@ public:
 
 private:
   llvm::StringMap<ContainerFactory> KnownContainerTypes;
-  llvm::StringMap<std::function<PipeWrapper(std::vector<std::string>)>>
-    KnownPipesTypes;
-  llvm::StringMap<std::function<AnalysisWrapper(std::vector<std::string>)>>
-    KnownAnalysisTypes;
+  llvm::StringMap<PipeWrapper> KnownPipesTypes;
+  llvm::StringMap<AnalysisWrapper> KnownAnalysisTypes;
   llvm::StringMap<std::function<std::unique_ptr<LLVMPassWrapperBase>()>>
     KnownLLVMPipeTypes;
 
@@ -120,9 +126,8 @@ public:
   void addDefaultConstructibleContainer(llvm::StringRef Name) {
     auto [_,
           inserted] = KnownContainerTypes
-                        .try_emplace(Name, [](llvm::StringRef ContainerName) {
-                          return std::make_unique<ContainerType>(ContainerName);
-                        });
+                        .try_emplace(Name,
+                                     ContainerFactory::create<ContainerType>());
     revng_assert(inserted);
   }
 
@@ -145,40 +150,17 @@ public:
   }
 
   template<typename AnalysisType>
-  void registerAnalysis(llvm::StringRef Name) {
-    const auto LambdaToEmplace = [](std::vector<std::string> CName) {
-      return AnalysisWrapper::make<AnalysisType>(std::move(CName));
-    };
-    auto [_, inserted] = KnownAnalysisTypes.try_emplace(Name, LambdaToEmplace);
-    revng_assert(inserted);
-  }
-
-  template<typename AnalysisType>
   void registerAnalysis(llvm::StringRef Name, const AnalysisType &Analysis) {
-    const auto LambdaToEmplace =
-      [Analysis](std::vector<std::string> ContainerNames) {
-        return AnalysisWrapper::make(Analysis, std::move(ContainerNames));
-      };
-    auto [_, inserted] = KnownAnalysisTypes.try_emplace(Name, LambdaToEmplace);
+    auto [_, inserted] = KnownAnalysisTypes
+                           .try_emplace(Name,
+                                        AnalysisWrapper::make(Analysis, {}));
     revng_assert(inserted);
   }
 
   template<typename PipeType>
   void registerPipe(llvm::StringRef Name) {
-    const auto LambdaToEmplace = [](std::vector<std::string> CName) {
-      return PipeWrapper::make<PipeType>(std::move(CName));
-    };
-    auto [_, inserted] = KnownPipesTypes.try_emplace(Name, LambdaToEmplace);
-    revng_assert(inserted);
-  }
-
-  template<typename PipeType>
-  void registerPipe(llvm::StringRef Name, const PipeType &Pipe) {
-    const auto LambdaToEmplace =
-      [Pipe](std::vector<std::string> ContainerNames) {
-        return PipeWrapper::make(Pipe, std::move(ContainerNames));
-      };
-    auto [_, inserted] = KnownPipesTypes.try_emplace(Name, LambdaToEmplace);
+    auto [_, inserted] = KnownPipesTypes
+                           .try_emplace(Name, PipeWrapper::make<PipeType>({}));
     revng_assert(inserted);
   }
 
@@ -191,30 +173,42 @@ public:
     OnLLVMContainerCreationAction = std::move(CallBack);
   }
 
+public:
+  const llvm::StringMap<PipeWrapper> &getRegisteredPipes() {
+    return KnownPipesTypes;
+  }
+
+  const llvm::StringMap<AnalysisWrapper> &getRegisteredAnalyses() {
+    return KnownAnalysisTypes;
+  }
+
 private:
   llvm::Error parseSteps(Runner &Runner,
                          const BranchDeclaration &Declaration,
-                         const std::vector<std::string> &ReadOnlyNames) const;
-  llvm::Error parseDeclarations(Runner &Runner,
-                                const PipelineDeclaration &Declaration,
-                                std::vector<std::string> &ReadOnlyNames) const;
+                         const llvm::StringMap<std::string> &ReadOnlyNames,
+                         const llvm::StringRef Component) const;
+  llvm::Error
+  parseDeclarations(Runner &Runner,
+                    const PipelineDeclaration &Declaration,
+                    llvm::StringMap<std::string> &ReadOnlyNames) const;
 
   llvm::Error
   parseStepDeclaration(Runner &Runner,
                        const StepDeclaration &,
                        std::string &LastAddedStep,
-                       const std::vector<std::string> &ReadOnlyNames) const;
+                       const llvm::StringMap<std::string> &ReadOnlyNames,
+                       const llvm::StringRef Component) const;
 
   llvm::Expected<PipeWrapper>
   parseInvocation(Step &Step,
                   const PipeInvocation &Invocation,
-                  const std::vector<std::string> &ReadOnlyNames) const;
+                  const llvm::StringMap<std::string> &ReadOnlyNames) const;
   llvm::Expected<AnalysisWrapper>
   parseAnalysis(const AnalysisDeclaration &Declaration) const;
   llvm::Error
   parseContainerDeclaration(Runner &Runner,
                             const ContainerDeclaration &,
-                            std::vector<std::string> &ReadOnlyNames) const;
+                            llvm::StringMap<std::string> &ReadOnlyNames) const;
 
   llvm::Expected<PipeWrapper>
   parseLLVMPass(const PipeInvocation &Invocation) const;
@@ -233,6 +227,15 @@ struct llvm::yaml::MappingTraits<pipeline::ContainerDeclaration> {
     TheIO.mapRequired("Name", Info.Name);
     TheIO.mapRequired("Type", Info.Type);
     TheIO.mapOptional("Role", Info.Role);
+  }
+};
+
+INTROSPECTION_NS(pipeline, AnalysesListDeclaration, Name, UsedAnalysesNames);
+template<>
+struct llvm::yaml::MappingTraits<pipeline::AnalysesListDeclaration> {
+  static void mapping(IO &TheIO, pipeline::AnalysesListDeclaration &Info) {
+    TheIO.mapRequired("Name", Info.Name);
+    TheIO.mapOptional("Analyses", Info.UsedAnalysesNames);
   }
 };
 
@@ -265,13 +268,16 @@ struct llvm::yaml::MappingTraits<pipeline::StepDeclaration> {
 LLVM_YAML_IS_SEQUENCE_VECTOR(pipeline::StepDeclaration)
 LLVM_YAML_IS_SEQUENCE_VECTOR(pipeline::AnalysisDeclaration)
 LLVM_YAML_IS_SEQUENCE_VECTOR(pipeline::BranchDeclaration)
+LLVM_YAML_IS_SEQUENCE_VECTOR(pipeline::AnalysesListDeclaration)
 
 template<>
 struct llvm::yaml::MappingTraits<pipeline::PipelineDeclaration> {
   static void mapping(IO &TheIO, pipeline::PipelineDeclaration &Info) {
+    TheIO.mapRequired("Component", Info.Component);
     TheIO.mapOptional("Containers", Info.Containers);
-    TheIO.mapRequired("Branches", Info.Branches);
+    TheIO.mapOptional("Branches", Info.Branches);
     TheIO.mapOptional("Analyses", Info.Analyses);
+    TheIO.mapOptional("AnalysesLists", Info.AnalysesLists);
   }
 };
 

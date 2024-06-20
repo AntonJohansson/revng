@@ -5,13 +5,15 @@
 //
 
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Module.h"
 #include "llvm/IRReader/IRReader.h"
 #include "llvm/Support/Casting.h"
+#include "llvm/Support/Debug.h"
 #include "llvm/Support/SourceMgr.h"
 
 #include "revng/Support/Assert.h"
 
-static const char *ModuleBegin = R"LLVM(
+inline const char *ModuleBegin = R"LLVM(
 target datalayout = "e-m:e-i64:64-f80:128-n8:16:32:64-S128"
 target triple = "x86_64-pc-linux-gnu"
 
@@ -24,11 +26,13 @@ target triple = "x86_64-pc-linux-gnu"
 
 declare i64 @llvm.bswap.i64(i64)
 
+declare i64 @opaque(i64)
+
 define void @main() {
 initial_block:
 )LLVM";
 
-static const char *ModuleEnd = R"LLVM(
+inline const char *ModuleEnd = R"LLVM(
 }
 
 )LLVM";
@@ -41,8 +45,8 @@ inline std::string buildModule(const char *Body) {
   return Result;
 }
 
-inline llvm::Instruction *
-instructionByName(llvm::Function *F, const char *Name) {
+inline llvm::Instruction *instructionByName(llvm::Function *F,
+                                            const char *Name) {
   using namespace llvm;
 
   if (StringRef(Name).startswith("s:")) {
@@ -73,8 +77,8 @@ inline llvm::BasicBlock *basicBlockByName(llvm::Function *F, const char *Name) {
   revng_abort("Couldn't find a Value with the requested name");
 }
 
-inline std::unique_ptr<llvm::Module>
-loadModule(llvm::LLVMContext &C, const char *Body) {
+inline std::unique_ptr<llvm::Module> loadModule(llvm::LLVMContext &C,
+                                                const char *Body) {
   using namespace llvm;
 
   std::string ModuleText = buildModule(Body);
@@ -84,6 +88,7 @@ loadModule(llvm::LLVMContext &C, const char *Body) {
   std::unique_ptr<Module> M = parseIR(Buffer.get()->getMemBufferRef(),
                                       Diagnostic,
                                       C);
+  revng::forceVerify(M.get());
 
   if (M.get() == nullptr) {
     Diagnostic.print("revng", dbgs());

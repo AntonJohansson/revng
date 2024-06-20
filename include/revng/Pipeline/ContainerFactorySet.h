@@ -11,6 +11,7 @@
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
 
+#include "revng/Pipeline/ContainerFactory.h"
 #include "revng/Pipeline/ContainerSet.h"
 
 namespace pipeline {
@@ -33,6 +34,18 @@ public:
   const_iterator end() const { return Entries.end(); }
   size_t size() const { return Entries.size(); }
 
+  value_type &at(llvm::StringRef Name) {
+    auto Search = Entries.find(Name);
+    revng_assert(Search != Entries.end());
+    return *Search;
+  }
+
+  const value_type &at(llvm::StringRef Name) const {
+    auto Search = Entries.find(Name);
+    revng_assert(Search != Entries.end());
+    return *Search;
+  }
+
 public:
   void registerContainerFactory(llvm::StringRef Name, ContainerFactory Entry) {
     Entries.insert_or_assign(Name, std::move(Entry));
@@ -40,9 +53,7 @@ public:
 
   template<typename Cont>
   void registerDefaultConstructibleFactory(llvm::StringRef Name) {
-    registerContainerFactory(Name, [](llvm::StringRef Name) {
-      return std::make_unique<Cont>(Name);
-    });
+    registerContainerFactory(Name, ContainerFactory::create<Cont>());
   }
 
   ContainerSet createEmpty() const {

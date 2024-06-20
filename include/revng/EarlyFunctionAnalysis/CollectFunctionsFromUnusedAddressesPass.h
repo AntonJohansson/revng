@@ -18,11 +18,7 @@ public:
 
 public:
   CollectFunctionsFromUnusedAddressesWrapperPass() : llvm::ModulePass(ID) {}
-  void getAnalysisUsage(llvm::AnalysisUsage &AU) const override final {
-    AU.setPreservesAll();
-    AU.addRequired<LoadModelWrapperPass>();
-    AU.addRequired<GeneratedCodeBasicInfoWrapperPass>();
-  }
+  void getAnalysisUsage(llvm::AnalysisUsage &AU) const override final;
 
 public:
   bool runOnModule(llvm::Module &M) override final;
@@ -31,6 +27,6 @@ public:
 class CollectFunctionsFromUnusedAddressesPass
   : public llvm::PassInfoMixin<CollectFunctionsFromUnusedAddressesPass> {
 public:
-  llvm::PreservedAnalyses
-  run(llvm::Module &M, llvm::ModuleAnalysisManager &MAM);
+  llvm::PreservedAnalyses run(llvm::Module &M,
+                              llvm::ModuleAnalysisManager &MAM);
 };

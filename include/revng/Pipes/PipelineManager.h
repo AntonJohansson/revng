@@ -14,6 +14,8 @@
 #include "revng/Pipeline/Context.h"
 #include "revng/Pipeline/Runner.h"
 #include "revng/Pipes/ModelGlobal.h"
+#include "revng/Storage/Path.h"
+#include "revng/Storage/StorageClient.h"
 
 namespace revng::pipes {
 
@@ -24,9 +26,12 @@ namespace revng::pipes {
 /// in a usable state.
 class PipelineManager {
 private:
-  explicit PipelineManager() = default;
+  using Container = pipeline::ContainerSet::value_type;
+  explicit PipelineManager(llvm::ArrayRef<std::string> EnablingFlags,
+                           std::unique_ptr<revng::StorageClient> &&Client);
 
-  std::string ExecutionDirectory;
+  std::unique_ptr<revng::StorageClient> StorageClient;
+  revng::DirectoryPath ExecutionDirectory;
   /// The various member here MUST be unique_ptr to ensure that the various
   /// pointer that go from one to the other are stable, Since there a create
   /// method that returns a expected<PipelineManager>, this is the only way to
@@ -39,10 +44,7 @@ private:
   std::map<const pipeline::ContainerSet::value_type *,
            const pipeline::TargetsList *>
     ContainerToEnumeration;
-
-  static llvm::Expected<PipelineManager>
-  createContexts(llvm::ArrayRef<std::string> EnablingFlags,
-                 llvm::StringRef ExecutionDirectory);
+  std::string Description;
 
 public:
   PipelineManager(PipelineManager &&Other) = default;
@@ -70,6 +72,13 @@ public:
                    llvm::ArrayRef<std::string> EnablingFlags,
                    llvm::StringRef ExecutionDirectory);
 
+  // This works exactly like the one above, but uses the provided StorageClient
+  // rather than parsing ExecutionDirectory
+  static llvm::Expected<PipelineManager>
+  createFromMemory(llvm::ArrayRef<std::string> InMemoryPipeline,
+                   llvm::ArrayRef<std::string> EnablingFlags,
+                   std::unique_ptr<revng::StorageClient> &&Client);
+
   /// Entirelly replaces the container indicated by the mapping with the file
   /// indicated by the mapping
   llvm::Error overrideContainer(pipeline::PipelineFileMapping Mapping);
@@ -87,22 +96,25 @@ public:
 
   /// Triggers the full serialization of every step and every container to the
   /// the specified DirPath or the Execution directory if omitted.
-  llvm::Error storeToDisk(llvm::StringRef DirPath = llvm::StringRef());
+  llvm::Error store();
 
   /// Trigger the serialization of a single Step to the specified DirPath or
   /// the Execution directory if omitted.
-  llvm::Error storeStepToDisk(llvm::StringRef StepName,
-                              llvm::StringRef DirPath = llvm::StringRef());
+  llvm::Error storeStepToDisk(llvm::StringRef StepName);
 
-  llvm::Error deserializeContainer(pipeline::Step &Step,
-                                   llvm::StringRef ContainerName,
-                                   const llvm::MemoryBuffer &Buffer);
+  const pipeline::Step::AnalysisValueType &
+  getAnalysis(const pipeline::AnalysisReference &Reference) const;
+
+  llvm::Expected<pipeline::TargetInStepSet>
+  deserializeContainer(pipeline::Step &Step,
+                       llvm::StringRef ContainerName,
+                       const llvm::MemoryBuffer &Buffer);
 
   const pipeline::Context &context() const { return *PipelineContext; }
 
   pipeline::Context &context() { return *PipelineContext; }
 
-  /// recalculates the current aviable targetsd and keeps overship of the
+  /// recalculates the current available targetsd and keeps overship of the
   /// computer info
   void recalculateCurrentState();
 
@@ -128,13 +140,16 @@ public:
     return produceAllPossibleTargets(true);
   }
 
-  llvm::Error invalidateAllPossibleTargets();
+  llvm::Expected<pipeline::TargetInStepSet> invalidateAllPossibleTargets();
+  llvm::Expected<pipeline::TargetInStepSet>
+  invalidateFromDiff(const llvm::StringRef Name,
+                     const pipeline::GlobalTupleTreeDiff &Diff);
 
-  /// returns the cached list of targets that are known to be aviable to be
+  /// returns the cached list of targets that are known to be available to be
   /// produced in a container
   const pipeline::TargetsList *
-  getTargetsAvailableFor(const pipeline::ContainerSet::value_type &Container) {
-    if (auto Iter = ContainerToEnumeration.find(&Container);
+  getTargetsAvailableFor(const Container &TheContainer) const {
+    if (auto Iter = ContainerToEnumeration.find(&TheContainer);
         Iter == ContainerToEnumeration.end())
       return nullptr;
     else
@@ -146,16 +161,27 @@ public:
   const pipeline::Runner &getRunner() const { return *Runner; }
   pipeline::Runner &getRunner() { return *Runner; }
 
+  llvm::Error materializeTargets(const llvm::StringRef StepName,
+                                 const pipeline::ContainerToTargetsMap &Map);
+
+  llvm::Expected<std::unique_ptr<pipeline::ContainerBase>>
+  produceTargets(const llvm::StringRef StepName,
+                 const Container &TheContainer,
+                 const pipeline::TargetsList &List);
+
+  llvm::Expected<pipeline::DiffMap>
+  runAnalyses(const pipeline::AnalysesList &List,
+              pipeline::TargetInStepSet &Map,
+              const llvm::StringMap<std::string> &Options = {},
+              llvm::raw_ostream *DiagnosticLog = nullptr);
+
   llvm::Expected<pipeline::DiffMap>
   runAnalysis(llvm::StringRef AnalysisName,
               llvm::StringRef StepName,
               const pipeline::ContainerToTargetsMap &Targets,
+              pipeline::TargetInStepSet &Map,
               const llvm::StringMap<std::string> &Options = {},
               llvm::raw_ostream *DiagnosticLog = nullptr);
-
-  /// Run all analysis in reverse post order (that is: parents first),
-  llvm::Expected<pipeline::DiffMap>
-  runAllAnalyses(const llvm::StringMap<std::string> &Options = {});
 
   /// recalculates all possible targets and keeps overship of the computed info
   void recalculateAllPossibleTargets(bool ExpandTargets = true);
@@ -164,9 +190,16 @@ public:
   /// be produced by the pipeline in the current state
   void writeAllPossibleTargets(llvm::raw_ostream &OS) const;
 
-  llvm::StringRef executionDirectory() const { return ExecutionDirectory; }
+  const revng::DirectoryPath &executionDirectory() const {
+    return ExecutionDirectory;
+  }
+
+  const llvm::StringRef getPipelineDescription() const { return Description; }
+
+  llvm::Error setStorageCredentials(llvm::StringRef Credentials);
 
 private:
   llvm::Error produceAllPossibleTargets(bool ExpandTargets);
+  llvm::Error computeDescription();
 };
 } // namespace revng::pipes

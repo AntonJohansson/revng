@@ -1,5 +1,5 @@
 /// \file IndirectBranchInfoPrinterPass.cpp
-/// \brief Serialize the results of the EarlyFunctionAnalysis on disk.
+/// Serialize the results of the EarlyFunctionAnalysis on disk.
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
@@ -31,11 +31,11 @@ PreservedAnalyses IBIPP::run(Function &F, FunctionAnalysisManager &FAM) {
 
 void IBIPP::serialize(CallBase *Call) {
   OS << Call->getParent()->getParent()->getName();
-  for (unsigned I = 0; I < Call->getNumArgOperands(); ++I) {
+  for (unsigned I = 0; I < Call->arg_size(); ++I) {
     if (isa<ConstantInt>(Call->getArgOperand(I))) {
       OS << "," << cast<ConstantInt>(Call->getArgOperand(I))->getSExtValue();
     } else if (isa<StructType>(Call->getArgOperand(I)->getType())) {
-      auto PC = MetaAddress::fromConstant(Call->getArgOperand(I));
+      auto PC = MetaAddress::fromValue(Call->getArgOperand(I));
       OS << "," << PC.address();
     } else {
       OS << ",unknown";

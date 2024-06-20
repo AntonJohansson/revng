@@ -1,5 +1,5 @@
 /// \file PromoteGlobalToLocalVars.cpp
-/// \brief Promote CSVs in form of global variables to local variables.
+/// Promote CSVs in form of global variables to local variables.
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
@@ -9,6 +9,7 @@
 
 #include "revng/EarlyFunctionAnalysis/PromoteGlobalToLocalVars.h"
 #include "revng/Support/IRHelpers.h"
+#include "revng/Support/OpaqueRegisterUser.h"
 
 using namespace llvm;
 
@@ -36,7 +37,7 @@ PromoteGlobalToLocalPass::run(llvm::Function &F,
   // Create an equivalent local variable, replace all the uses of the CSV.
   IRBuilder<> Builder(&F.getEntryBlock().front());
   for (const auto &[CSV, _] : CSVMap) {
-    auto *CSVTy = CSV->getType()->getPointerElementType();
+    auto *CSVTy = CSV->getValueType();
     auto *Alloca = Builder.CreateAlloca(CSVTy, nullptr, CSV->getName());
     replaceAllUsesInFunctionWith(&F, CSV, Alloca);
 
@@ -45,7 +46,7 @@ PromoteGlobalToLocalPass::run(llvm::Function &F,
 
   // Load all the CSVs and store their value onto the local variables.
   for (const auto &[CSV, Alloca] : CSVMap)
-    Builder.CreateStore(Builder.CreateLoad(CSV), Alloca);
+    Builder.CreateStore(createLoad(Builder, CSV), Alloca);
 
   return PreservedAnalyses::none();
 }

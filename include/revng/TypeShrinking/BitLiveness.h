@@ -4,9 +4,11 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include <map>
 #include <optional>
 
 #include "llvm/IR/PassManager.h"
+#include "llvm/Pass.h"
 
 namespace TypeShrinking {
 
@@ -14,7 +16,13 @@ extern const uint32_t Top;
 
 bool isDataFlowSink(const llvm::Instruction *Ins);
 
-using BitLivenessAnalysisResults = std::map<llvm::Instruction *, uint32_t>;
+struct InstructionResults {
+  unsigned Operands = 0;
+  unsigned Result = 0;
+};
+
+using BitLivenessAnalysisResults = std::map<llvm::Instruction *,
+                                            InstructionResults>;
 
 class BitLivenessWrapperPass : public llvm::FunctionPass {
 public:

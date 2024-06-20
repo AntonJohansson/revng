@@ -4,6 +4,8 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include <bit>
+
 #include "llvm/Support/Error.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/YAMLTraits.h"
@@ -132,23 +134,21 @@ struct CompositeScalar {
   }
 };
 
-// clang-format off
+namespace revng::detail {
+using EC = llvm::yaml::EmptyContext;
 template<typename T>
-concept Yamlizable
-  = llvm::yaml::has_DocumentListTraits<T>::value
-    or llvm::yaml::has_MappingTraits<T, llvm::yaml::EmptyContext>::value
-    or llvm::yaml::has_SequenceTraits<T>::value
-    or llvm::yaml::has_BlockScalarTraits<T>::value
-    or llvm::yaml::has_CustomMappingTraits<T>::value
-    or llvm::yaml::has_PolymorphicTraits<T>::value
-    or llvm::yaml::has_ScalarTraits<T>::value
-    or llvm::yaml::has_ScalarEnumerationTraits<T>::value;
-// clang-format on
+concept MappableWithEmptyContext = llvm::yaml::has_MappingTraits<T, EC>::value;
+} // namespace revng::detail
 
-/// TODO: Remove after updating to clang-format with concept support.
-struct ClangFormatPleaseDoNotBreakMyCode;
-// clang-format off
-// clang-format on
+template<typename T>
+concept Yamlizable = llvm::yaml::has_DocumentListTraits<T>::value
+                     or revng::detail::MappableWithEmptyContext<T>
+                     or llvm::yaml::has_SequenceTraits<T>::value
+                     or llvm::yaml::has_BlockScalarTraits<T>::value
+                     or llvm::yaml::has_CustomMappingTraits<T>::value
+                     or llvm::yaml::has_PolymorphicTraits<T>::value
+                     or llvm::yaml::has_ScalarTraits<T>::value
+                     or llvm::yaml::has_ScalarEnumerationTraits<T>::value;
 
 namespace revng::detail {
 
@@ -188,7 +188,7 @@ constexpr inline auto IsYamlizable = [](auto *K) {
 template<typename S, Yamlizable T>
 void serialize(S &Stream, T &Element) {
   if constexpr (std::is_base_of_v<llvm::raw_ostream, S>) {
-    if constexpr (llvm::yaml::has_ScalarTraits<T>::value) {
+    if constexpr (HasScalarOrEnumTraits<T>) {
       Stream << llvm::StringRef(getNameFromYAMLScalar(Element));
     } else {
       llvm::yaml::Output YAMLOutput(Stream);
@@ -196,7 +196,7 @@ void serialize(S &Stream, T &Element) {
     }
   } else {
     std::string Buffer;
-    if constexpr (llvm::yaml::has_ScalarTraits<T>::value) {
+    if constexpr (HasScalarOrEnumTraits<T>) {
       Buffer = getNameFromYAMLScalar(Element);
     } else {
       llvm::raw_string_ostream StringStream(Buffer);
@@ -239,13 +239,14 @@ std::string serializeToString(const T &ToDump) {
 
 namespace revng::detail {
 template<typename T>
-llvm::Expected<T> deserializeImpl(llvm::StringRef YAMLString) {
-  if constexpr (llvm::yaml::has_ScalarTraits<T>::value) {
+llvm::Expected<T>
+deserializeImpl(llvm::StringRef YAMLString, void *Context = nullptr) {
+  if constexpr (HasScalarOrEnumTraits<T>) {
     return getValueFromYAMLScalar<T>(YAMLString);
   } else {
     T Result;
 
-    llvm::yaml::Input YAMLInput(YAMLString);
+    llvm::yaml::Input YAMLInput(YAMLString, Context);
     YAMLInput >> Result;
 
     std::error_code EC = YAMLInput.error();
@@ -258,21 +259,21 @@ llvm::Expected<T> deserializeImpl(llvm::StringRef YAMLString) {
 
 } // namespace revng::detail
 
-// clang-format off
-template<typename T> requires (not TupleTreeCompatible<T>)
-llvm::Expected<T> deserialize(llvm::StringRef YAMLString) {
-  return revng::detail::deserializeImpl<T>(YAMLString);
+template<NotTupleTreeCompatible T>
+llvm::Expected<T>
+deserialize(llvm::StringRef YAMLString, void *Context = nullptr) {
+  return revng::detail::deserializeImpl<T>(YAMLString, Context);
 }
 
-template<typename T> requires (not TupleTreeCompatible<T>)
-llvm::Expected<T> deserializeFileOrSTDIN(const llvm::StringRef &Path) {
+template<NotTupleTreeCompatible T>
+llvm::Expected<T>
+deserializeFileOrSTDIN(const llvm::StringRef &Path, void *Context = nullptr) {
   auto MaybeBuffer = llvm::MemoryBuffer::getFileOrSTDIN(Path);
   if (not MaybeBuffer)
     return llvm::errorCodeToError(MaybeBuffer.getError());
 
-  return deserialize<T>((*MaybeBuffer)->getBuffer());
+  return deserialize<T>((*MaybeBuffer)->getBuffer(), Context);
 }
-// clang-format on
 
 template<HasScalarTraits T>
 struct llvm::yaml::ScalarTraits<std::tuple<T>> {
@@ -293,3 +294,26 @@ struct llvm::yaml::ScalarTraits<std::tuple<T>> {
     return ValueTrait().mustQuote(String);
   }
 };
+
+template<>
+struct llvm::yaml::ScalarTraits<std::byte> {
+  static_assert(HasScalarTraits<uint8_t>);
+  static_assert(sizeof(std::byte) == sizeof(uint8_t));
+
+  static void output(const std::byte &Value, void *, llvm::raw_ostream &Out) {
+    Out << std::bit_cast<uint8_t>(Value);
+  }
+
+  static StringRef input(StringRef Scalar, void *Ptr, std::byte &Value) {
+    uint8_t Temporary;
+    auto Err = llvm::yaml::ScalarTraits<uint8_t>::input(Scalar, Ptr, Temporary);
+    if (Err.empty())
+      Value = std::bit_cast<std::byte>(Temporary);
+    return Err;
+  }
+
+  static QuotingType mustQuote(StringRef Scalar) {
+    return llvm::yaml::ScalarTraits<uint8_t>::mustQuote(Scalar);
+  }
+};
+LLVM_YAML_IS_FLOW_SEQUENCE_VECTOR(std::byte);

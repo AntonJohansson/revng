@@ -1,6 +1,6 @@
 /// \file IsolateFunctions.cpp
-/// \brief Implements the IsolateFunctions pass which applies function isolation
-///        using the informations provided by EarlyFunctionAnalysis.
+/// Implements the IsolateFunctions pass which applies function isolation using
+/// the information provided by EarlyFunctionAnalysis.
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
@@ -31,11 +31,12 @@
 #include "revng/BasicAnalyses/GeneratedCodeBasicInfo.h"
 #include "revng/EarlyFunctionAnalysis/BasicBlock.h"
 #include "revng/EarlyFunctionAnalysis/CallHandler.h"
+#include "revng/EarlyFunctionAnalysis/CollectCFG.h"
 #include "revng/EarlyFunctionAnalysis/FunctionEdge.h"
 #include "revng/EarlyFunctionAnalysis/FunctionEdgeBase.h"
+#include "revng/EarlyFunctionAnalysis/FunctionMetadataCache.h"
 #include "revng/EarlyFunctionAnalysis/FunctionSummaryOracle.h"
 #include "revng/EarlyFunctionAnalysis/Generated/ForwardDecls.h"
-#include "revng/EarlyFunctionAnalysis/IRHelpers.h"
 #include "revng/EarlyFunctionAnalysis/Outliner.h"
 #include "revng/FunctionIsolation/IsolateFunctions.h"
 #include "revng/Model/Binary.h"
@@ -73,51 +74,23 @@ struct IsolatePipe {
     using namespace ::revng::kinds;
     return {
       ContractGroup::transformOnlyArgument(Root,
-                                           Exactness::Exact,
                                            Isolated,
                                            InputPreservation::Preserve)
     };
   }
 
   void registerPasses(llvm::legacy::PassManager &Manager) {
+    Manager.add(new efa::CollectCFGPass());
     Manager.add(new IsolateFunctions());
   }
 };
 
 static pipeline::RegisterLLVMPass<IsolatePipe> Y;
 
-class ConstantStringsPool {
-private:
-  Module *M;
-  std::map<std::string, GlobalVariable *> StringsPool;
-
-public:
-  ConstantStringsPool(Module *M) : M(M) {}
-
-  Constant *get(std::string String, const Twine &Name = "") {
-    auto It = StringsPool.find(String);
-    auto &C = M->getContext();
-    if (It == StringsPool.end()) {
-      auto *Initializer = ConstantDataArray::getString(C, String, true);
-      auto *NewVariable = new GlobalVariable(*M,
-                                             Initializer->getType(),
-                                             true,
-                                             GlobalValue::InternalLinkage,
-                                             Initializer);
-      It = StringsPool.insert(It, { String, NewVariable });
-    }
-
-    auto *U8PtrTy = Type::getInt8Ty(C)->getPointerTo();
-    return ConstantExpr::getPointerCast(It->second, U8PtrTy);
-  }
-};
-
-using SuccessorsList = GeneratedCodeBasicInfo::SuccessorsList;
 struct Boundary {
   BasicBlock *Block = nullptr;
   BasicBlock *CalleeBlock = nullptr;
   BasicBlock *ReturnBlock = nullptr;
-  SuccessorsList Successors;
 
   bool isCall() const { return ReturnBlock != nullptr; }
 
@@ -128,8 +101,6 @@ struct Boundary {
     Output << "Block: " << getName(Block) << "\n";
     Output << "CalleeBlock: " << getName(CalleeBlock) << "\n";
     Output << "ReturnBlock: " << getName(ReturnBlock) << "\n";
-    Output << "Successors: \n";
-    Successors.dump(Output);
   }
 };
 
@@ -173,24 +144,25 @@ private:
   LLVMContext &Context;
   GeneratedCodeBasicInfo &GCBI;
   const model::Binary &Binary;
-  Function *RaiseException = nullptr;
+  Function *AbortFunction = nullptr;
+  Function *UnreachableFunction = nullptr;
   Function *FunctionDispatcher = nullptr;
   std::map<MetaAddress, Function *> IsolatedFunctionsMap;
   std::map<StringRef, Function *> DynamicFunctionsMap;
-  ConstantStringsPool Strings;
-  GlobalVariable *ExceptionSourcePC;
-  GlobalVariable *ExceptionDestinationPC;
+
+  FunctionMetadataCache *Cache;
 
 public:
   IsolateFunctionsImpl(Function *RootFunction,
                        GeneratedCodeBasicInfo &GCBI,
-                       const model::Binary &Binary) :
+                       const model::Binary &Binary,
+                       FunctionMetadataCache &Cache) :
     RootFunction(RootFunction),
     TheModule(RootFunction->getParent()),
     Context(TheModule->getContext()),
     GCBI(GCBI),
     Binary(Binary),
-    Strings(TheModule) {}
+    Cache(&Cache) {}
 
 public:
   Function *getLocalFunction(MetaAddress Entry) const {
@@ -207,31 +179,52 @@ public:
 public:
   void run();
 
-  /// Create code to throw of an exception
-  void throwException(IRBuilder<> &Builder,
-                      const Twine &Reason,
-                      const DebugLoc &DbgLocation);
+  void emitAbort(IRBuilder<> &Builder,
+                 const Twine &Reason,
+                 const DebugLoc &DbgLocation) {
+    emitCall(Builder, AbortFunction, Reason, DbgLocation);
+  }
 
-  void throwException(BasicBlock *BB,
-                      const Twine &Reason,
-                      const DebugLoc &DbgLocation) {
+  void
+  emitAbort(BasicBlock *BB, const Twine &Reason, const DebugLoc &DbgLocation) {
     IRBuilder<> Builder(BB);
-    throwException(Builder, Reason, DbgLocation);
+    emitAbort(Builder, Reason, DbgLocation);
+  }
+
+  void emitUnreachable(IRBuilder<> &Builder,
+                       const Twine &Reason,
+                       const DebugLoc &DbgLocation) {
+
+    emitCall(Builder, UnreachableFunction, Reason, DbgLocation);
+  }
+
+  void emitUnreachable(BasicBlock *BB,
+                       const Twine &Reason,
+                       const DebugLoc &DbgLocation) {
+    IRBuilder<> Builder(BB);
+    emitUnreachable(Builder, Reason, DbgLocation);
   }
 
 private:
+  void emitCall(IRBuilder<> &Builder,
+                Function *Callee,
+                const Twine &Reason,
+                const DebugLoc &DbgLocation);
+
   /// Populate the function_dispatcher, needed to handle the indirect calls
   void populateFunctionDispatcher();
 };
 
-void IFI::throwException(IRBuilder<> &Builder,
-                         const Twine &Reason,
-                         const DebugLoc &DbgLocation) {
-  revng_assert(RaiseException != nullptr);
-  // revng_assert(DbgLocation);
+void IFI::emitCall(IRBuilder<> &Builder,
+                   Function *Callee,
+                   const Twine &Reason,
+                   const DebugLoc &DbgLocation) {
+  revng_assert(Callee != nullptr);
+
+  SmallVector<llvm::Value *, 4> Arguments;
 
   // Create the message string
-  Constant *ReasonString = Strings.get(Reason.str());
+  Arguments.push_back(getUniqueString(TheModule, Reason.str()));
 
   // Populate the source PC
   MetaAddress SourcePC = MetaAddress::invalid();
@@ -239,17 +232,12 @@ void IFI::throwException(IRBuilder<> &Builder,
   if (Instruction *T = Builder.GetInsertBlock()->getTerminator())
     SourcePC = getPC(T).first;
 
-  auto *Ty = ExceptionSourcePC->getType()->getPointerElementType();
-  Builder.CreateStore(SourcePC.toConstant(Ty), ExceptionSourcePC);
+  auto *PCH = GCBI.programCounterHandler();
 
-  // Populate the destination PC
-  Builder.CreateStore(GCBI.programCounterHandler()->loadPC(Builder),
-                      ExceptionDestinationPC);
+  PCH->setLastPCPlainMetaAddress(Builder, SourcePC);
+  PCH->setCurrentPCPlainMetaAddress(Builder);
 
-  auto *NewCall = Builder.CreateCall(RaiseException,
-                                     { ReasonString,
-                                       ExceptionSourcePC,
-                                       ExceptionDestinationPC });
+  auto *NewCall = Builder.CreateCall(Callee, Arguments);
   NewCall->setDebugLoc(DbgLocation);
   Builder.CreateUnreachable();
 
@@ -274,7 +262,7 @@ void IFI::populateFunctionDispatcher() {
                                               FunctionDispatcher,
                                               nullptr);
   const DebugLoc &Dbg = GCBI.unexpectedPC()->getTerminator()->getDebugLoc();
-  throwException(Unexpected, "An unexpected functions has been called", Dbg);
+  emitUnreachable(Unexpected, "An unexpected function has been called", Dbg);
   setBlockType(Unexpected->getTerminator(), BlockType::UnexpectedPCBlock);
 
   IRBuilder<> Builder(Context);
@@ -319,8 +307,8 @@ allOrNone(const T &Range, const F &Predicate, bool Default = false) {
 }
 
 template<typename T, typename F>
-static auto
-zeroOrOne(const T &Range, const F &Predicate) -> decltype(&*Range.begin()) {
+static auto zeroOrOne(const T &Range, const F &Predicate)
+  -> decltype(&*Range.begin()) {
   decltype(&*Range.begin()) Result = nullptr;
   for (auto &E : Range) {
     if (Predicate(E)) {
@@ -398,14 +386,16 @@ public:
 
   void handlePostNoReturn(llvm::IRBuilder<> &Builder) final {
     // TODO: can we do better than DebugLoc()?
-    IFI.throwException(Builder,
-                       "We return from a noreturn function call",
-                       DebugLoc());
+    IFI.emitUnreachable(Builder,
+                        "We return from a noreturn function call",
+                        DebugLoc());
   }
 
-  void handleIndirectJump(llvm::IRBuilder<> &Builder,
-                          MetaAddress Block,
-                          llvm::Value *SymbolNamePointer) final {
+  void
+  handleIndirectJump(llvm::IRBuilder<> &Builder,
+                     MetaAddress Block,
+                     const std::set<llvm::GlobalVariable *> &ClobberedRegisters,
+                     llvm::Value *SymbolNamePointer) final {
     revng_assert(SymbolNamePointer != nullptr);
     if (not isa<ConstantPointerNull>(SymbolNamePointer))
       handleCall(Builder, MetaAddress::invalid(), SymbolNamePointer);
@@ -430,7 +420,7 @@ private:
       else
         return dyn_cast<efa::CallEdge>(Result->get());
     };
-    const auto *CallEdge = ZeroOrOneCallEdge(Caller->Successors, IsCallEdge);
+    const auto *CallEdge = ZeroOrOneCallEdge(Caller->Successors(), IsCallEdge);
 
     if (CallEdge == nullptr) {
       // There's no CallEdge, this is likely a LongJmp
@@ -438,8 +428,8 @@ private:
     }
 
     StringRef SymbolName = extractFromConstantStringPtr(SymbolNamePointer);
-    revng_assert(SymbolName == CallEdge->DynamicFunction);
-    revng_assert(Callee == CallEdge->Destination);
+    revng_assert(SymbolName == CallEdge->DynamicFunction());
+    revng_assert(Callee == CallEdge->Destination().notInlinedAddress());
 
     // Identify callee
     Function *CalledFunction = nullptr;
@@ -459,11 +449,8 @@ private:
     Instruction *Old = AtEnd ? &*Builder.GetInsertBlock()->rbegin() :
                                &*InsertPoint;
     auto *NewCall = Builder.CreateCall(CalledFunction);
+    NewCall->addFnAttr(Attribute::NoMerge);
     NewCall->setDebugLoc(Old->getDebugLoc());
-    FunctionTags::CallToLifted.addTo(NewCall);
-    IFI.gcbi().setMetaAddressMetadata(NewCall,
-                                      CallerBlockStartMDName,
-                                      Caller->Start);
   }
 };
 
@@ -485,37 +472,25 @@ private:
 public:
   FunctionOutliner(llvm::Module &M,
                    const model::Binary &Binary,
-                   GeneratedCodeBasicInfo &GCBI,
-                   efa::CallHandler *TheCallHandler) :
-    GCBI(GCBI), Outliner(M, GCBI, Oracle, TheCallHandler) {
+                   GeneratedCodeBasicInfo &GCBI) :
+    GCBI(GCBI), Outliner(M, GCBI, Oracle) {
     importModel(M, GCBI, Binary, Oracle);
   }
 
 public:
-  efa::OutlinedFunction outline(MetaAddress Entry) {
-    return Outliner.outline(GCBI.getBlockAt(Entry));
+  efa::OutlinedFunction outline(MetaAddress Entry,
+                                efa::CallHandler *TheCallHandler) {
+    return Outliner.outline(GCBI.getBlockAt(Entry), TheCallHandler);
   }
 };
 
 void IsolateFunctionsImpl::run() {
-  ExceptionSourcePC = MetaAddress::createStructVariable(TheModule,
-                                                        "exception_source_pc");
-  ExceptionDestinationPC = MetaAddress::createStructVariable(TheModule,
-                                                             "exception_"
-                                                             "destination_pc");
+  AbortFunction = TheModule->getFunction("_abort");
+  revng_assert(AbortFunction != nullptr);
 
-  // Declare the raise_exception_helper function that we will use as a throw
-  std::vector<Type *> ArgsType{ Type::getInt8Ty(Context)->getPointerTo(),
-                                ExceptionSourcePC->getType(),
-                                ExceptionDestinationPC->getType() };
-  auto *RaiseExceptionTy = FunctionType::get(Type::getVoidTy(Context),
-                                             ArgsType,
-                                             false);
-  RaiseException = Function::Create(RaiseExceptionTy,
-                                    Function::ExternalLinkage,
-                                    "raise_exception_helper",
-                                    TheModule);
-  FunctionTags::Exceptional.addTo(RaiseException);
+  UnreachableFunction = TheModule->getFunction("_unreachable");
+  revng_assert(UnreachableFunction != nullptr);
+  FunctionTags::Exceptional.addTo(UnreachableFunction);
 
   FunctionDispatcher = Function::Create(createFunctionType<void>(Context),
                                         GlobalValue::ExternalLinkage,
@@ -529,16 +504,17 @@ void IsolateFunctionsImpl::run() {
   // Create the dynamic functions
   //
   for (const model::DynamicFunction &Function :
-       Binary.ImportedDynamicFunctions) {
-    StringRef Name = Function.OriginalName;
+       Binary.ImportedDynamicFunctions()) {
+    StringRef Name = Function.OriginalName();
     auto *NewFunction = Function::Create(IsolatedFunctionType,
                                          GlobalValue::ExternalLinkage,
-                                         "dynamic_" + Function.OriginalName,
+                                         "dynamic_" + Function.OriginalName(),
                                          TheModule);
     FunctionTags::DynamicFunction.addTo(NewFunction);
+    NewFunction->addFnAttr(Attribute::NoMerge);
 
     auto *EntryBB = BasicBlock::Create(Context, "", NewFunction);
-    throwException(EntryBB, Twine("Dynamic call ") + Name, DebugLoc());
+    emitAbort(EntryBB, Twine("Dynamic call ") + Name, DebugLoc());
 
     // TODO: implement more efficient version.
     // if (setjmp(...) == 0) {
@@ -564,44 +540,44 @@ void IsolateFunctionsImpl::run() {
   //
   // Precreate the isolated functions
   //
-  for (const model::Function &Function : Binary.Functions) {
+  for (const model::Function &Function : Binary.Functions()) {
     auto *NewFunction = Function::Create(IsolatedFunctionType,
                                          GlobalValue::ExternalLinkage,
                                          "local_" + Function.name(),
                                          TheModule);
     NewFunction->addFnAttr(Attribute::NullPointerIsValid);
-    IsolatedFunctionsMap[Function.Entry] = NewFunction;
+    NewFunction->addFnAttr(Attribute::NoMerge);
+    IsolatedFunctionsMap[Function.Entry()] = NewFunction;
     FunctionTags::Isolated.addTo(NewFunction);
     revng_assert(NewFunction != nullptr);
-    GCBI.setMetaAddressMetadata(NewFunction,
-                                FunctionEntryMDNName,
-                                Function.Entry);
+    setMetaAddressMetadata(NewFunction, FunctionEntryMDNName, Function.Entry());
 
-    auto *OriginalEntryTerm = GCBI.getBlockAt(Function.Entry)->getTerminator();
-    auto *MDNode = OriginalEntryTerm->getMetadata(FunctionMetadataMDName);
+    auto *OriginalEntry = GCBI.getBlockAt(Function.Entry())->getTerminator();
+    auto *MDNode = OriginalEntry->getMetadata(FunctionMetadataMDName);
     NewFunction->setMetadata(FunctionMetadataMDName, MDNode);
   }
 
   using namespace efa;
   using llvm::BasicBlock;
 
+  FunctionOutliner Outliner(*TheModule, Binary, GCBI);
   for (auto &[Entry, F] : IsolatedFunctionsMap) {
     BasicBlock *OriginalEntryBlock = GCBI.getBlockAt(Entry);
-    efa::FunctionMetadata FM = *extractFunctionMetadata(OriginalEntryBlock)
-                                  .get();
+    const auto &FM = Cache->getFunctionMetadata(OriginalEntryBlock);
 
     CallIsolatedFunction CallHandler(*this, FM);
-    FunctionOutliner Outliner(*TheModule, Binary, GCBI, &CallHandler);
-    OutlinedFunction Outlined = Outliner.outline(Entry);
+    OutlinedFunction Outlined = Outliner.outline(Entry, &CallHandler);
 
     //
     // Handle UnexpectedPCCloned
     //
     if (BasicBlock *UnexpectedPC = Outlined.UnexpectedPCCloned) {
-      UnexpectedPC->getInstList().clear();
+      for (auto It = UnexpectedPC->begin(); It != UnexpectedPC->end();
+           It = UnexpectedPC->begin())
+        It->eraseFromParent();
       revng_assert(UnexpectedPC->empty());
       const DebugLoc &Dbg = GCBI.unexpectedPC()->getTerminator()->getDebugLoc();
-      throwException(UnexpectedPC, "unexpectedPC", Dbg);
+      emitUnreachable(UnexpectedPC, "unexpectedPC", Dbg);
     }
 
     //
@@ -619,44 +595,42 @@ void IsolateFunctionsImpl::run() {
 
         // Get the only outgoing edge jumping to anypc
         if (Block == nullptr) {
-          throwException(Builder, "Unexpected jump", DebugLoc());
+          emitAbort(Builder, "Unexpected jump", DebugLoc());
           continue;
         }
 
         bool AtLeastAMatch = false;
-        for (auto &Edge : Block->Successors) {
-          if (Edge->Type == efa::FunctionEdgeType::DirectBranch)
+        for (auto &Edge : Block->Successors()) {
+          if (Edge->Type() == efa::FunctionEdgeType::DirectBranch)
             continue;
 
           revng_assert(not AtLeastAMatch);
           AtLeastAMatch = true;
 
-          switch (Edge->Type) {
+          switch (Edge->Type()) {
           case efa::FunctionEdgeType::Return:
             Builder.CreateRetVoid();
             break;
           case efa::FunctionEdgeType::BrokenReturn:
             // TODO: can we do better than DebugLoc()?
-            throwException(Builder, "A broken return was taken", DebugLoc());
+            emitAbort(Builder, "A broken return was taken", DebugLoc());
             break;
           case efa::FunctionEdgeType::LongJmp:
-            throwException(Builder, "A longjmp was taken", DebugLoc());
+            emitAbort(Builder, "A longjmp was taken", DebugLoc());
             break;
           case efa::FunctionEdgeType::Killer:
-            throwException(Builder,
-                           "A killer block has been reached",
-                           DebugLoc());
+            emitAbort(Builder, "A killer block has been reached", DebugLoc());
             revng_abort();
             break;
           case efa::FunctionEdgeType::Unreachable:
-            throwException(Builder,
-                           "An unrechable instruction has been "
-                           "reached",
-                           DebugLoc());
+            emitAbort(Builder,
+                      "An unreachable instruction has been "
+                      "reached",
+                      DebugLoc());
             break;
           case efa::FunctionEdgeType::FunctionCall: {
             auto *Call = cast<efa::CallEdge>(Edge.get());
-            revng_assert(Call->IsTailCall);
+            revng_assert(Call->IsTailCall());
             Builder.CreateRetVoid();
           } break;
           case efa::FunctionEdgeType::Invalid:
@@ -668,7 +642,7 @@ void IsolateFunctionsImpl::run() {
         }
 
         if (not AtLeastAMatch) {
-          throwException(Builder, "Unexpected jump", DebugLoc());
+          emitAbort(Builder, "Unexpected jump", DebugLoc());
           continue;
         }
       }
@@ -684,7 +658,7 @@ void IsolateFunctionsImpl::run() {
     moveBlocksInto(*Outlined.Function, *F);
   }
 
-  revng_check(not verifyModule(*TheModule, &dbgs()));
+  revng::verify(TheModule);
 
   // Create the functions and basic blocks needed for the correct execution of
   // the exception handling mechanism
@@ -695,10 +669,8 @@ void IsolateFunctionsImpl::run() {
   // Cleanup root
   EliminateUnreachableBlocks(*RootFunction, nullptr, false);
 
-  // Before emitting it in output we check that the module in passes the
-  // verifyModule pass
-  if (VerifyLog.isEnabled())
-    revng_assert(not verifyModule(*TheModule, &dbgs()));
+  // Before emitting it in output, verify the module
+  revng::verify(TheModule);
 
   FunctionTags::IsolatedRoot.addTo(RootFunction);
 }
@@ -707,14 +679,24 @@ bool IF::runOnModule(Module &TheModule) {
   if (not TheModule.getFunction("root")
       or TheModule.getFunction("root")->isDeclaration())
     return false;
-  // Retrieve analyses
+  //  Retrieve analyses
   auto &GCBI = getAnalysis<GeneratedCodeBasicInfoWrapperPass>().getGCBI();
   const auto &ModelWrapper = getAnalysis<LoadModelWrapperPass>().get();
   const model::Binary &Binary = *ModelWrapper.getReadOnlyModel();
 
   // Create an object of type IsolateFunctionsImpl and run the pass
-  IFI Impl(TheModule.getFunction("root"), GCBI, Binary);
+  IFI Impl(TheModule.getFunction("root"),
+           GCBI,
+           Binary,
+           getAnalysis<FunctionMetadataCachePass>().get());
   Impl.run();
 
   return false;
+}
+
+void IsolateFunctions::getAnalysisUsage(llvm::AnalysisUsage &AU) const {
+  AU.setPreservesAll();
+  AU.addRequired<GeneratedCodeBasicInfoWrapperPass>();
+  AU.addRequired<LoadModelWrapperPass>();
+  AU.addRequired<FunctionMetadataCachePass>();
 }

@@ -16,7 +16,8 @@
 #include "revng/Support/ProgramCounterHandler.h"
 
 #include "JumpTargetManager.h"
-#include "PTCDump.h"
+
+#include "qemu/libtcg/libtcg.h"
 
 // Forward declarations
 namespace llvm {
@@ -30,7 +31,7 @@ class Module;
 class JumpTargetManager;
 class VariableManager;
 
-/// \brief Expands a PTC instruction to LLVM IR
+/// Expands a PTC instruction to LLVM IR
 class InstructionTranslator {
 public:
   using LabeledBlocksMap = std::map<std::string, llvm::BasicBlock *>;
@@ -42,7 +43,8 @@ public:
   /// \param Blocks reference to a `vector` of `BasicBlock`s used to keep track
   ///        on which `BasicBlock`s the InstructionTranslator worked on, for
   ///        further processing.
-  InstructionTranslator(llvm::IRBuilder<> &Builder,
+  InstructionTranslator(const LibTcgInterface &LibTcg,
+                        llvm::IRBuilder<> &Builder,
                         VariableManager &Variables,
                         JumpTargetManager &JumpTargets,
                         std::vector<llvm::BasicBlock *> Blocks,
@@ -55,14 +57,14 @@ public:
                                 uint64_t Size,
                                 llvm::Value *String) const;
 
-  /// \brief Result status of the translation of a PTC opcode
+  /// Result status of the translation of a PTC opcode
   enum TranslationResult {
     Abort, ///< An error occurred during translation, call abort and stop
     Stop, ///< Do not proceed with translation
     Success ///< The translation was successful
   };
 
-  /// \brief Handle a new instruction from the input code
+  /// Handle a new instruction from the input code
   ///
   /// \param Instr the newly met PTCInstruction;
   /// \param Next the PTCInstruction immediately following \p Instr,
@@ -81,14 +83,13 @@ public:
   // TODO: rename to newPC
   // TODO: the signature of this function is ugly
   std::tuple<TranslationResult, llvm::MDNode *, MetaAddress, MetaAddress>
-  newInstruction(PTCInstruction *Instr,
-                 PTCInstruction *Next,
+  newInstruction(LibTcgInstruction *Instr,
+                 LibTcgInstruction *Next,
                  MetaAddress StartPC,
                  MetaAddress EndPC,
-                 bool IsFirst,
-                 MetaAddress AbortAt);
+                 bool IsFirst);
 
-  /// \brief Translate an ordinary instruction
+  /// Translate an ordinary instruction
   ///
   /// \param Instr the instruction to translate.
   /// \param PC the PC associated to \p Instr.
@@ -96,37 +97,40 @@ public:
   ///
   /// \return see InstructionTranslator::TranslationResult.
   TranslationResult
-  translate(PTCInstruction *Instr, MetaAddress PC, MetaAddress NextPC);
+  translate(LibTcgInstruction *Instr, MetaAddress PC, MetaAddress NextPC);
 
-  /// \brief Translate a call to an helper
+  /// Translate a call to an helper
   ///
   /// \param Instr the PTCInstruction of the call to the helper.
   ///
   /// \return see InstructionTranslator::TranslationResult.
-  TranslationResult translateCall(PTCInstruction *Instr);
+  TranslationResult translateCall(LibTcgInstruction *Instr);
 
-  /// \brief Handle calls to `newPC` marker and emit coverage information
+  /// Handle calls to `newPC` marker and emit coverage information
   void finalizeNewPCMarkers();
 
-  /// \brief Notifies InstructionTranslator about a new PTC translation
+  /// Notifies InstructionTranslator about a new PTC translation
   void reset() { LabeledBasicBlocks.clear(); }
 
-  /// \brief Preprocess the translated instructions
+  /// Preprocess the translated instructions
   ///
   /// Check if the translated code contains a delay slot and return a blacklist
-  /// of the PTC_INSTRUCTION_op_debug_insn_start instructions that have to be
+  /// of the LIBTCG_op_insn_start instructions that have to be
   /// ignored to merge the delay slot into the branch instruction.
-  llvm::SmallSet<unsigned, 1> preprocess(PTCInstructionList *Instructions);
+  llvm::SmallSet<unsigned, 1> preprocess(LibTcgInstructionList Instructions);
 
   void registerDirectJumps();
 
 private:
   llvm::ErrorOr<std::vector<llvm::Value *>>
-  translateOpcode(PTCOpcode Opcode,
-                  std::vector<uint64_t> ConstArguments,
+  translateOpcode(LibTcgOpcode Opcode,
+                  std::vector<LibTcgArgument> ConstArguments,
                   std::vector<llvm::Value *> InArguments);
 
+  void handleExitTB();
+
 private:
+  const LibTcgInterface &LibTcg;
   llvm::IRBuilder<> &Builder;
   VariableManager &Variables;
   JumpTargetManager &JumpTargets;
@@ -141,7 +145,6 @@ private:
   llvm::Function *NewPCMarker;
 
   MetaAddress LastPC;
-  llvm::Type *MetaAddressStruct;
 
   ProgramCounterHandler *PCH;
   llvm::SmallVector<llvm::BasicBlock *, 4> ExitBlocks;

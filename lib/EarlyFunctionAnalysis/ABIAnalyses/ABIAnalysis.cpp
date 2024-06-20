@@ -39,12 +39,12 @@ struct PartialAnalysisResults {
   RegisterStateMap DRAOF;
 
   // Per call site analysis
-  std::map<std::pair<MetaAddress, BasicBlock *>, RegisterStateMap> URVOFC;
-  std::map<std::pair<MetaAddress, BasicBlock *>, RegisterStateMap> RAOFC;
-  std::map<std::pair<MetaAddress, BasicBlock *>, RegisterStateMap> DRVOFC;
+  std::map<std::pair<BasicBlockID, BasicBlock *>, RegisterStateMap> URVOFC;
+  std::map<std::pair<BasicBlockID, BasicBlock *>, RegisterStateMap> RAOFC;
+  std::map<std::pair<BasicBlockID, BasicBlock *>, RegisterStateMap> DRVOFC;
 
   // Per return analysis
-  std::map<std::pair<MetaAddress, BasicBlock *>, RegisterStateMap> URVOF;
+  std::map<std::pair<BasicBlockID, BasicBlock *>, RegisterStateMap> URVOF;
 
   // Debug methods
   void dump() const debug_function { dump(dbg, ""); }
@@ -70,7 +70,7 @@ void PartialAnalysisResults::dump(T &Output, const char *Prefix) const {
 
   Output << Prefix << "UsedReturnValuesOfFunctionCall:\n";
   for (auto &[Key, StateMap] : URVOFC) {
-    Output << Prefix << "  " << Key.second->getName().str() << '\n';
+    Output << Prefix << "  " << getName(Key.second) << '\n';
     for (auto &[GV, State] : StateMap) {
       Output << Prefix << "    " << GV->getName().str() << " = "
              << abi::RegisterState::getName(State).str() << '\n';
@@ -79,7 +79,7 @@ void PartialAnalysisResults::dump(T &Output, const char *Prefix) const {
 
   Output << Prefix << "RegisterArgumentsOfFunctionCall:\n";
   for (auto &[Key, StateMap] : RAOFC) {
-    Output << Prefix << "  " << Key.second->getName().str() << '\n';
+    Output << Prefix << "  " << getName(Key.second) << '\n';
     for (auto &[GV, State] : StateMap) {
       Output << Prefix << "    " << GV->getName().str() << " = "
              << abi::RegisterState::getName(State).str() << '\n';
@@ -88,7 +88,7 @@ void PartialAnalysisResults::dump(T &Output, const char *Prefix) const {
 
   Output << Prefix << "DeadReturnValuesOfFunctionCall:\n";
   for (auto &[Key, StateMap] : DRVOFC) {
-    Output << Prefix << "  " << Key.second->getName().str() << '\n';
+    Output << Prefix << "  " << getName(Key.second) << '\n';
     for (auto &[GV, State] : StateMap) {
       Output << Prefix << "    " << GV->getName().str() << " = "
              << abi::RegisterState::getName(State).str() << '\n';
@@ -99,7 +99,7 @@ void PartialAnalysisResults::dump(T &Output, const char *Prefix) const {
   for (auto &[Key, StateMap] : URVOF) {
     Output << Prefix << "  " << Key.second->getName().str() << '\n';
     for (auto &[GV, State] : StateMap) {
-      Output << Prefix << "  " << GV->getName().str() << " = "
+      Output << Prefix << "    " << GV->getName().str() << " = "
              << abi::RegisterState::getName(State).str() << '\n';
     }
   }
@@ -211,7 +211,7 @@ RegisterState combine(RegisterState LH, RegisterState RH) {
 void finalizeReturnValues(ABIAnalysesResults &ABIResults) {
   for (auto &[PC, RSMap] : ABIResults.ReturnValuesRegisters) {
     for (auto &[CSV, RS] : RSMap) {
-      if (ABIResults.FinalReturnValuesRegisters.count(CSV) == 0)
+      if (!ABIResults.FinalReturnValuesRegisters.contains(CSV))
         ABIResults.FinalReturnValuesRegisters[CSV] = RegisterState::Maybe;
 
       ABIResults.FinalReturnValuesRegisters
@@ -241,20 +241,34 @@ ABIAnalysesResults analyzeOutlinedFunction(Function *F,
   PartialAnalysisResults Results;
 
   // Initial population of partial results
+  // TODO: merge the following analyses in a single one
   Results.UAOF = UAOF::analyze(&F->getEntryBlock(), GCBI);
   Results.DRAOF = DRAOF::analyze(&F->getEntryBlock(), GCBI);
   for (auto &I : instructions(F)) {
     BasicBlock *BB = I.getParent();
 
     if (auto *Call = dyn_cast<CallInst>(&I)) {
-      MetaAddress PC;
+      BasicBlockID PC;
       if (isCallTo(Call, PreCallSiteHook) || isCallTo(Call, PostCallSiteHook)
-          || isCallTo(Call, RetHook))
-        PC = MetaAddress::fromConstant(Call->getArgOperand(0));
+          || isCallTo(Call, RetHook)) {
+        PC = BasicBlockID::fromValue(Call->getArgOperand(0));
+        revng_assert(PC.isValid());
+      }
 
       if (isCallTo(Call, PreCallSiteHook)) {
+        // Ensure it's the first instruction in the basic block
+        revng_assert(&*BB->begin() == &I);
+
         Results.RAOFC[{ PC, BB }] = RAOFC::analyze(BB, GCBI);
+
+        // Register address of the callee
+        auto &CallSite = FinalResults.CallSites[PC];
+        CallSite.CalleeAddress = MetaAddress::fromValue(Call->getArgOperand(1));
       } else if (isCallTo(Call, PostCallSiteHook)) {
+        // Ensure it's the last instruction in the basic block
+        revng_assert(&*BB->getTerminator()->getPrevNode() == &I);
+
+        // TODO: merge the following analyses in a single one
         Results.URVOFC[{ PC, BB }] = URVOFC::analyze(BB, GCBI);
         Results.DRVOFC[{ PC, BB }] = DRVOFC::analyze(BB, GCBI);
       } else if (isCallTo(Call, RetHook)) {
@@ -265,8 +279,9 @@ ABIAnalysesResults analyzeOutlinedFunction(Function *F,
 
   if (ABIAnalysesLog.isEnabled()) {
     ABIAnalysesLog << "Dumping ABIAnalyses results for function "
-                   << F->getName() << ": \n";
-    Results.dump();
+                   << F->getName() << ":\n";
+    Results.dump(ABIAnalysesLog, "  ");
+    ABIAnalysesLog << DoLog;
   }
 
   // Finalize results. Combine UAOF and DRAOF.
@@ -279,8 +294,8 @@ ABIAnalysesResults analyzeOutlinedFunction(Function *F,
 
   // Add RAOFC.
   for (auto &[Key, RSMap] : Results.RAOFC) {
-    auto PC = Key.first;
-    FinalResults.CallSites[PC] = ABIAnalysesResults::CallSiteResults();
+    BasicBlockID PC = Key.first;
+    revng_assert(PC.isValid());
     for (auto &[CSV, RS] : RSMap)
       FinalResults.CallSites[PC].ArgumentsRegisters[CSV] = RS;
   }
@@ -318,7 +333,7 @@ void ABIAnalysesResults::dump(T &Output, const char *Prefix) const {
 
   Output << Prefix << "Call site:\n";
   for (auto &[PC, StateMap] : CallSites) {
-    Output << Prefix << "  " << PC.toString() << '\n';
+    Output << Prefix << "  Call in basic block " << PC.toString() << '\n';
     Output << Prefix << "  "
            << "  "
            << "Arguments:\n";

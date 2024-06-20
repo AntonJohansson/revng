@@ -4,8 +4,15 @@
 
 # Define revngModel library
 revng_add_analyses_library_internal(
-  revngModel Binary.cpp LoadModelPass.cpp Processing.cpp SerializeModelPass.cpp
-  Type.cpp)
+  revngModel
+  Binary.cpp
+  Identifier.cpp
+  LoadModelPass.cpp
+  TypeSystemPrinter.cpp
+  Processing.cpp
+  SerializeModelPass.cpp
+  Type.cpp
+  Visits.cpp)
 
 target_link_libraries(revngModel revngSupport)
 
@@ -26,13 +33,14 @@ target_tuple_tree_generator(
   JSONSCHEMA_PATH
   "${JSONSCHEMA_PATH}"
   PYTHON_PATH
-  "${CMAKE_BINARY_DIR}/lib/python/${PYTHON_GENERATED_MODEL_PATH}"
+  "${CMAKE_BINARY_DIR}/${PYTHON_INSTALL_PATH}/${PYTHON_GENERATED_MODEL_PATH}"
   TYPESCRIPT_PATH
   "${TYPESCRIPT_PATH}"
   TYPESCRIPT_INCLUDE
   "${CMAKE_SOURCE_DIR}/typescript/model.ts"
   ROOT_TYPE
   Binary
+  EMIT_TRACKING
   GLOBAL_NAME
   Model
   STRING_TYPES

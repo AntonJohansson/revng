@@ -25,20 +25,23 @@ name: Type
 doc: Base class of model types used for LLVM-style RTTI
 type: struct
 fields:
-  - name: Kind
-    type: TypeKind
   - name: ID
     type: uint64_t
     is_guid: true
+  - name: Kind
+    type: TypeKind
   - name: CustomName
     type: Identifier
     optional: true
   - name: OriginalName
     type: string
     optional: true
+  - name: Comment
+    type: string
+    optional: true
 key:
-  - Kind
   - ID
+  - Kind
 abstract: true
 TUPLE-TREE-YAML */
 
@@ -53,16 +56,10 @@ public:
   static constexpr const auto AssociatedKind = TypeKind::Invalid;
 
 public:
-  // TODO: Constructors cannot be inherited, since the default one is
-  //  manually implemented in order to generate a random ID
+  using generated::Type::Type;
+
   Type();
-  Type(TypeKind::Values TK);
-  Type(TypeKind::Values Kind, uint64_t ID) : Type(Kind, ID, Identifier(), "") {}
-  Type(TypeKind::Values Kind,
-       uint64_t ID,
-       Identifier CustomName,
-       std::string OriginalName) :
-    model::generated::Type(Kind, ID, CustomName, OriginalName) {}
+  Type(uint64_t ID, TypeKind::Values Kind);
 
 public:
   static bool classof(const Type *T) { return classof(T->key()); }
@@ -71,9 +68,24 @@ public:
   Identifier name() const;
 
 public:
+  /// Recursively computes size of the type.
+  ///
+  /// It asserts in cases where the size cannot be computed, for example, when
+  /// the type system loops and the type's size depends on the type itself.
+  ///
+  /// \returns * `std::nullopt` if the type does not have size (for example,
+  ///            it's a `void` primitive or a function type),
+  ///          * size in bytes otherwise.
   std::optional<uint64_t> size() const debug_function;
-  RecursiveCoroutine<std::optional<uint64_t>> size(VerifyHelper &VH) const;
+  std::optional<uint64_t> size(VerifyHelper &VH) const;
 
+  /// Tries to recursively compute the size of the type.
+  ///
+  /// \returns * `std::nullopt` if the size cannot be computed, for example,
+  ///            when the type system loops and the type's size depends on
+  ///            the type itself,
+  ///          * 0 for types without the size (e.g. `void`),
+  ///          * size in bytes in all other cases.
   std::optional<uint64_t> trySize() const debug_function;
   RecursiveCoroutine<std::optional<uint64_t>> trySize(VerifyHelper &VH) const;
 
@@ -85,15 +97,14 @@ public:
   bool verify(bool Assert) const debug_function;
   RecursiveCoroutine<bool> verify(VerifyHelper &VH) const;
   void dump() const debug_function;
+  void dumpTypeGraph(const char *Path) const debug_function;
 };
 
 namespace model {
 
 using UpcastableType = UpcastablePointer<model::Type>;
 
-model::UpcastableType makeTypeWithID(model::TypeKind::Values Kind, uint64_t ID);
-
-using TypePath = TupleTreeReference<model::Type, model::Binary>;
+model::UpcastableType makeTypeWithID(uint64_t ID, model::TypeKind::Values Kind);
 
 template<IsModelType T, typename... Args>
 inline UpcastableType makeType(Args &&...A) {
@@ -101,5 +112,13 @@ inline UpcastableType makeType(Args &&...A) {
 }
 
 } // end namespace model
+
+extern template model::TypePath
+model::TypePath::fromString<model::Binary>(model::Binary *Root,
+                                           llvm::StringRef Path);
+
+extern template model::TypePath
+model::TypePath::fromString<const model::Binary>(const model::Binary *Root,
+                                                 llvm::StringRef Path);
 
 #include "revng/Model/Generated/Late/Type.h"

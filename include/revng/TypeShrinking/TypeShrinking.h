@@ -7,6 +7,8 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/LegacyPassManager.h"
+#include "llvm/IR/PassManager.h"
+#include "llvm/Pass.h"
 #include "llvm/Transforms/Scalar.h"
 
 namespace TypeShrinking {
@@ -14,8 +16,8 @@ namespace TypeShrinking {
 class TypeShrinkingPass : public llvm::PassInfoMixin<TypeShrinkingPass> {
 
 public:
-  llvm::PreservedAnalyses
-  run(llvm::Function &F, llvm::FunctionAnalysisManager &FAM);
+  llvm::PreservedAnalyses run(llvm::Function &F,
+                              llvm::FunctionAnalysisManager &FAM);
 };
 
 class TypeShrinkingWrapperPass : public llvm::FunctionPass {

@@ -34,6 +34,9 @@ fields:
   - name: OriginalName
     type: string
     optional: true
+  - name: Comment
+    type: string
+    optional: true
   - name: StackFrameType
     doc: The type of the stack frame
     reference:
@@ -57,6 +60,11 @@ fields:
       type: SortedVector
       elementType: CallSitePrototype
     optional: true
+  - name: ExportedNames
+    sequence:
+      type: SortedVector
+      elementType: string
+    optional: true
 key:
   - Entry
 TUPLE-TREE-YAML */
@@ -70,13 +78,14 @@ public:
 public:
   Identifier name() const;
 
-  const model::TypePath &prototype(const model::Binary &Root) const;
+  model::TypePath prototype(const model::Binary &Root) const;
 
 public:
   bool verify() const debug_function;
   bool verify(bool Assert) const debug_function;
   bool verify(VerifyHelper &VH) const;
   void dump() const debug_function;
+  void dumpTypeGraph(const char *Path) const debug_function;
 };
 
 #include "revng/Model/Generated/Late/Function.h"

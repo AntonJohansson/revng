@@ -1,5 +1,5 @@
 /// \file Assert.cpp
-/// \brief Implementation of the various functions to assert and abort.
+/// Implementation of the various functions to assert and abort.
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
@@ -13,15 +13,7 @@
 
 #include "revng/Support/Assert.h"
 
-static AbortHook TheAbortHook = nullptr;
-
-void setAbortHook(AbortHook Hook) {
-  TheAbortHook = Hook;
-}
-
 [[noreturn]] static void terminate(void) {
-  if (TheAbortHook != nullptr)
-    TheAbortHook();
   abort();
 }
 

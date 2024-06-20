@@ -4,6 +4,7 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include <concepts>
 #include <optional>
 #include <set>
 
@@ -16,13 +17,11 @@
 template<typename T>
 struct KeyedObjectTraits;
 
-// clang-format off
 template<typename T, typename Traits = KeyedObjectTraits<T>>
 concept KeyedObjectContainerCompatible = requires(T A) {
   { Traits::key(A) };
   { Traits::fromKey(Traits::key(A)) } -> std::same_as<T>;
 } && std::is_same_v<Traits, KeyedObjectTraits<T>>;
-// clang-format on
 
 /// Inherit if T is the key of itself
 template<typename T>
@@ -33,7 +32,7 @@ struct IdentityKeyedObjectTraits {
 };
 
 /// Trivial specializations
-template<integral T>
+template<std::integral T>
 struct KeyedObjectTraits<T> : public IdentityKeyedObjectTraits<T> {};
 
 template<>
@@ -43,17 +42,15 @@ struct KeyedObjectTraits<std::string>
 static_assert(KeyedObjectContainerCompatible<int>);
 
 template<typename T>
-concept KeyedObjectContainer = requires(T &&) {
-  T::KeyedObjectContainerTag;
-};
+concept KeyedObjectContainer = requires(T &&) { T::KeyedObjectContainerTag; };
 
 namespace revng::detail {
 
-  template<KeyedObjectContainerCompatible T>
-  using KOT = KeyedObjectTraits<T>;
+template<KeyedObjectContainerCompatible T>
+using KOT = KeyedObjectTraits<T>;
 
-  template<KeyedObjectContainerCompatible T>
-  using Key = std::decay_t<decltype(KOT<T>::key(std::declval<T>()))>;
+template<KeyedObjectContainerCompatible T>
+using Key = std::decay_t<decltype(KOT<T>::key(std::declval<T>()))>;
 
 } // namespace revng::detail
 

@@ -2,7 +2,19 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+extern "C" {
+#include "dlfcn.h"
+#include "link.h"
+}
+
+#include <map>
+#include <set>
+
+#include "llvm/ADT/StringRef.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/GlobPattern.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/Path.h"
 
 #include "revng/Support/Assert.h"
 #include "revng/Support/Debug.h"
@@ -10,50 +22,60 @@
 
 static Logger<> Log("find-resources");
 
-std::string getCurrentExecutableFullPath() {
-  // TODO: make this optional
-  llvm::SmallString<128> SelfPath("/proc/self/exe");
-  llvm::SmallString<128> FullPath;
-  std::error_code Err = llvm::sys::fs::real_path(SelfPath, FullPath);
-  if (Err)
-    revng_abort("Could not determine executable path");
+struct Resources {
+  bool FirstCall = true;
+  std::string CurrentRoot;
+  std::map<std::string, std::string> LibrariesFullPath;
+};
 
-  revng_assert(not FullPath.empty());
+llvm::ManagedStatic<Resources> Resources;
 
-  return FullPath.str().str();
+extern "C" {
+static int
+dlIteratePhdrCallback(struct dl_phdr_info *Info, size_t Size, void *Data) {
+  using llvm::StringRef;
+
+  if (Info->dlpi_name == nullptr)
+    return 0;
+
+  StringRef FullPath(Info->dlpi_name);
+  if (FullPath.size() == 0)
+    return 0;
+
+  StringRef Name = llvm::sys::path::filename(FullPath);
+  Resources->LibrariesFullPath[Name.rsplit(".so").first.str()] = FullPath.str();
+
+  return 0;
+}
 }
 
-std::string getCurrentRoot() {
-  using llvm::sys::path::parent_path;
+static void initialize() {
+  if (not Resources->FirstCall)
+    return;
 
-  auto MaybeBuffer = llvm::MemoryBuffer::getFileAsStream("/proc/self/maps");
-  if (!MaybeBuffer)
-    revng_abort("Unable to open /proc/self/maps");
+  Resources->FirstCall = false;
 
-  auto Maps = (*MaybeBuffer)->getBuffer();
-  llvm::SmallVector<llvm::StringRef, 128> MapsLines;
-  Maps.split(MapsLines, "\n");
+  dl_iterate_phdr(dlIteratePhdrCallback, nullptr);
 
-  for (const auto &Line : MapsLines) {
-    llvm::StringRef File = std::get<1>(Line.rsplit(" "));
+  using namespace llvm::sys::path;
+  constexpr const char *MainLibrary = "librevngSupport";
+  using llvm::StringRef;
+  StringRef MainLibraryFullPath = Resources->LibrariesFullPath.at(MainLibrary);
+  Resources->CurrentRoot = parent_path(parent_path(MainLibraryFullPath));
+}
 
-    if (File.endswith("librevngSupport.so")) {
-      llvm::SmallString<128> FullPath;
+llvm::StringRef getCurrentRoot() {
+  initialize();
+  return Resources->CurrentRoot;
+}
 
-      std::error_code Err = llvm::sys::fs::real_path(File, FullPath);
-      if (Err)
-        revng_abort("Could not find real path of librevngSupport.so");
-
-      revng_assert(!FullPath.empty());
-
-      return parent_path(parent_path(FullPath)).str();
-    }
-  }
-  revng_abort("Could not determine root folder");
+const std::map<std::string, std::string> &getLibrariesFullPath() {
+  initialize();
+  return Resources->LibrariesFullPath;
 }
 
 static std::optional<std::string>
-findFileInPaths(const std::string &FileName,
+findFileInPaths(llvm::StringRef FileName,
                 const std::vector<std::string> &SearchPaths) {
 
   std::optional<std::string> FoundFileName;
@@ -82,10 +104,44 @@ findFileInPaths(const std::string &FileName,
     }
   }
 
+  revng_assert(FoundFileName,
+               ("failed to find '" + FileName + "'.").str().c_str());
+
   return FoundFileName;
 }
 
-std::optional<std::string>
-PathList::findFile(const std::string &FileName) const {
+std::optional<std::string> PathList::findFile(llvm::StringRef FileName) const {
   return findFileInPaths(FileName, SearchPaths);
+}
+
+std::vector<std::string> PathList::list(llvm::StringRef Path,
+                                        llvm::StringRef Suffix) const {
+  using namespace llvm;
+  using namespace sys;
+  using namespace fs;
+  using std::string;
+
+  std::set<string> Visited;
+  std::vector<string> Result;
+  for (const string &SearchPath : SearchPaths) {
+    SmallString<16> FullPath(SearchPath);
+    path::append(FullPath, Path);
+
+    if (is_directory(FullPath)) {
+      std::error_code EC;
+      for (directory_iterator File(FullPath, EC), FileEnd;
+           File != FileEnd && !EC;
+           File.increment(EC)) {
+        if (llvm::StringRef(File->path()).endswith(Suffix)) {
+          bool New = Visited.insert(path::filename(File->path()).str()).second;
+          if (New)
+            Result.push_back(File->path());
+        }
+      }
+
+      revng_assert(!EC);
+    }
+  }
+
+  return Result;
 }

@@ -13,20 +13,27 @@
 
 inline llvm::IntegerType *getCSVType(llvm::GlobalVariable *CSV) {
   using namespace llvm;
-  return cast<IntegerType>(CSV->getType()->getPointerElementType());
+  return cast<IntegerType>(CSV->getValueType());
 }
 
 namespace NextJumpTarget {
 
-enum Values { Unique, Multiple, Helper };
-
+enum Values {
+  Unique,
+  Multiple,
+  Helper
 };
+
+}; // namespace NextJumpTarget
 
 namespace PCAffectingCSV {
 
-enum Values { PC, IsThumb };
-
+enum Values {
+  PC,
+  IsThumb
 };
+
+}; // namespace PCAffectingCSV
 
 namespace revng::detail {
 
@@ -48,24 +55,19 @@ protected:
 
 protected:
   unsigned Alignment;
-  llvm::GlobalVariable *AddressCSV;
-  llvm::GlobalVariable *EpochCSV;
-  llvm::GlobalVariable *AddressSpaceCSV;
-  llvm::GlobalVariable *TypeCSV;
+  llvm::GlobalVariable *AddressCSV = nullptr;
+  llvm::GlobalVariable *EpochCSV = nullptr;
+  llvm::GlobalVariable *AddressSpaceCSV = nullptr;
+  llvm::GlobalVariable *TypeCSV = nullptr;
 
-  std::set<llvm::Value *> CSVsAffectingPC;
+  std::set<llvm::GlobalVariable *> CSVsAffectingPC;
 
 public:
   using DispatcherTarget = std::pair<MetaAddress, llvm::BasicBlock *>;
   using DispatcherTargets = std::vector<DispatcherTarget>;
 
 protected:
-  ProgramCounterHandler(unsigned Alignment) :
-    Alignment(Alignment),
-    AddressCSV(nullptr),
-    EpochCSV(nullptr),
-    AddressSpaceCSV(nullptr),
-    TypeCSV(nullptr) {}
+  ProgramCounterHandler(unsigned Alignment) : Alignment(Alignment) {}
 
 public:
   virtual ~ProgramCounterHandler() {}
@@ -84,7 +86,7 @@ public:
     return { EpochCSV, AddressSpaceCSV, TypeCSV, AddressCSV };
   }
 
-  /// \brief Hook for the emission of a store to a CSV
+  /// Hook for the emission of a store to a CSV
   ///
   /// \param Builder IRBuilder to employ in order to inject new instructions. It
   ///        is positioned after \p Store
@@ -110,25 +112,30 @@ public:
     store(Builder, TypeCSV, NewPC.type());
   }
 
-  void expandNewPC(llvm::CallInst *Call) const {
+  void expandNewPC(llvm::CallBase *Call) const {
     revng_assert(isCallTo(Call, "newpc"));
-    auto MA = MetaAddress::fromConstant(Call->getArgOperand(0));
+    MetaAddress Address = addressFromNewPC(Call);
     llvm::IRBuilder<> Builder(Call);
-    setPC(Builder, MA);
+    setPC(Builder, Address);
   }
 
-  llvm::Value *loadPC(llvm::IRBuilder<> &Builder) const;
+  void setCurrentPCPlainMetaAddress(llvm::IRBuilder<> &Builder) const;
+  void setLastPCPlainMetaAddress(llvm::IRBuilder<> &Builder,
+                                 const MetaAddress &Address) const;
+  void setPlainMetaAddress(llvm::IRBuilder<> &Builder,
+                           llvm::StringRef GlobalName,
+                           const MetaAddress &Address) const;
 
 protected:
-  virtual void
-  initializePCInternal(llvm::IRBuilder<> &Builder, MetaAddress NewPC) const = 0;
+  virtual void initializePCInternal(llvm::IRBuilder<> &Builder,
+                                    MetaAddress NewPC) const = 0;
 
   virtual bool handleStoreInternal(llvm::IRBuilder<> &Builder,
                                    llvm::StoreInst *Store) const = 0;
 
 public:
   bool affectsPC(llvm::GlobalVariable *GV) const {
-    return CSVsAffectingPC.count(GV) != 0;
+    return CSVsAffectingPC.contains(GV);
   }
 
   bool affectsPC(llvm::StoreInst *Store) const {
@@ -139,7 +146,7 @@ public:
       return false;
   }
 
-  /// \return an empty Optional if the PC has not changed on at least one path,
+  /// \return an empty optional if the PC has not changed on at least one path,
   ///         an invalid MetaAddress in case there isn't a single next PC, or,
   ///         finally, a valid MetaAddress representing the only possible next
   ///         PC
@@ -151,8 +158,8 @@ public:
 
     // Load and re-store each CSV affecting the PC and then feed them to
     // handleStore
-    for (Value *CSVAffectingPC : CSVsAffectingPC) {
-      auto *FakeLoad = Builder.CreateLoad(CSVAffectingPC);
+    for (GlobalVariable *CSVAffectingPC : CSVsAffectingPC) {
+      auto *FakeLoad = createLoad(Builder, CSVAffectingPC);
       auto *FakeStore = Builder.CreateStore(FakeLoad, CSVAffectingPC);
       bool HasInjectedCode = handleStore(Builder, FakeStore);
       eraseFromParent(FakeStore);
@@ -179,14 +186,14 @@ public:
 
   llvm::Instruction *composeIntegerPC(llvm::IRBuilder<> &B) const {
     return MetaAddress::composeIntegerPC(B,
-                                         align(B, B.CreateLoad(AddressCSV)),
-                                         B.CreateLoad(EpochCSV),
-                                         B.CreateLoad(AddressSpaceCSV),
-                                         B.CreateLoad(TypeCSV));
+                                         align(B, createLoad(B, AddressCSV)),
+                                         createLoad(B, EpochCSV),
+                                         createLoad(B, AddressSpaceCSV),
+                                         createLoad(B, TypeCSV));
   }
 
   bool isPCSizedType(llvm::Type *T) const {
-    return T == AddressCSV->getType()->getPointerElementType();
+    return T == AddressCSV->getValueType();
   }
 
 public:
@@ -201,22 +208,21 @@ public:
   buildDispatcher(DispatcherTargets &Targets,
                   llvm::IRBuilder<> &Builder,
                   llvm::BasicBlock *Default,
-                  llvm::Optional<BlockType::Values> SetBlockType) const;
+                  std::optional<BlockType::Values> SetBlockType) const;
 
   DispatcherInfo
   buildDispatcher(DispatcherTargets &Targets,
                   llvm::BasicBlock *CreateIn,
                   llvm::BasicBlock *Default,
-                  llvm::Optional<BlockType::Values> SetBlockType) const {
+                  std::optional<BlockType::Values> SetBlockType) const {
     llvm::IRBuilder<> Builder(CreateIn);
     return buildDispatcher(Targets, Builder, Default, SetBlockType);
   }
 
   /// \note \p Root must not already contain a case for \p NewTarget
-  void
-  addCaseToDispatcher(llvm::SwitchInst *Root,
-                      const DispatcherTarget &NewTarget,
-                      llvm::Optional<BlockType::Values> SetBlockType) const;
+  void addCaseToDispatcher(llvm::SwitchInst *Root,
+                           const DispatcherTarget &NewTarget,
+                           std::optional<BlockType::Values> SetBlockType) const;
 
   void destroyDispatcher(llvm::SwitchInst *Root) const;
 
@@ -297,7 +303,7 @@ protected:
   static llvm::StoreInst *
   store(llvm::IRBuilder<> &Builder, llvm::GlobalVariable *GV, uint64_t Value) {
     using namespace llvm;
-    auto *Type = cast<IntegerType>(GV->getType()->getPointerElementType());
+    auto *Type = cast<IntegerType>(GV->getValueType());
     return Builder.CreateStore(ConstantInt::get(Type, Value), GV);
   }
 };

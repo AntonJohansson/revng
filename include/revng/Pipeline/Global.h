@@ -13,7 +13,10 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include "revng/Pipeline/GlobalTupleTreeDiff.h"
+#include "revng/Pipeline/PathTargetBimap.h"
+#include "revng/Storage/Path.h"
 #include "revng/Support/YAMLTraits.h"
+#include "revng/TupleTree/Tracking.h"
 #include "revng/TupleTree/TupleTreeDiff.h"
 
 namespace pipeline {
@@ -21,28 +24,53 @@ namespace pipeline {
 class Global {
 private:
   const char *ID;
+  std::string Name;
 
 public:
-  Global(const char *ID) : ID(ID) {}
-
+  Global(const char *ID, llvm::StringRef Name) : ID(ID), Name(Name.str()) {}
   virtual ~Global() {}
+  virtual Global &operator=(const Global &NewGlobal) = 0;
+
+public:
+  Global(const Global &) = default;
+  Global(Global &&) = default;
+  Global &operator=(Global &&) = default;
 
 public:
   const char *getID() const { return ID; }
+  llvm::StringRef getName() const { return Name; }
 
 public:
   virtual GlobalTupleTreeDiff diff(const Global &Other) const = 0;
-
   virtual llvm::Error applyDiff(const llvm::MemoryBuffer &Diff) = 0;
+  virtual llvm::Error applyDiff(const GlobalTupleTreeDiff &Diff) = 0;
+
   virtual llvm::Error serialize(llvm::raw_ostream &OS) const = 0;
   virtual llvm::Error deserialize(const llvm::MemoryBuffer &Buffer) = 0;
-  virtual void verify(ErrorList &EL) const = 0;
+  virtual llvm::Expected<GlobalTupleTreeDiff>
+  deserializeDiff(const llvm::MemoryBuffer &Diff) = 0;
+
+  virtual bool verify() const = 0;
   virtual void clear() = 0;
+
   virtual llvm::Expected<std::unique_ptr<Global>>
-  createNew(const llvm::MemoryBuffer &Buffer) const = 0;
+  createNew(llvm::StringRef Name, const llvm::MemoryBuffer &Buffer) const = 0;
   virtual std::unique_ptr<Global> clone() const = 0;
-  virtual llvm::Error storeToDisk(llvm::StringRef Path) const;
-  virtual llvm::Error loadFromDisk(llvm::StringRef Path);
+
+  virtual llvm::Error store(const revng::FilePath &Path) const;
+  virtual llvm::Error load(const revng::FilePath &Path);
+
+  virtual std::optional<TupleTreePath>
+  deserializePath(llvm::StringRef Serialized) const = 0;
+  virtual std::optional<std::string>
+  serializePath(const TupleTreePath &Path) const = 0;
+
+  virtual void collectReadFields(const TargetInContainer &Target,
+                                 PathTargetBimap &Out) = 0;
+  virtual void clearAndResume() const = 0;
+  virtual void pushReadFields() const = 0;
+  virtual void popReadFields() const = 0;
+  virtual void stopTracking() const = 0;
 };
 
 template<TupleTreeCompatibleAndVerifiable Object>
@@ -56,10 +84,10 @@ private:
   }
 
 public:
-  explicit TupleTreeGlobal(TupleTree<Object> Value) :
-    Global(&getID()), Value(std::move(Value)) {}
+  explicit TupleTreeGlobal(llvm::StringRef Name, TupleTree<Object> Value) :
+    Global(&getID(), Name), Value(std::move(Value)) {}
 
-  TupleTreeGlobal() : Global(&getID()) {}
+  explicit TupleTreeGlobal(llvm::StringRef Name) : Global(&getID(), Name) {}
   TupleTreeGlobal(const TupleTreeGlobal &Other) = default;
   TupleTreeGlobal(TupleTreeGlobal &&Other) = default;
   TupleTreeGlobal &operator=(const TupleTreeGlobal &Other) = default;
@@ -70,11 +98,12 @@ public:
 
 public:
   llvm::Expected<std::unique_ptr<Global>>
-  createNew(const llvm::MemoryBuffer &Buffer) const override {
+  createNew(llvm::StringRef Name,
+            const llvm::MemoryBuffer &Buffer) const override {
     auto MaybeTree = TupleTree<Object>::deserialize(Buffer.getBuffer());
     if (!MaybeTree)
       return llvm::errorCodeToError(MaybeTree.getError());
-    return std::make_unique<TupleTreeGlobal>(MaybeTree.get());
+    return std::make_unique<TupleTreeGlobal>(Name, MaybeTree.get());
   }
 
   std::unique_ptr<Global> clone() const override {
@@ -82,7 +111,10 @@ public:
     return std::unique_ptr<Global>(Ptr);
   }
 
-  void clear() override { *Value = Object(); }
+  void clear() override {
+    Value.evictCachedReferences();
+    *Value = Object();
+  }
 
   llvm::Error serialize(llvm::raw_ostream &OS) const override {
     Value.serialize(OS);
@@ -90,32 +122,87 @@ public:
   }
 
   llvm::Error deserialize(const llvm::MemoryBuffer &Buffer) override {
-    auto MaybeDiff = TupleTree<Object>::deserialize(Buffer.getBuffer());
-    if (!MaybeDiff)
-      return llvm::errorCodeToError(MaybeDiff.getError());
+    auto MaybeTupleTree = TupleTree<Object>::deserialize(Buffer.getBuffer());
+    if (!MaybeTupleTree)
+      return llvm::errorCodeToError(MaybeTupleTree.getError());
 
-    Value = *MaybeDiff;
+    if (not(*MaybeTupleTree)->verify()) {
+      using llvm::Twine;
+      std::string Message = (Twine("Verify failed on ") + getName()).str();
+      return llvm::createStringError(llvm::inconvertibleErrorCode(), Message);
+    }
+
+    Value = *MaybeTupleTree;
     return llvm::Error::success();
   }
 
-  void verify(ErrorList &EL) const override { Value->verify(EL); }
+  llvm::Expected<GlobalTupleTreeDiff>
+  deserializeDiff(const llvm::MemoryBuffer &Buffer) override {
+    auto MaybeDiff = ::deserialize<TupleTreeDiff<Object>>(Buffer.getBuffer());
+    if (not MaybeDiff)
+      return MaybeDiff.takeError();
+    return GlobalTupleTreeDiff(std::move(*MaybeDiff), getName());
+  }
+
+  bool verify() const override { return Value->verify(); }
 
   GlobalTupleTreeDiff diff(const Global &Other) const override {
     const TupleTreeGlobal &Casted = llvm::cast<TupleTreeGlobal>(Other);
     auto Diff = ::diff(*Value, *Casted.Value);
-    return GlobalTupleTreeDiff(std::move(Diff));
+    return GlobalTupleTreeDiff(std::move(Diff), getName());
   }
 
   llvm::Error applyDiff(const llvm::MemoryBuffer &Diff) override {
-    auto MaybeDiff = ::deserialize<TupleTreeDiff<Object>>(Diff.getBuffer());
-    if (not MaybeDiff)
+    auto MaybeDiff = TupleTreeDiff<Object>::deserialize(Diff.getBuffer());
+    if (not MaybeDiff) {
       return MaybeDiff.takeError();
-    MaybeDiff->apply(Value);
-    return llvm::Error::success();
+    }
+    return MaybeDiff->apply(Value);
+  }
+
+  llvm::Error applyDiff(const TupleTreeDiff<Object> &Diff) {
+    return Diff.apply(Value);
+  }
+
+  llvm::Error applyDiff(const GlobalTupleTreeDiff &Diff) override {
+    return Diff.getAs<Object>()->apply(Value);
+  }
+
+  Global &operator=(const Global &Other) override {
+    const TupleTreeGlobal &Casted = llvm::cast<TupleTreeGlobal>(Other);
+    Value = Casted.Value;
+    return *this;
   }
 
   const TupleTree<Object> &get() const { return Value; }
   TupleTree<Object> &get() { return Value; }
+
+  std::optional<TupleTreePath>
+  deserializePath(llvm::StringRef Serialized) const override {
+    return stringAsPath<Object>(Serialized);
+  }
+
+  std::optional<std::string>
+  serializePath(const TupleTreePath &Path) const override {
+    return pathAsString<Object>(Path);
+  }
+
+  void collectReadFields(const TargetInContainer &Target,
+                         PathTargetBimap &Out) override {
+    const TupleTree<Object> &AsConst = Value;
+    ReadFields Results = revng::Tracking::collect(*AsConst);
+    for (const TupleTreePath &Result : Results.Read)
+      Out.insert(Target, Result);
+    for (const TupleTreePath &Result : Results.ExactVectors)
+      Out.insert(Target, Result);
+  }
+
+  void clearAndResume() const override {
+    revng::Tracking::clearAndResume(*Value);
+  }
+  void pushReadFields() const override { revng::Tracking::push(*Value); }
+  void popReadFields() const override { revng::Tracking::pop(*Value); }
+  void stopTracking() const override { revng::Tracking::stop(*Value); }
 };
 
 } // namespace pipeline

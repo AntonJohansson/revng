@@ -17,9 +17,11 @@
 
 #include "revng/Pipeline/Container.h"
 #include "revng/Pipeline/ContainerSet.h"
+#include "revng/Pipeline/ExecutionContext.h"
 #include "revng/Pipeline/Global.h"
 #include "revng/Pipeline/GlobalsMap.h"
 #include "revng/Pipeline/KindsRegistry.h"
+#include "revng/Storage/Path.h"
 #include "revng/Support/Assert.h"
 
 namespace pipeline {
@@ -35,10 +37,12 @@ extern Logger<> CommandLogger;
 class Context {
 private:
   GlobalsMap Globals;
+  uint64_t CommitIndex = 0;
   llvm::StringMap<std::any> Contexts;
   KindsRegistry TheKindRegistry;
 
-  llvm::StringMap<const ContainerSet::value_type *> ReadOnlyContainers;
+  llvm::StringMap<const pipeline::ContainerSet::value_type *>
+    ReadOnlyContainers;
 
 private:
   explicit Context(KindsRegistry Registry) :
@@ -64,6 +68,9 @@ public:
   void addGlobal(llvm::StringRef Name, ArgsT &&...Args) {
     Globals.emplace<T>(Name, std::forward<T>(Args)...);
   }
+
+  void bumpCommitIndex() { CommitIndex += 1; }
+  uint64_t getCommitIndex() const { return CommitIndex; }
 
   template<typename T>
   void addExternalContext(llvm::StringRef Name, T &ToAdd) {
@@ -101,12 +108,12 @@ public:
   }
 
   bool containsReadOnlyContainer(llvm::StringRef Name) const {
-    return ReadOnlyContainers.count(Name)
-           and ReadOnlyContainers.find(Name)->second != nullptr;
+    auto It = ReadOnlyContainers.find(Name);
+    return It != ReadOnlyContainers.end() and It->second->second != nullptr;
   }
 
   bool hasRegisteredReadOnlyContainer(llvm::StringRef Name) const {
-    return ReadOnlyContainers.count(Name);
+    return ReadOnlyContainers.find(Name) != ReadOnlyContainers.end();
   }
 
   template<typename ContainerType>
@@ -118,12 +125,18 @@ public:
   }
 
 public:
-  llvm::Error storeToDisk(llvm::StringRef Path) const {
-    return Globals.storeToDisk(Path);
-  }
-  llvm::Error loadFromDisk(llvm::StringRef Path) {
-    return Globals.loadFromDisk(Path);
-  }
-};
+  llvm::Error store(const revng::DirectoryPath &Path) const;
+  llvm::Error load(const revng::DirectoryPath &Path);
 
+public:
+  void collectReadFields(const TargetInContainer &Target,
+                         llvm::StringMap<PathTargetBimap> &Out) const {
+    Globals.collectReadFields(Target, Out);
+  }
+
+  void clearAndResume() const { Globals.clearAndResume(); }
+  void pushReadFields() const { Globals.pushReadFields(); }
+  void popReadFields() const { Globals.popReadFields(); }
+  void stopTracking() const { Globals.stopTracking(); }
+};
 } // namespace pipeline

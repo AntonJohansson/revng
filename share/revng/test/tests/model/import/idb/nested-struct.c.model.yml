@@ -1,0 +1,40 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+Types:
+  - Kind: StructType
+    ID: 8153719478940916065
+    OriginalName: my_struct
+    Fields:
+      - Offset: 0
+        OriginalName: second
+        Type:
+          UnqualifiedType: "/Types/3436967820219683210-TypedefType"
+      - Offset: 8
+        OriginalName: x
+        Type:
+          UnqualifiedType: "/Types/1028-PrimitiveType"
+      - Offset: 12
+        OriginalName: "y"
+        Type:
+          UnqualifiedType: "/Types/1028-PrimitiveType"
+    Size: 16
+  - Kind: TypedefType
+    ID: 3436967820219683210
+    OriginalName: second_struct
+    UnderlyingType:
+      UnqualifiedType: "/Types/9993798603444101287-StructType"
+  - Kind: StructType
+    ID: 9993798603444101287
+    OriginalName: second_struct
+    Fields:
+      - Offset: 0
+        OriginalName: a
+        Type:
+          UnqualifiedType: "/Types/1028-PrimitiveType"
+      - Offset: 4
+        OriginalName: b
+        Type:
+          UnqualifiedType: "/Types/1028-PrimitiveType"
+    Size: 8

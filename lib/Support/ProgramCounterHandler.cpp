@@ -1,16 +1,19 @@
 /// \file ProgramCounterHandler.cpp
-/// \brief
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
 #include "llvm/ADT/SmallSet.h"
+#include "llvm/Support/ModRef.h"
 
+#include "revng/Support/Assert.h"
 #include "revng/Support/ProgramCounterHandler.h"
 
 using namespace llvm;
 using PCH = ProgramCounterHandler;
+
+static bool DoStuff = false;
 
 class PCOnlyProgramCounterHandler : public ProgramCounterHandler {
 public:
@@ -32,8 +35,8 @@ public:
     return Result;
   }
 
-  static std::unique_ptr<ProgramCounterHandler>
-  fromModule(Module *M, unsigned Alignment) {
+  static std::unique_ptr<ProgramCounterHandler> fromModule(Module *M,
+                                                           unsigned Alignment) {
     auto Result = std::make_unique<PCOnlyProgramCounterHandler>(Alignment);
 
     // Initialize the standard variables
@@ -52,7 +55,7 @@ public:
   }
 
   Value *loadJumpablePC(IRBuilder<> &Builder) const final {
-    return Builder.CreateLoad(AddressCSV);
+    return createLoad(Builder, AddressCSV);
   }
 
   std::array<Value *, 4> dissectJumpablePC(IRBuilder<> &Builder,
@@ -75,8 +78,8 @@ public:
   }
 
 protected:
-  void
-  initializePCInternal(IRBuilder<> &Builder, MetaAddress NewPC) const final {}
+  void initializePCInternal(IRBuilder<> &Builder,
+                            MetaAddress NewPC) const final {}
 };
 
 class ARMProgramCounterHandler : public ProgramCounterHandler {
@@ -142,10 +145,10 @@ private:
   }
 
   Value *loadJumpablePC(IRBuilder<> &Builder) const final {
-    auto *Address = Builder.CreateLoad(AddressCSV);
+    auto *Address = createLoad(Builder, AddressCSV);
     auto *AddressType = Address->getType();
     return Builder.CreateOr(Address,
-                            Builder.CreateZExt(Builder.CreateLoad(IsThumb),
+                            Builder.CreateZExt(createLoad(Builder, IsThumb),
                                                AddressType));
   }
 
@@ -173,11 +176,14 @@ private:
     constexpr uint32_t CPSRIndex = 19;
     constexpr unsigned IsThumbBitIndex = 5;
 
-    Type *IsThumbType = IsThumb->getType()->getPointerElementType();
+    Type *IsThumbType = IsThumb->getValueType();
 
     // Load the CPSR field
-    Value *CPSRAddress = B.CreateGEP(SavedRegisters, B.getInt32(CPSRIndex));
-    Value *CPSR = B.CreateLoad(CPSRAddress);
+    IntegerType *RegisterType = IntegerType::get(AddressCSV->getContext(), 32);
+    Value *CPSRAddress = B.CreateGEP(RegisterType,
+                                     SavedRegisters,
+                                     B.getInt32(CPSRIndex));
+    Value *CPSR = B.CreateLoad(RegisterType, CPSRAddress);
 
     // Select the T bit
     Value *TBit = B.CreateAnd(B.CreateLShr(CPSR, IsThumbBitIndex), 1);
@@ -202,24 +208,30 @@ private:
     auto *ThumbCode = CI::get(TypeType, Code_arm_thumb);
     // We don't use select here, SCEV can't handle it
     // NewType = ARM + IsThumb * (Thumb - ARM)
+    unsigned ThumbSize = cast<IntegerType>(IsThumb->getType())->getBitWidth();
+    unsigned TypeSize = cast<IntegerType>(TypeType)->getBitWidth();
+    auto *CastedThumb = (ThumbSize < TypeSize)
+                        ? B.CreateZExt(IsThumb, TypeType)
+                        : B.CreateTrunc(IsThumb, TypeType);
     auto *NewType = B.CreateAdd(ArmCode,
-                                B.CreateMul(B.CreateTrunc(IsThumb, TypeType),
+                                B.CreateMul(CastedThumb,
                                             B.CreateSub(ThumbCode, ArmCode)));
     return NewType;
   }
 
 protected:
-  void
-  initializePCInternal(IRBuilder<> &Builder, MetaAddress NewPC) const final {
+  void initializePCInternal(IRBuilder<> &Builder,
+                            MetaAddress NewPC) const final {
     using namespace MetaAddressType;
     store(Builder, IsThumb, NewPC.type() == Code_arm_thumb ? 1 : 0);
   }
 };
 
 static void eraseIfNoUse(const WeakVH &V) {
-  if (Instruction *I = dyn_cast_or_null<Instruction>(&*V))
-    if (I->use_begin() == I->use_end())
-      eraseFromParent(I);
+  if (V != nullptr)
+    if (Instruction *I = dyn_cast_or_null<Instruction>(&*V))
+      if (I->use_begin() == I->use_end())
+        eraseFromParent(I);
 }
 
 static SwitchInst *getNextSwitch(SwitchInst::CaseHandle Case) {
@@ -246,10 +258,10 @@ static void addCase(SwitchInst *Switch, uint64_t Value, BasicBlock *BB) {
 
 class PartialMetaAddress {
 private:
-  Optional<uint64_t> Address;
-  Optional<uint64_t> Epoch;
-  Optional<uint64_t> AddressSpace;
-  Optional<uint64_t> Type;
+  std::optional<uint64_t> Address;
+  std::optional<uint64_t> Epoch;
+  std::optional<uint64_t> AddressSpace;
+  std::optional<uint64_t> Type;
 
 public:
   bool isEmpty() const { return not(Address or Epoch or AddressSpace or Type); }
@@ -281,10 +293,10 @@ public:
       Type = V;
   }
 
-  bool hasAddress() { return Address.hasValue(); }
-  bool hasEpoch() { return Epoch.hasValue(); }
-  bool hasAddressSpace() { return AddressSpace.hasValue(); }
-  bool hasType() { return Type.hasValue(); }
+  bool hasAddress() { return Address.has_value(); }
+  bool hasEpoch() { return Epoch.has_value(); }
+  bool hasAddressSpace() { return AddressSpace.has_value(); }
+  bool hasType() { return Type.has_value(); }
 
   MetaAddress toMetaAddress() const {
     if (Type and Address and Epoch and AddressSpace) {
@@ -306,7 +318,7 @@ private:
 public:
   bool visit(BasicBlock *BB) {
     // Check if we already visited this block
-    if (Visited.count(BB) != 0) {
+    if (Visited.contains(BB)) {
       return true;
     } else {
       // Register as visited
@@ -340,52 +352,100 @@ public:
 
 bool PCH::isPCAffectingHelper(Instruction *I) const {
   CallInst *HelperCall = getCallToHelper(I);
+  if (DoStuff) errs() << "  " << (HelperCall == nullptr) << "\n";
   if (HelperCall == nullptr)
     return false;
 
   auto MaybeUsedCSVs = getCSVUsedByHelperCallIfAvailable(HelperCall);
 
   // If CSAA didn't consider this helper, be conservative
+  if (DoStuff) errs() << "  " << (not MaybeUsedCSVs) << "\n";
   if (not MaybeUsedCSVs)
     return true;
 
-  for (GlobalVariable *CSV : MaybeUsedCSVs->Written)
-    if (affectsPC(CSV))
+  for (GlobalVariable *CSV : MaybeUsedCSVs->Written) {
+    if (DoStuff) errs() << "     " << *CSV << "\n";
+    if (DoStuff) errs() << "     " << affectsPC(CSV) << "\n";
+    if (affectsPC(CSV)) {
       return true;
+    }
+  }
+
+  if (DoStuff) errs() << "  FQALSE\n";
 
   return false;
 }
 
-llvm::Value *ProgramCounterHandler::loadPC(llvm::IRBuilder<> &Builder) const {
+static void setPlainMetaAddressImpl(IRBuilder<> &Builder,
+                                    StringRef GlobalName,
+                                    Value *Epoch,
+                                    Value *AddressSpace,
+                                    Value *Type,
+                                    Value *Address) {
   using namespace llvm;
 
   BasicBlock *BB = Builder.GetInsertBlock();
   Module *M = BB->getParent()->getParent();
-  Value *V = UndefValue::get(MetaAddress::getStruct(M));
-  unsigned I = 0;
-  auto Insert = [&](llvm::GlobalVariable *CSV) {
-    using IV = InsertValueInst;
-    Value *ToInsert = Builder.CreateZExt(Builder.CreateLoad(CSV),
-                                         V->getType()->getStructElementType(I));
-    V = Builder.Insert(IV::Create(V, ToInsert, { I }));
-    ++I;
+
+  GlobalVariable *Global = M->getGlobalVariable(GlobalName);
+  revng_assert(Global != nullptr);
+
+  Function *MetaAddressConstuctor = M->getFunction("set_PlainMetaAddress");
+  auto WriteArguments = MemoryEffects::argMemOnly(ModRefInfo::Mod);
+  MetaAddressConstuctor->setMemoryEffects(WriteArguments);
+  MetaAddressConstuctor->addFnAttr(Attribute::WillReturn);
+  MetaAddressConstuctor->addFnAttr(Attribute::NoUnwind);
+  auto *FT = MetaAddressConstuctor->getFunctionType();
+  Builder.CreateCall(MetaAddressConstuctor,
+                     { Global,
+                       Builder.CreateZExt(Epoch, FT->getParamType(1)),
+                       Builder.CreateZExt(AddressSpace, FT->getParamType(2)),
+                       Builder.CreateZExt(Type, FT->getParamType(3)),
+                       Builder.CreateZExt(Address, FT->getParamType(4)) });
+}
+
+void PCH::setCurrentPCPlainMetaAddress(IRBuilder<> &Builder) const {
+  setPlainMetaAddressImpl(Builder,
+                          "current_pc",
+                          createLoad(Builder, EpochCSV),
+                          createLoad(Builder, AddressSpaceCSV),
+                          createLoad(Builder, TypeCSV),
+                          createLoad(Builder, AddressCSV));
+}
+
+void PCH::setLastPCPlainMetaAddress(IRBuilder<> &Builder,
+                                    const MetaAddress &Address) const {
+  setPlainMetaAddress(Builder, "last_pc", Address);
+}
+
+void ProgramCounterHandler::setPlainMetaAddress(llvm::IRBuilder<> &Builder,
+                                                StringRef GlobalName,
+                                                const MetaAddress &Address)
+  const {
+  auto CI = [](llvm::GlobalVariable *Example, uint64_t Value) -> ConstantInt * {
+    auto *Type = Example->getValueType();
+    return ConstantInt::get(cast<IntegerType>(Type), Value);
   };
-
-  Insert(EpochCSV);
-  Insert(AddressSpaceCSV);
-  Insert(TypeCSV);
-  Insert(AddressCSV);
-
-  return V;
+  setPlainMetaAddressImpl(Builder,
+                          GlobalName,
+                          CI(EpochCSV, Address.Epoch),
+                          CI(AddressSpaceCSV, Address.AddressSpace),
+                          CI(TypeCSV, Address.Type),
+                          CI(AddressCSV, Address.Address));
 }
 
 std::pair<NextJumpTarget::Values, MetaAddress>
 PCH::getUniqueJumpTarget(BasicBlock *BB) {
+  //DoStuff = BB->getName().contains("0x400190");
   std::vector<StackEntry> Stack;
 
-  enum ProcessResult { Proceed, DontProceed, BailOut };
+  enum ProcessResult {
+    Proceed,
+    DontProceed,
+    BailOut
+  };
 
-  Optional<MetaAddress> AgreedMA;
+  std::optional<MetaAddress> AgreedMA;
 
   bool ChangedByHelper = false;
 
@@ -398,9 +458,15 @@ PCH::getUniqueJumpTarget(BasicBlock *BB) {
 
     PartialMetaAddress &PMA = S.agreement();
 
+
+    if (DoStuff) errs() << "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO\n";
     // Iterate backward on all instructions
     for (Instruction &I : make_range(BB->rbegin(), BB->rend())) {
+      if (DoStuff) errs() << "||||: " << I << "\n";
+      if (DoStuff) errs() << PMA.isEmpty() << "\n";
+      if (DoStuff) errs() << isPCAffectingHelper(&I) << "\n";
       if (auto *Store = dyn_cast<StoreInst>(&I)) {
+        if (DoStuff) errs() << "STORE" << "\n";
         // We found a store
         Value *Pointer = Store->getPointerOperand();
         Value *V = Store->getValueOperand();
@@ -432,19 +498,19 @@ PCH::getUniqueJumpTarget(BasicBlock *BB) {
         }
 
       } else if (CallInst *NewPCCall = getCallTo(&I, "newpc")) {
+        if (DoStuff) errs() << "NEWPC" << "\n";
         //
         // We reached a call to newpc
         //
 
         if (PMA.isEmpty()) {
-          // We have found a path on which the PC doesn't change return an
-          // empty llvm::Optional
-          revng_abort();
+          // We have found a path on which the PC doesn't change
+          AgreedMA = MetaAddress::invalid();
+          return BailOut;
         }
 
         // Obtain the current PC and fill in all the missing fields
-        Value *FirstArgument = NewPCCall->getArgOperand(0);
-        PMA.set(MetaAddress::fromConstant(FirstArgument));
+        PMA.set(addressFromNewPC(NewPCCall));
 
         // Compute the final MetaAddress on this path and ensure it's the same
         // as previous ones
@@ -458,6 +524,7 @@ PCH::getUniqueJumpTarget(BasicBlock *BB) {
         }
 
       } else if (PMA.isEmpty() and isPCAffectingHelper(&I)) {
+        if (DoStuff) errs() << "HELPER" << "\n";
         // Non-constant store to PC CSV when no other value of the PC has been
         // written yet, bail out
         AgreedMA = MetaAddress::invalid();
@@ -507,6 +574,8 @@ PCH::getUniqueJumpTarget(BasicBlock *BB) {
   } else {
     return { NextJumpTarget::Multiple, MetaAddress::invalid() };
   }
+
+  DoStuff = false;
 }
 
 class SwitchManager {
@@ -520,9 +589,9 @@ private:
   Value *CurrentType;
   Value *CurrentAddress;
 
-  Optional<BlockType::Values> SetBlockType;
+  std::optional<BlockType::Values> SetBlockType;
 
-  SmallVectorImpl<BasicBlock *> *NewBlocksRegistry;
+  SmallVectorImpl<BasicBlock *> *NewBlocksRegistry = nullptr;
 
 public:
   SwitchManager(BasicBlock *Default,
@@ -530,7 +599,7 @@ public:
                 Value *CurrentAddressSpace,
                 Value *CurrentType,
                 Value *CurrentAddress,
-                Optional<BlockType::Values> SetBlockType,
+                std::optional<BlockType::Values> SetBlockType,
                 SmallVectorImpl<BasicBlock *> *NewBlocksRegistry = nullptr) :
     Context(getContext(Default)),
     F(Default->getParent()),
@@ -547,7 +616,7 @@ public:
                 GlobalVariable *AddressSpaceCSV,
                 GlobalVariable *TypeCSV,
                 GlobalVariable *AddressCSV,
-                Optional<BlockType::Values> SetBlockType) :
+                std::optional<BlockType::Values> SetBlockType) :
     Context(getContext(Root)),
     F(Root->getParent()->getParent()),
     Default(Root->getDefaultDest()),
@@ -556,10 +625,10 @@ public:
     bool Empty = Root->case_begin() == Root->case_end();
     if (Empty) {
       IRBuilder<> Builder(Root);
-      CurrentEpoch = Builder.CreateLoad(EpochCSV);
-      CurrentAddressSpace = Builder.CreateLoad(AddressSpaceCSV);
-      CurrentType = Builder.CreateLoad(TypeCSV);
-      CurrentAddress = Builder.CreateLoad(AddressCSV);
+      CurrentEpoch = createLoad(Builder, EpochCSV);
+      CurrentAddressSpace = createLoad(Builder, AddressSpaceCSV);
+      CurrentType = createLoad(Builder, TypeCSV);
+      CurrentAddress = createLoad(Builder, AddressCSV);
     } else {
       // Get the switches of the the first MA. This is just in order to get a
       // reference to their conditions
@@ -632,8 +701,8 @@ public:
     }
   }
 
-  SwitchInst *
-  getOrCreateTypeSwitch(SwitchInst *AddressSpaceSwitch, const MetaAddress &MA) {
+  SwitchInst *getOrCreateTypeSwitch(SwitchInst *AddressSpaceSwitch,
+                                    const MetaAddress &MA) {
     if (auto *Existing = getSwitchForLabel(AddressSpaceSwitch,
                                            MA.addressSpace())) {
       return Existing;
@@ -642,8 +711,8 @@ public:
     }
   }
 
-  SwitchInst *
-  getOrCreateAddressSwitch(SwitchInst *TypeSwitch, const MetaAddress &MA) {
+  SwitchInst *getOrCreateAddressSwitch(SwitchInst *TypeSwitch,
+                                       const MetaAddress &MA) {
     if (auto *Existing = getSwitchForLabel(TypeSwitch, MA.type())) {
       return Existing;
     } else {
@@ -658,8 +727,8 @@ public:
                            CurrentAddressSpace);
   }
 
-  SwitchInst *
-  registerAddressSpaceCase(SwitchInst *Switch, const MetaAddress &MA) {
+  SwitchInst *registerAddressSpaceCase(SwitchInst *Switch,
+                                       const MetaAddress &MA) {
     return registerNewCase(Switch,
                            MA.addressSpace(),
                            "address_space_" + Twine(MA.addressSpace()),
@@ -707,9 +776,11 @@ private:
   }
 };
 
+using std::optional;
+
 void PCH::addCaseToDispatcher(SwitchInst *Root,
                               const DispatcherTarget &NewTarget,
-                              Optional<BlockType::Values> SetBlockType) const {
+                              optional<BlockType::Values> SetBlockType) const {
   auto &[MA, BB] = NewTarget;
 
   SwitchManager SM(Root,
@@ -742,7 +813,7 @@ PCH::DispatcherInfo
 PCH::buildDispatcher(DispatcherTargets &Targets,
                      IRBuilder<> &Builder,
                      BasicBlock *Default,
-                     Optional<BlockType::Values> SetBlockType) const {
+                     std::optional<BlockType::Values> SetBlockType) const {
   DispatcherInfo Result;
 
   LLVMContext &Context = getContext(Default);
@@ -755,10 +826,10 @@ PCH::buildDispatcher(DispatcherTargets &Targets,
             });
 
   // First of all, create code to load the components of the MetaAddress
-  Value *CurrentEpoch = Builder.CreateLoad(EpochCSV);
-  Value *CurrentAddressSpace = Builder.CreateLoad(AddressSpaceCSV);
-  Value *CurrentType = Builder.CreateLoad(TypeCSV);
-  Value *CurrentAddress = Builder.CreateLoad(AddressCSV);
+  Value *CurrentEpoch = createLoad(Builder, EpochCSV);
+  Value *CurrentAddressSpace = createLoad(Builder, AddressSpaceCSV);
+  Value *CurrentType = createLoad(Builder, TypeCSV);
+  Value *CurrentAddress = createLoad(Builder, AddressCSV);
 
   SwitchManager SM(Default,
                    CurrentEpoch,
@@ -827,6 +898,7 @@ static unsigned getMinimumPCAlignment(Triple::ArchType Architecture) {
   case Triple::mips:
   case Triple::mipsel:
   case Triple::aarch64:
+  case Triple::hexagon:
     return 4;
   default:
     revng_abort();
@@ -849,6 +921,7 @@ PCH::create(Triple::ArchType Architecture,
   case Triple::aarch64:
   case Triple::systemz:
   case Triple::x86:
+  case Triple::hexagon:
     return PCOnlyProgramCounterHandler::create(M, Factory, Alignment);
 
   default:
@@ -872,6 +945,7 @@ PCH::fromModule(Triple::ArchType Architecture, Module *M) {
   case Triple::aarch64:
   case Triple::systemz:
   case Triple::x86:
+  case Triple::hexagon:
     return PCOnlyProgramCounterHandler::fromModule(M, Alignment);
 
   default:
@@ -887,7 +961,7 @@ void PCH::buildHotPath(IRBuilder<> &B,
   auto &[Address, BB] = CandidateTarget;
 
   auto CreateCmp = [&B](GlobalVariable *CSV, uint64_t Value) {
-    Instruction *Load = B.CreateLoad(CSV);
+    Instruction *Load = createLoad(B, CSV);
     Type *LoadType = Load->getType();
     return B.CreateICmpEQ(Load, ConstantInt::get(LoadType, Value));
   };

@@ -4,7 +4,9 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include <compare>
 #include <optional>
+#include <type_traits>
 #include <variant>
 
 #include "llvm/ADT/StringRef.h"
@@ -15,51 +17,107 @@
 #include "revng/TupleTree/TupleTreePath.h"
 #include "revng/TupleTree/Visits.h"
 
-namespace revng::detail {
-
-template<typename T, typename R>
-concept ConstOrNot = std::is_same_v<R, T> or std::is_same_v<const R, T>;
-
-} // namespace revng::detail
-
 template<typename T, typename RootType>
 class TupleTreeReference {
 public:
   using RootT = RootType;
   using RootVariant = std::variant<RootT *, const RootT *>;
+  using TargetVariant = std::variant<T *, const T *>;
 
-public:
+private:
   RootVariant Root = static_cast<RootT *>(nullptr);
   TupleTreePath Path;
+  TargetVariant CachedTarget = static_cast<T *>(nullptr);
+
+public:
+  TupleTreeReference() = default;
+  TupleTreeReference(ConstOrNot<RootT> auto *R, const TupleTreePath &P) :
+    Root{ RootVariant{ R } },
+    Path{ P },
+    CachedTarget{ static_cast<T *>(nullptr) } {}
+
+  TupleTreeReference(const TupleTreeReference &) = default;
+  TupleTreeReference &operator=(const TupleTreeReference &) = default;
+  TupleTreeReference(TupleTreeReference &) = default;
+  TupleTreeReference &operator=(TupleTreeReference &) = default;
+
+public:
+  const RootT *getRoot() const {
+    const auto GetPtrToConstRoot =
+      [](const auto &RootPointer) -> const RootT * { return RootPointer; };
+    return std::visit(GetPtrToConstRoot, Root);
+  }
+
+  void setRoot(ConstOrNot<RootT> auto *NewRoot) { Root = NewRoot; }
+
+private:
+  // Friend class that is allowed to manage the cached pointer to the target
+  template<TupleTreeCompatible>
+  friend class TupleTree;
+
+  T *getCached() {
+    if (std::holds_alternative<RootT *>(Root)) {
+      revng_assert(std::holds_alternative<T *>(CachedTarget));
+      return std::get<T *>(CachedTarget);
+    } else if (std::holds_alternative<const RootT *>(Root)) {
+      revng_abort("Called getCached() with const Root, use getCachedConst!");
+    } else {
+      revng_abort("Invalid root variant!");
+    }
+  }
+
+  const T *getCachedConst() const {
+    const auto GetConstPtrVisitor = [](const auto &Cached) -> const T * {
+      return Cached;
+    };
+    return std::visit(GetConstPtrVisitor, CachedTarget);
+  }
+
+  bool isCached() const { return getCachedConst() != nullptr; }
+
+  bool cacheTarget() {
+    if (isValid()) {
+      if (std::holds_alternative<const RootT *>(Root)) {
+        CachedTarget = getConst();
+      } else if (std::holds_alternative<RootT *>(Root)) {
+        CachedTarget = get();
+      } else {
+        revng_abort("Invalid root variant!");
+      }
+    }
+    return isCached();
+  }
+
+  void evictCachedTarget() { CachedTarget = static_cast<T *>(nullptr); }
 
 public:
   static TupleTreeReference
-  fromPath(revng::detail::ConstOrNot<TupleTreeReference::RootT> auto *Root,
-           const TupleTreePath &Path) {
-    return TupleTreeReference{ .Root = RootVariant{ Root }, .Path = Path };
-  }
-
-  static TupleTreeReference
-  fromString(revng::detail::ConstOrNot<TupleTreeReference::RootT> auto *Root,
+  fromString(ConstOrNot<TupleTreeReference::RootT> auto *Root,
              llvm::StringRef Path) {
     std::optional<TupleTreePath> OptionalPath = stringAsPath<RootT>(Path);
     if (not OptionalPath.has_value())
       return TupleTreeReference{};
-    return fromPath(Root, *OptionalPath);
+    return TupleTreeReference{ Root, *OptionalPath };
   }
 
   bool operator==(const TupleTreeReference &Other) const {
     // The paths are the same even if they are referred to different roots
+    if (isCached() and Other.isCached())
+      return getCachedConst() == Other.getCachedConst();
     return Path == Other.Path;
   }
 
-  bool operator<(const TupleTreeReference &Other) const {
+  std::strong_ordering operator<=>(const TupleTreeReference &Other) const {
     // The paths are the same even if they are referred to different roots
-    return Path < Other.Path;
+    if (isCached() and Other.isCached())
+      return getCachedConst() <=> Other.getCachedConst();
+    return Path <=> Other.Path;
   }
 
 public:
   std::string toString() const { return *pathAsString<RootT>(Path); }
+
+  void dump() const debug_function { dbg << toString() << "\n"; }
 
   const TupleTreePath &path() const { return Path; }
 
@@ -77,8 +135,10 @@ private:
 
 public:
   const T *get() const {
-    static_assert(TupleTreeCompatible<RootType>);
     revng_assert(canGet());
+
+    if (isCached())
+      return getCachedConst();
 
     if (Path.size() == 0)
       return nullptr;
@@ -91,8 +151,10 @@ public:
   }
 
   T *get() {
-    static_assert(TupleTreeCompatible<RootType>);
     revng_assert(canGet());
+
+    if (isCached())
+      return getCached();
 
     if (Path.size() == 0)
       return nullptr;
@@ -107,8 +169,10 @@ public:
   }
 
   const T *getConst() const {
-    static_assert(TupleTreeCompatible<RootType>);
     revng_assert(canGet());
+
+    if (isCached())
+      return getCachedConst();
 
     if (Path.size() == 0)
       return nullptr;
@@ -122,8 +186,18 @@ public:
     }
   }
 
+  bool isConst() const { return std::holds_alternative<const RootT *>(Root); }
+
+  bool empty() const debug_function { return Path.empty(); }
+
   bool isValid() const debug_function {
-    return canGet() and not Path.empty() and get() != nullptr;
+    if (not canGet() or Path.empty())
+      return false;
+    const T *TargetPointer = getConst();
+    const T *CachedPointer = getCachedConst();
+    if (not CachedPointer)
+      return TargetPointer;
+    return TargetPointer and TargetPointer == CachedPointer;
   }
 };
 
@@ -146,7 +220,7 @@ struct llvm::yaml::ScalarTraits<T> {
   }
 };
 
-/// \brief Specialization for the std::variant we have in TupleTreeReference
+/// Specialization for the std::variant we have in TupleTreeReference
 template<bool X, typename T>
 inline void writeToLog(Logger<X> &This,
                        const std::variant<T *, const T *> &Var,

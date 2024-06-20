@@ -33,7 +33,7 @@ class Instruction;
 class MDNode;
 } // namespace llvm
 
-/// \brief Pass to collect basic information about the generated code
+/// Pass to collect basic information about the generated code
 ///
 /// This pass provides useful information for other passes by extracting them
 /// from the generated IR, and possibly caching them.
@@ -56,14 +56,13 @@ public:
     UnexpectedPC(nullptr),
     PCRegSize(0),
     RootFunction(nullptr),
-    MetaAddressStruct(nullptr),
     PCH(),
     RootParsed(false) {}
 
   void run(llvm::Module &M);
 
-  /// \brief Handle the invalidation of this information, so that it does not
-  ///        get invalidated by other passes.
+  /// Handle the invalidation of this information, so that it does not get
+  /// invalidated by other passes.
   bool invalidate(llvm::Module &,
                   const llvm::PreservedAnalyses &,
                   llvm::ModuleAnalysisManager::Invalidator &) {
@@ -126,12 +125,12 @@ public:
     return getKillReason(T) != KillReason::NonKiller;
   }
 
-  /// \brief Return the CSV representing the stack pointer
+  /// Return the CSV representing the stack pointer
   llvm::GlobalVariable *spReg() const { return SP; }
-  /// \brief Return the CSV representing the return address register
+  /// Return the CSV representing the return address register
   llvm::GlobalVariable *raReg() const { return RA; }
 
-  /// \brief Check if \p GV is the stack pointer CSV
+  /// Check if \p GV is the stack pointer CSV
   bool isSPReg(const llvm::GlobalVariable *GV) const {
     revng_assert(SP != nullptr);
     return GV == SP;
@@ -144,11 +143,11 @@ public:
   }
 
   // TODO: this method should probably be deprecated
-  /// \brief Return the CSV representing the program counter
+  /// Return the CSV representing the program counter
   llvm::GlobalVariable *pcReg() const { return PC; }
 
   // TODO: this method should probably be deprecated
-  /// \brief Check if \p GV is the program counter CSV
+  /// Check if \p GV is the program counter CSV
   bool isPCReg(const llvm::GlobalVariable *GV) const {
     revng_assert(PC != nullptr);
     return GV == PC;
@@ -164,7 +163,7 @@ public:
     if (not PCH) {
       llvm::Module *M = RootFunction->getParent();
       using namespace model::Architecture;
-      auto Architecture = toLLVMArchitecture(Binary->Architecture);
+      auto Architecture = toLLVMArchitecture(Binary->Architecture());
       PCH = ProgramCounterHandler::fromModule(Architecture, M);
     }
 
@@ -193,7 +192,7 @@ public:
                                                     { IBDHB });
   }
 
-  /// \brief Return the basic block associated to \p PC
+  /// Return the basic block associated to \p PC
   ///
   /// Returns nullptr if the PC doesn't have a basic block (yet)
   llvm::BasicBlock *getBlockAt(MetaAddress PC) {
@@ -206,20 +205,9 @@ public:
     return It->second;
   }
 
-  /// \brief Return true if the basic block is a jump target
-  static bool isJumpTarget(llvm::BasicBlock *BB) {
-    return getType(BB->getTerminator()) == BlockType::JumpTargetBlock;
-  }
-
-  llvm::BasicBlock *getJumpTargetBlock(llvm::BasicBlock *BB);
-
-  MetaAddress getJumpTarget(llvm::BasicBlock *BB) {
-    return getPCFromNewPC(getJumpTargetBlock(BB));
-  }
-
   bool isJump(llvm::BasicBlock *BB) { return isJump(BB->getTerminator()); }
 
-  /// \brief Return true if \p T represents a jump in the input assembly
+  /// Return true if \p T represents a jump in the input assembly
   ///
   /// Return true if \p T targets include only dispatcher-related basic blocks
   /// and jump targets.
@@ -239,17 +227,17 @@ public:
     return true;
   }
 
-  /// \brief Return true if \p BB is the result of translating some code
+  /// Return true if \p BB is the result of translating some code
   ///
   /// Return false if \p BB is a dispatcher-related basic block.
-  static bool isTranslated(llvm::BasicBlock *BB) {
+  static bool isTranslated(const llvm::BasicBlock *BB) {
     BlockType::Values Type = getType(BB);
     return (Type == BlockType::TranslatedBlock
             or Type == BlockType::JumpTargetBlock);
   }
 
-  /// \brief Return the program counter of the next (i.e., fallthrough)
-  ///        instruction of \p TheInstruction
+  /// Return the program counter of the next (i.e., fallthrough) instruction
+  /// of \p TheInstruction
   MetaAddress getNextPC(llvm::Instruction *TheInstruction) const {
     auto Pair = getPC(TheInstruction);
     return Pair.first + Pair.second;
@@ -307,54 +295,14 @@ public:
   }
 
   bool isABIRegister(llvm::GlobalVariable *CSV) const {
-    return ABIRegistersSet.count(CSV) != 0;
-  }
-  llvm::Constant *toConstant(const MetaAddress &Address) {
-    revng_assert(MetaAddressStruct != nullptr);
-    return Address.toConstant(MetaAddressStruct);
+    return ABIRegistersSet.contains(CSV);
   }
 
   MetaAddress fromPC(uint64_t PC) const {
     using namespace model::Architecture;
-    auto Architecture = toLLVMArchitecture(Binary->Architecture);
+    auto Architecture = toLLVMArchitecture(Binary->Architecture());
     return MetaAddress::fromPC(Architecture, PC);
   }
-
-  struct SuccessorsList {
-    bool AnyPC = false;
-    bool UnexpectedPC = false;
-    bool Other = false;
-    std::set<MetaAddress> Addresses;
-
-    bool operator==(const SuccessorsList &Other) const = default;
-
-    static SuccessorsList other() {
-      SuccessorsList Result;
-      Result.Other = true;
-      return Result;
-    }
-
-    bool hasSuccessors() const {
-      return AnyPC or UnexpectedPC or Other or Addresses.size() != 0;
-    }
-
-    void dump() const debug_function { dump(dbg); }
-
-    template<typename O>
-    void dump(O &Output) const {
-      Output << "AnyPC: " << AnyPC << "\n";
-      Output << "UnexpectedPC: " << UnexpectedPC << "\n";
-      Output << "Other: " << Other << "\n";
-      Output << "Addresses:\n";
-      for (const MetaAddress &Address : Addresses) {
-        Output << "  ";
-        Address.dump(Output);
-        Output << "\n";
-      }
-    }
-  };
-
-  SuccessorsList getSuccessors(llvm::BasicBlock *BB);
 
   llvm::Function *root() {
     parseRoot();
@@ -363,28 +311,6 @@ public:
 
   llvm::SmallVector<std::pair<llvm::BasicBlock *, bool>, 4>
   blocksByPCRange(MetaAddress Start, MetaAddress End);
-
-  static MetaAddress getPCFromNewPC(llvm::Instruction *I) {
-    if (llvm::CallInst *NewPCCall = getCallTo(I, "newpc")) {
-      return MetaAddress::fromConstant(NewPCCall->getArgOperand(0));
-    } else {
-      return MetaAddress::invalid();
-    }
-  }
-
-  static MetaAddress getPCFromNewPC(llvm::BasicBlock *BB) {
-    return getPCFromNewPC(&*BB->begin());
-  }
-
-  template<HasMetadata T>
-  void setMetaAddressMetadata(T *U,
-                              llvm::StringRef Name,
-                              const MetaAddress &MA) const {
-    using namespace llvm;
-    auto *VAM = ValueAsMetadata::get(MA.toConstant(MetaAddressStruct));
-    auto *MD = MDTuple::get(getContext(RootFunction), VAM);
-    U->setMetadata(Name, MD);
-  }
 
 private:
   void parseRoot();
@@ -404,7 +330,6 @@ private:
   std::vector<llvm::GlobalVariable *> CSVs;
   std::vector<llvm::GlobalVariable *> ABIRegisters;
   std::set<llvm::GlobalVariable *> ABIRegistersSet;
-  llvm::StructType *MetaAddressStruct;
   llvm::Function *NewPC;
   std::unique_ptr<ProgramCounterHandler> PCH;
   using PCToBlockMap = std::multimap<MetaAddress, llvm::BasicBlock *>;

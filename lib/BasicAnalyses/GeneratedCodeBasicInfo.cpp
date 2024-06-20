@@ -1,6 +1,6 @@
 /// \file GeneratedCodeBasicInfo.cpp
-/// \brief Implements the GeneratedCodeBasicInfo pass which provides basic
-///        information about the translated code (e.g., which CSV is the PC).
+/// Implements the GeneratedCodeBasicInfo pass which provides basic information
+/// about the translated code (e.g., which CSV is the PC).
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
@@ -31,13 +31,11 @@ static RegisterGCBI X("gcbi", "Generated Code Basic Info", true, true);
 void GeneratedCodeBasicInfo::run(Module &M) {
   RootFunction = M.getFunction("root");
   NewPC = M.getFunction("newpc");
-  if (NewPC != nullptr)
-    MetaAddressStruct = cast<StructType>(NewPC->arg_begin()->getType());
 
   revng_log(PassesLog, "Starting GeneratedCodeBasicInfo");
 
   using namespace model::Architecture;
-  auto Architecture = Binary->Architecture;
+  auto Architecture = Binary->Architecture();
   PC = M.getGlobalVariable(getPCCSVName(Architecture), true);
   SP = M.getGlobalVariable(getCSVName(getStackPointer(Architecture)), true);
   auto ReturnAddressRegister = getReturnAddressRegister(Architecture);
@@ -50,20 +48,11 @@ void GeneratedCodeBasicInfo::run(Module &M) {
     ABIRegistersSet.insert(CSV);
   }
 
-  Type *PCType = PC->getType()->getPointerElementType();
+  Type *PCType = PC->getValueType();
   PCRegSize = M.getDataLayout().getTypeAllocSize(PCType);
 
-  QuickMetadata QMD(M.getContext());
-  if (auto *NamedMD = M.getNamedMetadata("revng.csv")) {
-    auto *Tuple = cast<MDTuple>(NamedMD->getOperand(0));
-    for (const MDOperand &Operand : Tuple->operands()) {
-      if (Operand.get() == nullptr)
-        continue;
-
-      auto *CSV = cast<GlobalVariable>(QMD.extract<Constant *>(Operand.get()));
-      CSVs.push_back(CSV);
-    }
-  }
+  for (GlobalVariable &CSV : FunctionTags::CSV.globals(&M))
+    CSVs.push_back(&CSV);
 
   revng_log(PassesLog, "Ending GeneratedCodeBasicInfo");
 }
@@ -102,7 +91,7 @@ void GeneratedCodeBasicInfo::parseRoot() {
       case BlockType::JumpTargetBlock: {
         auto *Call = cast<CallInst>(&*BB.begin());
         revng_assert(Call->getCalledFunction() == NewPC);
-        JumpTargets[MetaAddress::fromConstant(Call->getArgOperand(0))] = &BB;
+        JumpTargets[addressFromNewPC(Call)] = &BB;
         break;
       }
       case BlockType::RootDispatcherHelperBlock:
@@ -117,45 +106,6 @@ void GeneratedCodeBasicInfo::parseRoot() {
   }
 }
 
-GeneratedCodeBasicInfo::SuccessorsList
-GeneratedCodeBasicInfo::getSuccessors(BasicBlock *BB) {
-  parseRoot();
-
-  bool IsRoot = BB->getParent() == RootFunction;
-
-  SuccessorsList Result;
-
-  df_iterator_default_set<BasicBlock *> Visited;
-
-  if (IsRoot) {
-    Visited.insert(AnyPC);
-    Visited.insert(UnexpectedPC);
-  }
-
-  for (BasicBlock *Block : depth_first_ext(BB, Visited)) {
-    for (BasicBlock *Successor : successors(Block)) {
-      revng_assert(Successor != Dispatcher);
-
-      MetaAddress Address = getBasicBlockPC(Successor);
-      const auto IBDHB = BlockType::IndirectBranchDispatcherHelperBlock;
-      if (Address.isValid()) {
-        Visited.insert(Successor);
-        Result.Addresses.insert(Address);
-      } else if (IsRoot and Successor == AnyPC) {
-        Result.AnyPC = true;
-      } else if (IsRoot and Successor == UnexpectedPC) {
-        Result.UnexpectedPC = true;
-      } else if (getType(Successor) == IBDHB) {
-        // Ignore
-      } else {
-        Result.Other = true;
-      }
-    }
-  }
-
-  return Result;
-}
-
 SmallVector<std::pair<BasicBlock *, bool>, 4>
 GeneratedCodeBasicInfo::blocksByPCRange(MetaAddress Start, MetaAddress End) {
   SmallVector<std::pair<BasicBlock *, bool>, 4> Result;
@@ -165,7 +115,11 @@ GeneratedCodeBasicInfo::blocksByPCRange(MetaAddress Start, MetaAddress End) {
   df_iterator_default_set<BasicBlock *> Visited;
   for (BasicBlock *BB : depth_first_ext(StartBB, Visited)) {
     // Detect if this basic block is a boundary
-    enum { Unknown, Yes, No } IsBoundary = Unknown;
+    enum {
+      Unknown,
+      Yes,
+      No
+    } IsBoundary = Unknown;
 
     auto SuccBegin = succ_begin(BB);
     auto SuccEnd = succ_end(BB);
@@ -176,11 +130,10 @@ GeneratedCodeBasicInfo::blocksByPCRange(MetaAddress Start, MetaAddress End) {
       for (BasicBlock *Successor : make_range(SuccBegin, SuccEnd)) {
 
         // Ignore unexpectedpc
-        using GCBI = GeneratedCodeBasicInfo;
         if (getType(Successor) == BlockType::UnexpectedPCBlock)
           continue;
 
-        auto SuccessorMA = GCBI::getPCFromNewPC(Successor);
+        auto SuccessorMA = getBasicBlockAddress(Successor);
         if (not isPartOfRootDispatcher(Successor)
             and (SuccessorMA.isInvalid()
                  or (SuccessorMA.address() >= Start.address()
@@ -200,35 +153,6 @@ GeneratedCodeBasicInfo::blocksByPCRange(MetaAddress Start, MetaAddress End) {
     Result.emplace_back(BB, IsBoundary == Yes);
   }
 
-  return Result;
-}
-
-static RecursiveCoroutine<void>
-findJumpTarget(llvm::BasicBlock *&Result,
-               llvm::BasicBlock *BB,
-               std::set<BasicBlock *> &Visited) {
-  Visited.insert(BB);
-
-  if (GeneratedCodeBasicInfo::isJumpTarget(BB)) {
-    revng_assert(Result == nullptr,
-                 "This block leads to multiple jump targets");
-    Result = BB;
-  } else {
-    for (BasicBlock *Predecessor : predecessors(BB)) {
-      if (Visited.count(Predecessor) == 0) {
-        rc_recur findJumpTarget(Result, Predecessor, Visited);
-      }
-    }
-  }
-
-  rc_return;
-}
-
-llvm::BasicBlock *
-GeneratedCodeBasicInfo::getJumpTargetBlock(llvm::BasicBlock *BB) {
-  BasicBlock *Result = nullptr;
-  std::set<BasicBlock *> Visited;
-  findJumpTarget(Result, BB, Visited);
   return Result;
 }
 

@@ -44,8 +44,8 @@ public:
 public:
   virtual ~ContainerEnumerator() = default;
 
-  virtual TargetsList
-  enumerate(const Context &Ctx, const Container &ToInspect) const = 0;
+  virtual TargetsList enumerate(const Context &Ctx,
+                                const Container &ToInspect) const = 0;
 
   /// \return must return true if it was possible to remove the provided target
   virtual bool remove(const Context &Ctx,
@@ -85,16 +85,11 @@ protected:
   Context *Ctx;
 
 public:
-  EnumerableContainer(Context &Ctx,
-                      llvm::StringRef Name,
-                      llvm::StringRef MIMEType) :
-    Container<Derived>(Name, MIMEType), Ctx(&Ctx) {}
+  EnumerableContainer(Context &Ctx, llvm::StringRef Name) :
+    Container<Derived>(Name), Ctx(&Ctx) {}
 
-  EnumerableContainer(Context &Ctx,
-                      llvm::StringRef Name,
-                      llvm::StringRef MIMEType,
-                      const char *ID) :
-    Container<Derived>(Name, MIMEType, ID), Ctx(&Ctx) {}
+  EnumerableContainer(Context &Ctx, llvm::StringRef Name, const char *ID) :
+    Container<Derived>(Name, ID), Ctx(&Ctx) {}
 
 public:
   const Context &getContext() const { return *Ctx; }
@@ -126,21 +121,28 @@ public:
 
     return RemovedAll;
   }
+
+  static std::vector<Kind *> possibleKinds() {
+    std::vector<Kind *> ToReturn;
+    for (auto *Inspector : getRegisteredInspectors()) {
+      ToReturn.push_back(&Inspector->getKind());
+    }
+
+    return ToReturn;
+  }
 };
 
 template<typename Container>
 class KindForContainer : public Kind, public ContainerEnumerator<Container> {
 public:
-  KindForContainer(llvm::StringRef Name, Rank *Rank) :
-    Kind(Name, Rank),
+  template<RankSpecialization BaseRank>
+  KindForContainer(llvm::StringRef Name, const BaseRank &Rank) :
+    Kind(Name, Rank, {}, {}),
     ContainerEnumerator<Container>(*static_cast<Kind *>(this)) {}
 
-  KindForContainer(llvm::StringRef Name, Kind &Parent) :
-    Kind(Name, Parent, &Parent.rank()),
-    ContainerEnumerator<Container>(*static_cast<Kind *>(this)) {}
-
-  KindForContainer(llvm::StringRef Name, Kind &Parent, Rank *Rank) :
-    Kind(Name, Parent, Rank),
+  template<RankSpecialization BaseRank>
+  KindForContainer(llvm::StringRef Name, Kind &Parent, const BaseRank &Rank) :
+    Kind(Name, Parent, Rank, {}, {}),
     ContainerEnumerator<Container>(*static_cast<Kind *>(this)) {}
 
 public:

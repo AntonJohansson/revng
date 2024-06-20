@@ -2,37 +2,26 @@
 # This file is distributed under the MIT License. See LICENSE.md for details.
 #
 
-revng_add_analyses_library_internal(
+revng_add_library_internal(
   revngYield
   SHARED
   Assembly/DisassemblyHelper.cpp
-  Assembly/PTML.cpp
   Assembly/LLVMDisassemblerInterface.cpp
-  Assembly/Plain.cpp
+  CallGraphs/CallGraphSlices.cpp
+  ControlFlow/ConvertFromEFA.cpp
   ControlFlow/Extraction.cpp
   ControlFlow/FallthroughDetection.cpp
   ControlFlow/NodeSizeCalculation.cpp
-  ControlFlow/SVG.cpp
-  Pipes/AssemblyPipes.cpp
-  Pipes/CallGraphPipes.cpp
-  Pipes/CFGPipes.cpp
-  Support/SugiyamaStyleGraphLayout/EdgeRouting.cpp
-  Support/SugiyamaStyleGraphLayout/GraphPreparation.cpp
-  Support/SugiyamaStyleGraphLayout/HorizontalPositions.cpp
-  Support/SugiyamaStyleGraphLayout/LaneDistribution.cpp
-  Support/SugiyamaStyleGraphLayout/LayoutConversion.cpp
-  Support/SugiyamaStyleGraphLayout/LinearSegmentSelection.cpp
-  Support/SugiyamaStyleGraphLayout/NodeRanking.cpp
-  Support/SugiyamaStyleGraphLayout/PermutationSelection.cpp
-  Support/SugiyamaStyleGraphLayout/TopologicalOrdering.cpp
-  Support/SugiyamaStyleGraphLayout/VerticalPositions.cpp
-  Support/SugiyamaStyleGraphLayout.cpp
   CrossRelations.cpp
   Dump.cpp
+  HexDump.cpp
+  Plain.cpp
+  PTML.cpp
+  SVG.cpp
   Verify.cpp)
 
 set(DISASSEMBLER_ARCHITECTURE_SUPPORT "")
-foreach(CURRENT_ARCHITECTURE AArch64 AMDGPU ARM Mips SystemZ X86)
+foreach(CURRENT_ARCHITECTURE AArch64 ARM Mips SystemZ X86)
   set(DISASSEMBLER_ARCHITECTURE_SUPPORT
       ${DISASSEMBLER_ARCHITECTURE_SUPPORT}
       "${CURRENT_ARCHITECTURE}Disassembler" "${CURRENT_ARCHITECTURE}Info"
@@ -52,9 +41,9 @@ target_link_libraries(
   revngYield
   revngEarlyFunctionAnalysis
   revngModelPasses
-  revngPipes
   revngPTML
   revngSupport
+  revngSugiyamaGraphLayout
   revngLift
   ${LLVM_LIBRARIES})
 
@@ -66,21 +55,54 @@ target_tuple_tree_generator(
   "Yield"
   NAMESPACE
   "yield"
+  ROOT_TYPE
+  Function
   SCHEMA_PATH
   "${CMAKE_BINARY_DIR}/yield-internal-schema.yml"
   SEPARATE_STRING_TYPES
   "MetaAddress"
   SCALAR_TYPES
+  "BasicBlockID"
   "MetaAddress"
-  "efa::FunctionEdgeBase"
   "yield::ByteContainer"
+  "model::FunctionAttribute::Values"
   HEADERS
+  "${INTERNAL_ASSEMBLY_HEADERS}/CallEdge.h"
+  "${INTERNAL_ASSEMBLY_HEADERS}/FunctionEdge.h"
+  "${INTERNAL_ASSEMBLY_HEADERS}/FunctionEdgeBase.h"
+  "${INTERNAL_ASSEMBLY_HEADERS}/FunctionEdgeType.h"
   "${INTERNAL_ASSEMBLY_HEADERS}/BasicBlock.h"
   "${INTERNAL_ASSEMBLY_HEADERS}/Function.h"
   "${INTERNAL_ASSEMBLY_HEADERS}/Instruction.h"
   "${INTERNAL_ASSEMBLY_HEADERS}/Tag.h"
-  "${INTERNAL_ASSEMBLY_HEADERS}/TagType.h"
+  "${INTERNAL_ASSEMBLY_HEADERS}/TagType.h")
+
+set(INTERNAL_ASSEMBLY_HEADERS
+    "${CMAKE_SOURCE_DIR}/include/revng/Yield/CrossRelations")
+target_tuple_tree_generator(
+  revngYield
+  INSTALL
+  HEADER_DIRECTORY
+  "Yield/CrossRelations"
+  NAMESPACE
+  "yield::crossrelations"
+  ROOT_TYPE
+  CrossRelations
+  SCHEMA_PATH
+  "${CMAKE_BINARY_DIR}/yield-cross-relations.yml"
+  SEPARATE_STRING_TYPES
+  "MetaAddress"
+  SCALAR_TYPES
+  "BasicBlockID"
+  "MetaAddress"
+  "yield::ByteContainer"
+  HEADERS
   "${INTERNAL_ASSEMBLY_HEADERS}/CrossRelations.h"
-  "${INTERNAL_ASSEMBLY_HEADERS}/RelationDescription.h"
-  "${INTERNAL_ASSEMBLY_HEADERS}/RelationTarget.h"
-  "${INTERNAL_ASSEMBLY_HEADERS}/RelationType.h")
+  "${INTERNAL_ASSEMBLY_HEADERS}/RelationDescription.h")
+
+revng_add_analyses_library_internal(
+  revngYieldPipes SHARED Pipes/AssemblyPipes.cpp Pipes/CallGraphPipes.cpp
+  Pipes/CFGPipes.cpp)
+
+target_link_libraries(revngYieldPipes revngYield revngFunctionIsolation
+                      revngPipes revngSupport)

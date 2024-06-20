@@ -5,6 +5,7 @@
 //
 
 #include <array>
+#include <iterator>
 #include <optional>
 #include <set>
 #include <string_view>
@@ -12,6 +13,7 @@
 
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/iterator_range.h"
 
 #include "revng/ADT/Concepts.h"
 #include "revng/Support/Debug.h"
@@ -131,6 +133,9 @@ using DIT = decltype(dereferenceIterator(std::declval<T>()));
 template<typename T>
 using DereferenceIteratorType = revng::detail::DIT<T>;
 
+template<typename T>
+using DereferenceRangeType = llvm::iterator_range<revng::detail::DIT<T>>;
+
 auto dereferenceRange(auto &&Range) {
   return llvm::make_range(dereferenceIterator(Range.begin()),
                           dereferenceIterator(Range.end()));
@@ -147,13 +152,100 @@ using MapToValueIteratorType = decltype(mapToValueIterator(std::declval<T>()));
 
 } // namespace revng
 
-template<typename C>
-inline auto skip(unsigned ToSkip, C &&Container)
-  -> llvm::iterator_range<decltype(Container.begin())> {
-  auto Begin = std::begin(Container);
-  while (ToSkip-- > 0)
-    Begin++;
-  return llvm::make_range(Begin, std::end(Container));
+//
+// skip
+//
+
+namespace revng::detail {
+
+template<bool SafeMode, typename IteratorType>
+inline auto skipImpl(IteratorType &&From,
+                     IteratorType &&To,
+                     std::size_t Front = 0,
+                     std::size_t Back = 0)
+  -> llvm::iterator_range<IteratorType> {
+
+  std::ptrdiff_t TotalSkippedCount = Front + Back;
+  if constexpr (std::forward_iterator<IteratorType>) {
+    // We cannot check on the input iterators because it's going to consume
+    // them.
+
+    if (std::distance(From, To) < TotalSkippedCount) {
+      if constexpr (SafeMode) {
+        revng_abort("Input range has fewer elements than the intended skip.");
+      } else {
+        // Quietly return an empty range if there are more skips requested than
+        // the total number of elements the input range contains.
+        return llvm::make_range(To, To);
+      }
+    }
+  }
+
+  std::decay_t<IteratorType> Begin{ From };
+  std::advance(Begin, Front);
+
+  std::decay_t<IteratorType> End{ To };
+  std::advance(End, -(std::ptrdiff_t) Back);
+
+  return llvm::make_range(std::move(Begin), std::move(End));
+}
+
+template<std::bidirectional_iterator T>
+inline decltype(auto)
+skip(T &&From, T &&To, std::size_t Front = 0, std::size_t Back = 0) {
+  return skipImpl<true>(std::forward<T>(From),
+                        std::forward<T>(To),
+                        Front,
+                        Back);
+}
+
+template<std::input_iterator T>
+inline decltype(auto) // NOLINTNEXTLINE
+skip_front(T &&From, T &&To, std::size_t SkippedCount = 1) {
+  return skipImpl<true>(std::forward<T>(From),
+                        std::forward<T>(To),
+                        SkippedCount,
+                        0);
+}
+
+template<std::bidirectional_iterator T>
+inline decltype(auto) // NOLINTNEXTLINE
+skip_back(T &&From, T &&To, std::size_t SkippedCount = 1) {
+  return skipImpl<true>(std::forward<T>(From),
+                        std::forward<T>(To),
+                        0,
+                        SkippedCount);
+}
+
+} // namespace revng::detail
+
+template<std::ranges::range T>
+inline decltype(auto)
+skip(T &&Range, std::size_t Front = 0, std::size_t Back = 0) {
+  return revng::detail::skip(Range.begin(), Range.end(), Front, Back);
+}
+
+template<std::ranges::range T> // NOLINTNEXTLINE
+inline decltype(auto) skip_front(T &&Range, std::size_t SkippedCount = 1) {
+  return revng::detail::skip_front(Range.begin(), Range.end(), SkippedCount);
+}
+
+template<std::ranges::range T> // NOLINTNEXTLINE
+inline decltype(auto) skip_back(T &&Range, std::size_t SkippedCount = 1) {
+  return revng::detail::skip_back(Range.begin(), Range.end(), SkippedCount);
+}
+
+// TODO: reimplement in terms of `std::views::adjacent` once that's available.
+template<std::ranges::range T> // NOLINTNEXTLINE
+inline decltype(auto) zip_pairs(T &&Range) {
+  return llvm::zip(revng::detail::skipImpl<false>(Range.begin(),
+                                                  Range.end(),
+                                                  0,
+                                                  1),
+                   revng::detail::skipImpl<false>(Range.begin(),
+                                                  Range.end(),
+                                                  1,
+                                                  0));
 }
 
 //
@@ -178,7 +270,7 @@ std::array<T, Size> slice(const std::array<T, OldSize> &Old) {
   return Result;
 }
 
-/// \brief Simple helper function asserting a pointer is not a `nullptr`
+/// Simple helper function asserting a pointer is not a `nullptr`
 template<typename T>
 inline T *notNull(T *Pointer) {
   revng_assert(Pointer != nullptr);
@@ -187,13 +279,13 @@ inline T *notNull(T *Pointer) {
 
 inline llvm::ArrayRef<uint8_t> toArrayRef(llvm::StringRef Data) {
   auto Pointer = reinterpret_cast<const uint8_t *>(Data.data());
-  return llvm::makeArrayRef<uint8_t>(Pointer, Data.size());
+  return llvm::ArrayRef<uint8_t>(Pointer, Data.size());
 }
 
 //
 // append
 //
-template<ranges::sized_range FromType, ranges::sized_range ToType>
+template<std::ranges::sized_range FromType, std::ranges::sized_range ToType>
 auto append(FromType &&From, ToType &To) {
   size_t ExistingElementCount = To.size();
   To.resize(ExistingElementCount + From.size());
@@ -212,118 +304,6 @@ std::set<T *> intersect(const std::set<T *> &First, const std::set<T *> &Last) {
   return Output;
 }
 
-//
-// constexpr repeat
-//
-
-namespace detail {
-
-template<typename TemplatedCallableType, std::size_t... Indices>
-constexpr void constexprRepeatImpl(std::index_sequence<Indices...>,
-                                   TemplatedCallableType &&Callable) {
-  (Callable.template operator()<Indices>(), ...);
-}
-
-template<typename TemplatedCallableType, std::size_t... Indices>
-constexpr bool constexprAndImpl(std::index_sequence<Indices...>,
-                                TemplatedCallableType &&Callable) {
-  return (Callable.template operator()<Indices>() && ...);
-}
-
-template<typename TemplatedCallableType, std::size_t... Indices>
-constexpr bool constexprOrImpl(std::index_sequence<Indices...>,
-                               TemplatedCallableType &&Callable) {
-  return (Callable.template operator()<Indices>() || ...);
-}
-
-} // namespace detail
-
-template<std::size_t IterationCount, typename CallableType>
-constexpr void constexprRepeat(CallableType &&Callable) {
-  detail::constexprRepeatImpl(std::make_index_sequence<IterationCount>(),
-                              std::forward<CallableType>(Callable));
-}
-
-template<std::size_t IterationCount, typename CallableType>
-constexpr bool constexprAnd(CallableType &&Callable) {
-  return detail::constexprAndImpl(std::make_index_sequence<IterationCount>(),
-                                  std::forward<CallableType>(Callable));
-}
-
-template<std::size_t IterationCount, typename CallableType>
-constexpr bool constexprOr(CallableType &&Callable) {
-  return detail::constexprOrImpl(std::make_index_sequence<IterationCount>(),
-                                 std::forward<CallableType>(Callable));
-}
-
-namespace examples {
-using namespace std::string_view_literals;
-
-template<std::size_t Count>
-consteval std::size_t fullSize(std::array<std::string_view, Count> Components,
-                               std::string_view Separator) {
-  std::size_t Result = Separator.size() * Count;
-  constexprRepeat<Count>([&Result, &Components]<std::size_t Index> {
-    Result += std::get<Index>(Components).size();
-  });
-  return Result;
-}
-
-inline constexpr std::array Components = { "instruction"sv,
-                                           "0x401000:Code_x86_64"sv,
-                                           "0x402000:Code_x86_64"sv,
-                                           "0x403000:Code_x86_64"sv };
-static_assert(fullSize(Components, "/"sv) == 75);
-
-} // namespace examples
-
-//
-// constexpr split
-//
-
-namespace detail {
-
-template<std::size_t N, std::size_t I = 0>
-inline constexpr bool
-constexprSplitHelper(std::array<std::string_view, N> &Result,
-                     std::string_view Separator,
-                     std::string_view Input) {
-  std::size_t Position = Input.find(Separator);
-  if constexpr (I < N - 1) {
-    if (Position == std::string_view::npos)
-      return false;
-
-    Result[I] = Input.substr(0, Position);
-    return constexprSplitHelper<N, I + 1>(Result,
-                                          Separator,
-                                          Input.substr(Position + 1));
-  } else {
-    if (Position != std::string_view::npos)
-      return false;
-
-    Result[I] = Input;
-    return true;
-  }
-}
-
-} // namespace detail
-
-/// I'm forced to implement my own split because `llvm::StringRef`'s alternative
-/// is not `constexpr`-compatible.
-///
-/// This also uses `std::string_view` instead of `llvm::StringRef` because its
-/// `find` member is constexpr - hence at least that member doesn't have to be
-/// reimplemented
-template<std::size_t N>
-inline constexpr std::optional<std::array<std::string_view, N>>
-constexprSplit(std::string_view Separator, std::string_view Input) {
-  if (std::array<std::string_view, N> Result;
-      detail::constexprSplitHelper<N>(Result, Separator, Input))
-    return Result;
-  else
-    return std::nullopt;
-}
-
 inline void
 replaceAll(std::string &Input, const std::string &From, const std::string &To) {
   if (From.empty())
@@ -334,4 +314,87 @@ replaceAll(std::string &Input, const std::string &From, const std::string &To) {
     Input.replace(Start, From.length(), To);
     Start += To.length();
   }
+}
+
+//
+// `constexpr` versions of the llvm algorithm adaptors.
+//
+
+namespace revng {
+
+/// \note use `llvm::find` instead after it's made `constexpr`.
+template<typename R, typename T>
+constexpr decltype(auto) find(R &&Range, const T &Value) {
+  return std::find(std::begin(std::forward<R>(Range)),
+                   std::end(std::forward<R>(Range)),
+                   Value);
+}
+
+/// \note use `llvm::find_if` instead after it's made `constexpr`.
+template<typename R, typename CallableType> // NOLINTNEXTLINE
+constexpr decltype(auto) find_if(R &&Range, CallableType &&Callable) {
+  return std::find_if(std::begin(std::forward<R>(Range)),
+                      std::end(std::forward<R>(Range)),
+                      std::forward<CallableType>(Callable));
+}
+
+/// \note use `llvm::find_if_not` instead after it's made `constexpr`.
+template<typename R, typename CallableType> // NOLINTNEXTLINE
+constexpr decltype(auto) find_if_not(R &&Range, CallableType &&Callable) {
+  return std::find_if_not(std::begin(std::forward<R>(Range)),
+                          std::end(std::forward<R>(Range)),
+                          std::forward<CallableType>(Callable));
+}
+
+/// \note `std::find_last` is introduced in c++23,
+///       replace with the llvm version when it's available.
+template<typename R, typename T> // NOLINTNEXTLINE
+constexpr decltype(auto) find_last(R &&Range, const T &Value) {
+  return std::find(std::rbegin(std::forward<R>(Range)),
+                   std::rend(std::forward<R>(Range)),
+                   Value);
+}
+
+/// \note `std::find_last_if` is introduced in c++23,
+///       replace with the llvm version when it's available.
+template<typename R, typename CallableType> // NOLINTNEXTLINE
+constexpr decltype(auto) find_last_if(R &&Range, CallableType &&Callable) {
+  return std::find_if(std::rbegin(std::forward<R>(Range)),
+                      std::rend(std::forward<R>(Range)),
+                      std::forward<CallableType>(Callable));
+}
+
+/// \note `std::find_last_if_not` is introduced in c++23,
+///       replace with the llvm version when it's available.
+template<typename R, typename CallableType> // NOLINTNEXTLINE
+constexpr decltype(auto) find_last_if_not(R &&Range, CallableType &&Callable) {
+  return std::find_if_not(std::rbegin(std::forward<R>(Range)),
+                          std::rend(std::forward<R>(Range)),
+                          std::forward<CallableType>(Callable));
+}
+
+/// \note use `llvm::is_contained` instead after it's made `constexpr`.
+template<typename R, typename T> // NOLINTNEXTLINE
+constexpr bool is_contained(R &&Range, const T &Value) {
+  return revng::find(std::forward<R>(Range), Value) != std::end(Range);
+}
+
+template<typename Range, typename C> // NOLINTNEXTLINE
+constexpr bool is_contained_if(Range &&R, C &&L) {
+  return find_if(std::forward<Range>(R), std::forward<C>(L)) != std::end(R);
+}
+
+static_assert(is_contained(std::array{ 1, 2, 3 }, 2) == true);
+static_assert(is_contained(std::array{ 1, 2, 3 }, 4) == false);
+
+} // namespace revng
+
+//
+// Some views from the STL.
+// TODO: remove these after updating the libc++ version.
+//
+template<typename RangeType> // NOLINTNEXTLINE
+auto as_rvalue(RangeType &&Range) {
+  return llvm::make_range(std::make_move_iterator(Range.begin()),
+                          std::make_move_iterator(Range.end()));
 }

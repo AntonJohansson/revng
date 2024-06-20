@@ -1,6 +1,5 @@
 /// \file ExampleAnalysis.cpp
-/// \brief Example of minimal data-flow analysis using the MonotoneFramework
-///        class
+/// Example of minimal data-flow analysis using the MonotoneFramework class.
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
@@ -54,9 +53,9 @@ public:
     revng_abort();
   }
 
-  llvm::Optional<LatticeElement> handleEdge(const LatticeElement &Original,
-                                            Label *Source,
-                                            Label *Destination) const {
+  std::optional<LatticeElement> handleEdge(const LatticeElement &Original,
+                                           Label *Source,
+                                           Label *Destination) const {
     revng_abort();
   }
   size_t successor_size(Label *, Interrupt &) const { revng_abort(); }

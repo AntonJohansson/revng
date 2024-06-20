@@ -1,5 +1,5 @@
 /// \file CollectFunctionsFromCalleesPass.cpp
-/// \brief Collect the function entry points from the callees.
+/// Collect the function entry points from the callees.
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
@@ -8,6 +8,7 @@
 #include "llvm/IR/Module.h"
 
 #include "revng/EarlyFunctionAnalysis/CollectFunctionsFromCalleesPass.h"
+#include "revng/EarlyFunctionAnalysis/FunctionMetadataCache.h"
 
 using namespace llvm;
 
@@ -21,6 +22,14 @@ static Register Y("collect-functions-from-callees",
 
 static Logger<> Log("functions-from-callees-collection");
 
+using CFFCWP = CollectFunctionsFromCalleesWrapperPass;
+void CFFCWP::getAnalysisUsage(AnalysisUsage &AU) const {
+  AU.setPreservesAll();
+  AU.addRequired<LoadModelWrapperPass>();
+  AU.addRequired<FunctionMetadataCachePass>();
+  AU.addRequired<GeneratedCodeBasicInfoWrapperPass>();
+}
+
 static void collectFunctionsFromCallees(Module &M,
                                         GeneratedCodeBasicInfo &GCBI,
                                         model::Binary &Binary) {
@@ -32,8 +41,8 @@ static void collectFunctionsFromCallees(Module &M,
     if (getType(&BB) != BlockType::JumpTargetBlock)
       continue;
 
-    MetaAddress Entry = GCBI.getJumpTarget(&BB);
-    if (Binary.Functions.find(Entry) != Binary.Functions.end())
+    MetaAddress Entry = getBasicBlockAddress(getJumpTargetBlock(&BB));
+    if (Binary.Functions().contains(Entry))
       continue;
 
     uint32_t Reasons = GCBI.getJTReasons(&BB);
@@ -41,7 +50,7 @@ static void collectFunctionsFromCallees(Module &M,
 
     if (IsCallee) {
       // Create the function
-      Binary.Functions[Entry];
+      Binary.Functions()[Entry];
       revng_log(Log, "Found function from callee: " << BB.getName().str());
     }
   }

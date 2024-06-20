@@ -28,7 +28,7 @@ set(CMAKE_SHARED_LIBRARY_LINK_C_FLAGS)
 # cmake-format: off
 # set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address -shared-libasan")
 # cmake-format: on
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++2a")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++20")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wextra")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror")
@@ -36,6 +36,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-rtti")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-exceptions")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fvisibility-inlines-hidden")
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+set(TUPLE_TREE_GENERATOR_EMIT_TRACKING_DEBUG OFF)
 
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
   add_flag_if_available("-Wno-unused-local-typedefs")
@@ -80,6 +81,7 @@ endif()
 find_package(LLVM REQUIRED CONFIG)
 include_directories(${LLVM_INCLUDE_DIRS})
 add_definitions(${LLVM_DEFINITIONS})
+link_directories(${LLVM_LIBRARY_DIRS})
 llvm_map_components_to_libnames(
   LLVM_LIBRARIES
   core
@@ -93,13 +95,31 @@ llvm_map_components_to_libnames(
   BitWriter
   InstCombine
   CodeGen
-  Passes)
+  Passes
+  TargetParser)
+
+# Create share/revng/additional-bin-paths
+set(ADDITIONAL_BIN_PATHS "${CMAKE_BINARY_DIR}/share/revng/additional-bin-paths")
+file(WRITE "${ADDITIONAL_BIN_PATHS}" "libexec/revng\n")
+
+file(RELATIVE_PATH RELATIVE_LLVM_TOOLS_BINARY_DIR "${CMAKE_INSTALL_PREFIX}"
+     "${LLVM_TOOLS_BINARY_DIR}")
+file(APPEND "${ADDITIONAL_BIN_PATHS}" "${RELATIVE_LLVM_TOOLS_BINARY_DIR}\n")
+
+# Create additional-search-prefixes
+file(WRITE "${CMAKE_BINARY_DIR}/additional-search-prefixes"
+     "${CMAKE_INSTALL_PREFIX}\n")
+
+file(RELATIVE_PATH RELATIVE_LLVM_TOOLS_BINARY_DIR "${CMAKE_INSTALL_PREFIX}"
+     "${LLVM_TOOLS_BINARY_DIR}")
+file(APPEND "${ADDITIONAL_BIN_PATHS}" "${RELATIVE_LLVM_TOOLS_BINARY_DIR}\n")
 
 #
 # share/revng
 #
 add_custom_target(copy_share ALL COMMAND cp -Tar "${CMAKE_SOURCE_DIR}/share/"
                                          "${CMAKE_BINARY_DIR}/share/")
+
 install(
   DIRECTORY "${CMAKE_BINARY_DIR}/share/"
   DESTINATION share/
@@ -112,7 +132,7 @@ install(
   DESTINATION share/revng/cmake)
 
 # Build the support module for each architecture and in several configurations
-set(CLANG "${LLVM_TOOLS_BINARY_DIR}/clang")
+set(CLANG "clang")
 
 set(SUPPORT_MODULES_CONFIGS "normal;trace")
 set(SUPPORT_MODULES_CONFIG_normal "")
@@ -159,12 +179,42 @@ foreach(
   endforeach()
 endforeach()
 
+# Produce well-known-models
+
+file(
+  GLOB
+  WELL_KNOWN_BINARIES
+  "${CMAKE_INSTALL_PREFIX}/share/revng/test/tests/well-known-models/*revng-qa.compiled-with-debug*"
+)
+
+add_custom_target(well-known-binaries ALL)
+
+foreach(WELL_KNOWN_BINARY IN LISTS WELL_KNOWN_BINARIES)
+
+  get_filename_component(BASENAME "${WELL_KNOWN_BINARY}" NAME)
+  set(MODEL_PATH "share/revng/well-known-models/${BASENAME}.yml")
+  set(FULL_MODEL_PATH
+      "${CMAKE_BINARY_DIR}/share/revng/well-known-models/${BASENAME}")
+
+  add_custom_command(
+    OUTPUT "${FULL_MODEL_PATH}"
+    COMMAND "./bin/revng" model import binary -o "${MODEL_PATH}"
+            "${WELL_KNOWN_BINARY}"
+    MAIN_DEPENDENCY "${WELL_KNOWN_BINARY}"
+    DEPENDS revng-all-binaries
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
+  add_custom_target("import-${BASENAME}" DEPENDS "${FULL_MODEL_PATH}")
+
+  add_dependencies(well-known-binaries "import-${BASENAME}")
+
+endforeach()
+
 # Custom command to create .clang-format file from revng-check-conventions
 add_custom_command(
   OUTPUT "${CMAKE_BINARY_DIR}/share/revng/.clang-format"
   DEPENDS "${CMAKE_SOURCE_DIR}/libexec/revng/revng-check-conventions"
-          "${CMAKE_SOURCE_DIR}/share/revng/clang-format-style-file" copy_share
-          copy_libexec
+          "${CMAKE_SOURCE_DIR}/share/revng/clang-format-style-file.yml"
+          copy_share copy_libexec
   COMMAND
     "${CMAKE_BINARY_DIR}/libexec/revng/revng-check-conventions" ARGS
     --print-clang-format-config >
@@ -195,6 +245,10 @@ set(PYTHON_GENERATED_MODEL_PATH revng/model/v1/_generated.py)
 # Enable CTest
 #
 enable_testing()
+
+find_package(Python REQUIRED)
+file(RELATIVE_PATH PYTHON_INSTALL_PATH "${CMAKE_INSTALL_PREFIX}"
+     "${Python_SITELIB}")
 
 #
 # Proceed to subdirectories

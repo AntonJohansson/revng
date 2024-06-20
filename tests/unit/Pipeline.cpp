@@ -1,5 +1,4 @@
 /// \file Pipeline.cpp
-/// \brief Tests for revng-pipeline
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
@@ -25,6 +24,7 @@
 
 #include "revng/Pipeline/AllRegistries.h"
 #include "revng/Pipeline/ContainerEnumerator.h"
+#include "revng/Pipeline/ContainerFactory.h"
 #include "revng/Pipeline/ContainerFactorySet.h"
 #include "revng/Pipeline/ContainerSet.h"
 #include "revng/Pipeline/Context.h"
@@ -33,20 +33,13 @@
 #include "revng/Pipeline/GenericLLVMPipe.h"
 #include "revng/Pipeline/Invokable.h"
 #include "revng/Pipeline/Kind.h"
+#include "revng/Pipeline/LLVMContainer.h"
 #include "revng/Pipeline/LLVMContainerFactory.h"
-#include "revng/Pipeline/LLVMGlobalKindBase.h"
+#include "revng/Pipeline/LLVMKind.h"
 #include "revng/Pipeline/Loader.h"
-#include "revng/Pipeline/PathComponent.h"
 #include "revng/Pipeline/Runner.h"
 #include "revng/Pipeline/Target.h"
 #include "revng/Support/Assert.h"
-
-static char LLVMName = ' ';
-
-using ExampleLLVMInspectalbeContainer = pipeline::LLVMContainerBase<&LLVMName>;
-
-template<>
-const char ExampleLLVMInspectalbeContainer::ID = '0';
 
 #define BOOST_TEST_MODULE Pipeline
 bool init_unit_test();
@@ -57,13 +50,12 @@ bool init_unit_test();
 using namespace pipeline;
 using namespace std;
 using namespace llvm;
-using KE = Exactness::Values;
 
-static Rank Root("Root");
-static Rank FunctionRank("Function", Root);
+static auto Root = defineRootRank<"Root">();
+static auto FunctionRank = defineRank<"Function", std::string>(Root);
 class RootKindType : public LLVMKind {
 public:
-  RootKindType() : LLVMKind("RootKind", &Root) { revng_assert(depth() == 0); };
+  RootKindType() : LLVMKind("RootKind", Root) { revng_assert(depth() == 0); };
 
   std::optional<Target>
   symbolToTarget(const llvm::Function &Symbol) const override {
@@ -72,17 +64,18 @@ public:
     return std::nullopt;
   }
 
-  TargetsList compactTargets(const Context &Ctx,
-                             TargetsList::List &Targets) const override {
-    return Targets;
+  void appendAllTargets(const pipeline::Context &Ctx,
+                        pipeline::TargetsList &Out) const override {
+    Out.push_back(Target(*this));
   }
 
   ~RootKindType() override {}
 };
 
 static RootKindType RootKind;
-static Kind RootKind2("RootKind2", RootKind, &Root);
-static Kind RootKind3("RootKind3", &Root);
+static SingleElementKind RootKind2("RootKind2", RootKind, Root, {}, {});
+static SingleElementKind RootKind3("RootKind3", Root, {}, {});
+
 class SingleFunctionKind : public LLVMKind {
 public:
   using LLVMKind::LLVMKind;
@@ -91,30 +84,29 @@ public:
   symbolToTarget(const llvm::Function &Symbol) const override {
     if (Symbol.getName() == "f1")
       return Target("f1", *this);
+    if (Symbol.getName() == "f2")
+      return Target("f2", *this);
     return std::nullopt;
   }
 
-  TargetsList compactTargets(const Context &Ctx,
-                             TargetsList::List &Targets) const override {
-    pipeline::TargetsList TList;
-    TList.push_back(Target(*this));
-    return Targets.empty() or Targets.front() != Target("f1", *this) ? Targets :
-                                                                       TList;
+  void appendAllTargets(const pipeline::Context &Ctx,
+                        pipeline::TargetsList &Out) const override {
+    Out.push_back(Target("f1", *this));
+    Out.push_back(Target("f2", *this));
   }
 
   ~SingleFunctionKind() override {}
 };
-static SingleFunctionKind FunctionKind("FunctionKind", &FunctionRank);
+static SingleFunctionKind FunctionKind("FunctionKind", FunctionRank);
 
 static std::string CName = "ContainerName";
 
 class MapContainer : public Container<MapContainer> {
 public:
+  static inline const llvm::StringRef MIMEType = "application/x.test.map";
   MapContainer(std::map<Target, int> Map, llvm::StringRef Name) :
-    Container<MapContainer>(Name, "application/x.test.map"),
-    Map(std::move(Map)) {}
-  MapContainer(llvm::StringRef Name) :
-    Container<MapContainer>(Name, "application/x.test.map"), Map() {}
+    Container<MapContainer>(Name), Map(std::move(Map)) {}
+  MapContainer(llvm::StringRef Name) : Container<MapContainer>(Name), Map() {}
 
   ~MapContainer() override = default;
 
@@ -122,25 +114,14 @@ public:
   cloneFiltered(const TargetsList &Container) const final {
     return make_unique<MapContainer>(Map, this->name());
   }
-
-  bool contains(const Target &T) const {
-    if (T.getPathComponents().size() != 0
-        and T.getPathComponents().back().isAll())
-      return Map.count(Target({ "f1" }, FunctionKind))
-             and Map.count(Target({ "f2" }, FunctionKind));
-    bool Contained = Map.count(T);
-    return Contained;
+  static std::vector<pipeline::Kind *> possibleKinds() {
+    return { &FunctionKind, &RootKind };
   }
 
-  const static Target AllTargets;
+  bool contains(const Target &T) const { return Map.contains(T); }
 
   TargetsList enumerate() const final {
     TargetsList ToReturn;
-
-    if (contains(AllTargets)) {
-      ToReturn.emplace_back(AllTargets);
-      return ToReturn;
-    }
 
     for (const auto &Target : Map)
       ToReturn.push_back(Target.first);
@@ -149,12 +130,6 @@ public:
   }
 
   bool remove(const TargetsList &Targets) override {
-
-    if (Targets.contains(AllTargets)) {
-      Map.clear();
-      return true;
-    }
-
     bool RemovedAll = true;
     for (const auto &Target : Targets)
       RemovedAll = remove(Target) && RemovedAll;
@@ -163,15 +138,15 @@ public:
   }
 
   bool remove(const Target &Target) {
-    if (Map.find(Target) == Map.end())
+    if (!Map.contains(Target))
       return false;
 
     Map.erase(Target);
     return true;
   }
 
-  llvm::Error
-  extractOne(llvm::raw_ostream &OS, const Target &Target) const override {
+  llvm::Error extractOne(llvm::raw_ostream &OS,
+                         const Target &Target) const override {
     revng_abort();
     return llvm::Error::success();
   }
@@ -185,12 +160,12 @@ public:
   auto &getMap() const { return Map; }
   auto &getMap() { return Map; }
 
-  llvm::Error storeToDisk(llvm::StringRef Path) const override {
+  llvm::Error store(const revng::FilePath &Path) const override {
     SavedData = Map;
     return llvm::Error::success();
   }
 
-  llvm::Error loadFromDisk(llvm::StringRef Path) override {
+  llvm::Error load(const revng::FilePath &Path) override {
     Map = SavedData;
     return llvm::Error::success();
   }
@@ -219,9 +194,6 @@ private:
   }
 };
 
-const Target MapContainer::AllTargets = Target({ PathComponent::all() },
-                                               FunctionKind);
-
 char MapContainer::ID;
 
 static const Target ExampleTarget({}, RootKind);
@@ -239,7 +211,7 @@ BOOST_AUTO_TEST_CASE(ContainerIsa) {
   std::map<Target, int> Map;
   Map[ExampleTarget] = 1;
 
-  auto Ptr = make_unique<MapContainer>(move(Map), "dont_care");
+  auto Ptr = make_unique<MapContainer>(std::move(Map), "dont_care");
   ContainerBase *BasePtr = Ptr.get();
   BOOST_TEST(llvm::isa<MapContainer>(BasePtr));
   BOOST_TEST(llvm::cast<MapContainer>(BasePtr) != nullptr);
@@ -247,9 +219,7 @@ BOOST_AUTO_TEST_CASE(ContainerIsa) {
 }
 
 static ContainerFactory getMapFactoryContainer() {
-
-  return
-    [](llvm::StringRef Name) { return std::make_unique<MapContainer>(Name); };
+  return ContainerFactory::create<MapContainer>();
 }
 
 BOOST_AUTO_TEST_CASE(ContainersCanBeCreated) {
@@ -268,24 +238,36 @@ public:
   static constexpr auto Name = "TestPipe";
 
   std::vector<ContractGroup> getContract() const {
-    return { ContractGroup(RootKind, KE::Exact, 0, RootKind2, 0) };
+    return {
+      ContractGroup(RootKind, 0, RootKind2, 0, InputPreservation::Preserve)
+    };
   }
 
-  void run(const Context &, const MapContainer &Source, MapContainer &Target) {
-    for (const auto &Element : Source.getMap())
+  void run(const ExecutionContext &,
+           const MapContainer &Source,
+           MapContainer &Target) {
+    Source.enumerate().dump();
+    auto SrcCopy = Source;
+    for (const auto &Element : SrcCopy.getMap())
       if (&Element.first.getKind() == &RootKind) {
+        llvm::outs() << "Invoked\n";
         pipeline::Target NewTar(RootKind2);
+        NewTar.dump();
         Target.get(NewTar) = Element.second;
+        Target.enumerate().dump();
       }
+    Target.enumerate().dump();
   }
 };
 
 BOOST_AUTO_TEST_CASE(PipeCanBeWrapper) {
   Context Ctx;
+  Step FakeStep(Ctx, "dc", "", {});
+  ExecutionContext ExecutionCtx(Ctx, FakeStep, nullptr);
   MapContainer Map("RandomName");
   Map.get({ {}, RootKind }) = 1;
   TestPipe Enf;
-  Enf.run(Ctx, Map, Map);
+  Enf.run(ExecutionCtx, Map, Map);
   BOOST_TEST(Map.get({ {}, RootKind2 }) == 1);
 }
 
@@ -293,129 +275,106 @@ BOOST_AUTO_TEST_CASE(InputOutputContractExactPassForward) {
   ContainerToTargetsMap Targets;
   Targets[CName].emplace_back(Target({}, RootKind));
 
-  ContractGroup Contract1(RootKind, KE::Exact);
-  Contract1.deduceResults(Targets, { CName });
+  ContractGroup Contract1(RootKind);
+  Contract1.deduceResults(Context(), Targets, { CName });
   BOOST_TEST((&Targets[CName][0].getKind() == &RootKind));
-  BOOST_TEST((Targets[CName][0].kindExactness() == KE::Exact));
 }
 
 BOOST_AUTO_TEST_CASE(InputOutputContractExactExactForward) {
   ContainerToTargetsMap Targets;
   Targets[CName].emplace_back(Target({}, RootKind));
-  ContractGroup Contract1(RootKind, KE::Exact, 0, RootKind2, 0);
-  Contract1.deduceResults(Targets, { CName });
+  ContractGroup Contract1(RootKind, 0, RootKind2, 0);
+  Contract1.deduceResults(Context(), Targets, { CName });
   BOOST_TEST((&Targets[CName][0].getKind() == &RootKind2));
-  BOOST_TEST((Targets[CName][0].kindExactness() == KE::Exact));
 }
 
 BOOST_AUTO_TEST_CASE(InputOutputContractExactKillForward) {
   ContainerToTargetsMap Targets;
-  Targets[CName].emplace_back(Target({}, RootKind2));
-  ContractGroup Contract1(RootKind,
-                          KE::DerivedFrom,
-                          0,
-                          RootKind3,
-                          0,
-                          InputPreservation::Erase);
-  Contract1.deduceResults(Targets, { CName });
+  Targets[CName].emplace_back(Target({}, RootKind));
+  ContractGroup Contract1(RootKind, 0, RootKind3, 0, InputPreservation::Erase);
+  Contract1.deduceResults(Context(), Targets, { CName });
   BOOST_TEST((Targets[CName].size() == 1));
   BOOST_TEST((&Targets[CName][0].getKind() == &RootKind3));
-  BOOST_TEST((Targets[CName][0].kindExactness() == KE::Exact));
 }
 
 BOOST_AUTO_TEST_CASE(InputOutputContractMultiLine) {
   ContainerToTargetsMap Targets;
   Targets["third"].emplace_back(Target({}, RootKind));
 
-  Contract FirstPart(RootKind2,
-                     Exactness::Exact,
-                     0,
-                     RootKind,
-                     2,
-                     InputPreservation::Preserve);
-  Contract SecondPart(RootKind3,
-                      Exactness::Exact,
-                      1,
-                      RootKind,
-                      2,
-                      InputPreservation::Preserve);
+  Contract FirstPart(RootKind2, 0, RootKind, 2, InputPreservation::Preserve);
+  Contract SecondPart(RootKind3, 1, RootKind, 2, InputPreservation::Preserve);
   ContractGroup Contract({ FirstPart, SecondPart });
 
-  auto Res = Contract.deduceRequirements(Targets,
+  auto Res = Contract.deduceRequirements(Context(),
+                                         Targets,
                                          { "first", "second", "third" });
 
-  BOOST_TEST(Res["first"].size() == 1);
-  BOOST_TEST(Res["second"].size() == 1);
+  BOOST_TEST(Res["first"].size() == 1U);
+  BOOST_TEST(Res["second"].size() == 1U);
 }
 
 BOOST_AUTO_TEST_CASE(InputOutputContractDerivedPassForward) {
   ContainerToTargetsMap Targets;
   Targets[CName].emplace_back(Target({}, RootKind2));
 
-  ContractGroup Contract1(RootKind, KE::DerivedFrom);
-  Contract1.deduceResults(Targets, { CName });
+  ContractGroup Contract1(RootKind, 0, RootKind2, 0);
+  Contract1.deduceResults(Context(), Targets, { CName });
   BOOST_TEST((&Targets[CName][0].getKind() == &RootKind2));
-  BOOST_TEST((Targets[CName][0].kindExactness() == KE::Exact));
 }
 
 BOOST_AUTO_TEST_CASE(InputOutputContractDerivedExactForward) {
   ContainerToTargetsMap Targets;
-  Targets[CName].emplace_back(Target({}, RootKind2));
+  Targets[CName].emplace_back(Target({}, RootKind));
 
-  ContractGroup Contract1(RootKind, KE::DerivedFrom, 0, RootKind, 0);
-  Contract1.deduceResults(Targets, { CName });
+  ContractGroup Contract1(RootKind, 0, RootKind, 0);
+  Contract1.deduceResults(Context(), Targets, { CName });
   BOOST_TEST((&Targets[CName][0].getKind() == &RootKind));
-  BOOST_TEST((Targets[CName][0].kindExactness() == KE::Exact));
+  BOOST_TEST((Targets[CName].size() == 1));
 }
 
 BOOST_AUTO_TEST_CASE(InputOutputContractExactPassBackward) {
   ContainerToTargetsMap Targets;
   Targets[CName].emplace_back(Target({}, RootKind));
 
-  ContractGroup Contract1(RootKind, KE::Exact);
-  auto Res = Contract1.deduceRequirements(Targets, { CName });
+  ContractGroup Contract1(RootKind);
+  auto Res = Contract1.deduceRequirements(Context(), Targets, { CName });
   BOOST_TEST((&Res[CName][0].getKind() == &RootKind));
-  BOOST_TEST((Res[CName][0].kindExactness() == KE::Exact));
 }
 
 BOOST_AUTO_TEST_CASE(InputOutputContractExactExactBackward) {
   ContainerToTargetsMap Targets;
   Targets[CName].emplace_back(Target({}, RootKind2));
 
-  ContractGroup Contract1(RootKind, KE::Exact, 0, RootKind2, 0);
-  auto Res = Contract1.deduceRequirements(Targets, { CName });
+  ContractGroup Contract1(RootKind, 0, RootKind2, 0);
+  auto Res = Contract1.deduceRequirements(Context(), Targets, { CName });
   BOOST_TEST((&Res[CName][0].getKind() == &RootKind));
-  BOOST_TEST((Res[CName][0].kindExactness() == KE::Exact));
 }
 
 BOOST_AUTO_TEST_CASE(InputOutputContractDerivedPassBackward) {
   ContainerToTargetsMap Targets;
   Targets[CName].emplace_back(Target({}, RootKind2));
 
-  ContractGroup Contract1(RootKind, KE::DerivedFrom);
-  auto Res = Contract1.deduceRequirements(Targets, { CName });
+  ContractGroup Contract1(RootKind);
+  auto Res = Contract1.deduceRequirements(Context(), Targets, { CName });
   BOOST_TEST((&Res[CName][0].getKind() == &RootKind2));
-  BOOST_TEST((Res[CName][0].kindExactness() == KE::Exact));
 }
 
 BOOST_AUTO_TEST_CASE(InputOutputContractDerivedExactBackward) {
   ContainerToTargetsMap Targets;
   Targets[CName].emplace_back(Target({}, RootKind2));
 
-  ContractGroup Contract1(RootKind, KE::DerivedFrom, 0, RootKind2, 0);
-  auto Res = Contract1.deduceRequirements(Targets, { CName });
+  ContractGroup Contract1(RootKind, 0, RootKind2, 0);
+  auto Res = Contract1.deduceRequirements(Context(), Targets, { CName });
   BOOST_TEST((&Res[CName][0].getKind() == &RootKind));
-  BOOST_TEST((Res[CName][0].kindExactness() == KE::DerivedFrom));
 }
 
 BOOST_AUTO_TEST_CASE(InputOutputContractExactExactFineGrainedBackward) {
   ContainerToTargetsMap Targets;
   Targets.add(CName, { "f1" }, FunctionKind);
 
-  ContractGroup Contract1(RootKind, KE::Exact, 0, FunctionKind, 0);
-  auto Res = Contract1.deduceRequirements(Targets, { CName });
+  ContractGroup Contract1(RootKind, 0, FunctionKind, 0);
+  auto Res = Contract1.deduceRequirements(Context(), Targets, { CName });
   BOOST_TEST((&Res[CName][0].getKind() == &RootKind));
-  BOOST_TEST((Res[CName][0].kindExactness() == KE::Exact));
   BOOST_TEST((Res[CName][0].getPathComponents().size() == 0));
 }
 
@@ -423,17 +382,15 @@ BOOST_AUTO_TEST_CASE(InputOutputContractExactExactFineGrainedForward) {
   ContainerToTargetsMap Targets;
   Targets[CName].emplace_back(Target({}, RootKind));
 
-  ContractGroup Contract1(RootKind, KE::Exact, 0, FunctionKind, 0);
-  Contract1.deduceResults(Targets, { CName });
+  ContractGroup Contract1(RootKind, 0, FunctionKind, 0);
+  Contract1.deduceResults(Context(), Targets, { CName });
   BOOST_TEST((&Targets[CName][0].getKind() == &FunctionKind));
-  BOOST_TEST((Targets[CName][0].kindExactness() == KE::Exact));
   BOOST_TEST((Targets[CName][0].getPathComponents().size() == 1));
-  BOOST_TEST((Targets[CName][0].getPathComponents()[0].isAll()));
 }
 
-static void checkIfContains(auto &TargetRange, const Kind &K, KE Exact) {
-  const auto ToFind = [&K, Exact](const Target &Target) {
-    return &Target.getKind() == &K and Target.kindExactness() == Exact;
+static void checkIfContains(auto &TargetRange, const Kind &K) {
+  const auto ToFind = [&K](const Target &Target) {
+    return &Target.getKind() == &K;
   };
   BOOST_TEST(llvm::find_if(TargetRange, ToFind) != TargetRange.end());
 }
@@ -443,11 +400,11 @@ BOOST_AUTO_TEST_CASE(InputOutputContractMupltipleInputTest) {
   Targets[CName].emplace_back(Target(RootKind2));
   Targets[CName].emplace_back(Target(RootKind));
 
-  ContractGroup Contract1(RootKind, KE::DerivedFrom, 0, RootKind2, 0);
-  auto Res = Contract1.deduceRequirements(Targets, { CName });
+  ContractGroup Contract1(RootKind, 0, RootKind2, 0);
+  auto Res = Contract1.deduceRequirements(Context(), Targets, { CName });
 
   const auto &ProducedResults = Res[CName];
-  checkIfContains(ProducedResults, RootKind, KE::Exact);
+  checkIfContains(ProducedResults, RootKind);
 }
 
 BOOST_AUTO_TEST_CASE(InputOutputContractPreserved) {
@@ -456,16 +413,15 @@ BOOST_AUTO_TEST_CASE(InputOutputContractPreserved) {
   Targets[CName].emplace_back(Target({}, RootKind));
 
   ContractGroup Contract1(RootKind,
-                          KE::DerivedFrom,
                           0,
                           RootKind2,
                           0,
                           InputPreservation::Preserve);
-  Contract1.deduceResults(Targets, { CName });
+  Contract1.deduceResults(Context(), Targets, { CName });
   const auto &ProducedResults = Targets[CName];
-  checkIfContains(ProducedResults, RootKind2, KE::Exact);
-  checkIfContains(ProducedResults, RootKind, KE::Exact);
-  checkIfContains(ProducedResults, RootKind2, KE::Exact);
+  checkIfContains(ProducedResults, RootKind2);
+  checkIfContains(ProducedResults, RootKind);
+  checkIfContains(ProducedResults, RootKind2);
 }
 
 BOOST_AUTO_TEST_CASE(InputOutputContractPreservedBackwardMain) {
@@ -473,14 +429,12 @@ BOOST_AUTO_TEST_CASE(InputOutputContractPreservedBackwardMain) {
   Targets[CName].emplace_back(Target({}, RootKind2));
 
   ContractGroup Contract1(RootKind,
-                          KE::DerivedFrom,
                           0,
                           RootKind2,
                           0,
                           InputPreservation::Preserve);
-  auto Res = Contract1.deduceRequirements(Targets, { CName });
+  auto Res = Contract1.deduceRequirements(Context(), Targets, { CName });
   BOOST_TEST((&Res[CName][0].getKind() == &RootKind));
-  BOOST_TEST((Res[CName][0].kindExactness() == KE::DerivedFrom));
 }
 
 BOOST_AUTO_TEST_CASE(InputOutputContractPreservedBackwardSecondary) {
@@ -488,14 +442,12 @@ BOOST_AUTO_TEST_CASE(InputOutputContractPreservedBackwardSecondary) {
   Targets[CName].emplace_back(Target({}, RootKind));
 
   ContractGroup Contract1(RootKind,
-                          KE::DerivedFrom,
                           0,
                           RootKind2,
                           0,
                           InputPreservation::Preserve);
-  auto Res = Contract1.deduceRequirements(Targets, { CName });
+  auto Res = Contract1.deduceRequirements(Context(), Targets, { CName });
   BOOST_TEST((&Res[CName][0].getKind() == &RootKind));
-  BOOST_TEST((Res[CName][0].kindExactness() == KE::Exact));
 }
 
 BOOST_AUTO_TEST_CASE(StepCanCloneAndRun) {
@@ -505,8 +457,10 @@ BOOST_AUTO_TEST_CASE(StepCanCloneAndRun) {
   ContainerSet Containers;
   auto Factory = getMapFactoryContainer();
   Containers.add(CName, Factory, Factory("dont_care"));
-  Step Step("first_step",
-            move(Containers),
+  Step Step(Ctx,
+            "first_step",
+            "",
+            std::move(Containers),
             PipeWrapper::bind<TestPipe>(CName, CName));
 
   ContainerToTargetsMap Targets;
@@ -516,7 +470,7 @@ BOOST_AUTO_TEST_CASE(StepCanCloneAndRun) {
   auto Factory2 = getMapFactoryContainer();
   Containers.add(CName, Factory, Factory("dont_care"));
   cast<MapContainer>(Containers[CName]).get(Target({}, RootKind)) = 1;
-  auto Result = Step.cloneAndRun(Ctx, std::move(Containers));
+  auto Result = Step.run(std::move(Containers));
 
   auto &Cont = cast<MapContainer>(Result.at(CName));
   BOOST_TEST(Cont.get(Target({}, RootKind2)) == 1);
@@ -528,7 +482,9 @@ BOOST_AUTO_TEST_CASE(PipelineCanBeManuallyExectued) {
 
   Context Ctx;
   Runner Pip(Ctx);
-  Pip.addStep(Step("first_step",
+  Pip.addStep(Step(Ctx,
+                   "first_step",
+                   "",
                    Registry.createEmpty(),
                    PipeWrapper::bind<TestPipe>(CName, CName)));
 
@@ -536,7 +492,7 @@ BOOST_AUTO_TEST_CASE(PipelineCanBeManuallyExectued) {
   auto &C1 = Containers.getOrCreate<MapContainer>(CName);
   C1.get(Target(RootKind)) = 1;
 
-  auto Res = Pip["first_step"].cloneAndRun(Ctx, std::move(Containers));
+  auto Res = Pip["first_step"].run(std::move(Containers));
   BOOST_TEST(cast<MapContainer>(Res.at(CName)).get(Target(RootKind2)) == 1);
   const auto &StartingContainer = Pip["first_step"]
                                     .containers()
@@ -555,15 +511,17 @@ BOOST_AUTO_TEST_CASE(SingleElementPipelineCanBeRunned) {
   auto &C1 = cast<MapContainer>(Content[CName]);
   C1.get(Target(RootKind)) = 1;
 
-  Step StepToAdd("first_step", move(Content));
+  Step StepToAdd(Ctx, "first_step", "", std::move(Content));
   Pip.addStep(std::move(StepToAdd));
   ContainerSet &BCI = Pip["first_step"].containers();
   BOOST_TEST(cast<MapContainer>(BCI.at(CName)).get(Target(RootKind)) == 1);
 
   ContainerSet Containers2;
   Containers2.add(CName, Factory, make_unique<MapContainer>("dont_care"));
-  Pip.addStep(Step("End",
-                   move(Containers2),
+  Pip.addStep(Step(Ctx,
+                   "End",
+                   "",
+                   std::move(Containers2),
                    Pip["first_step"],
                    PipeWrapper::bind<TestPipe>(CName, CName)));
 
@@ -580,10 +538,13 @@ class FineGranerPipe {
 public:
   static constexpr auto Name = "FinedGranedPipe";
   std::vector<ContractGroup> getContract() const {
-    return { ContractGroup(RootKind, KE::Exact, 0, FunctionKind, 1) };
+    return {
+      ContractGroup(RootKind, 0, FunctionKind, 1, InputPreservation::Preserve)
+    };
   }
 
-  void run(Context &, const MapContainer &Source, MapContainer &Target) {
+  void
+  run(ExecutionContext &, const MapContainer &Source, MapContainer &Target) {
     for (const auto &Element : Source.getMap()) {
 
       if (&Element.first.getKind() != &RootKind)
@@ -591,11 +552,11 @@ public:
 
       auto PathComponents = Element.first.getPathComponents();
       PathComponents.emplace_back("f1");
-      Target.get({ move(PathComponents), FunctionKind }) = Element.second;
+      Target.get({ std::move(PathComponents), FunctionKind }) = Element.second;
 
       PathComponents = Element.first.getPathComponents();
       PathComponents.emplace_back("f2");
-      Target.get({ move(PathComponents), FunctionKind }) = Element.second;
+      Target.get({ std::move(PathComponents), FunctionKind }) = Element.second;
     }
   }
 };
@@ -606,16 +567,17 @@ public:
   static constexpr auto Name = "CopyPipe";
   std::vector<ContractGroup> getContract() const {
     return { ContractGroup(FunctionKind,
-                           KE::Exact,
                            0,
                            FunctionKind,
                            1,
                            InputPreservation::Preserve) };
   }
 
-  void run(Context &, const MapContainer &Source, MapContainer &Target) {
+  void
+  run(ExecutionContext &, const MapContainer &Source, MapContainer &Target) {
     for (const auto &Element : Source.getMap())
-      Target.get(Element.first) = Element.second;
+      if (&Element.first.getKind() == &FunctionKind)
+        Target.get(Element.first) = Element.second;
   }
 };
 
@@ -625,9 +587,10 @@ BOOST_AUTO_TEST_CASE(SingleElementPipelineBackwardFinedGrained) {
   Pipeline.addDefaultConstructibleFactory<MapContainer>(CName);
 
   const std::string Name = "first_step";
-  Pipeline.emplaceStep("", Name);
+  Pipeline.emplaceStep("", Name, "");
   Pipeline.emplaceStep(Name,
                        "End",
+                       "",
                        PipeWrapper::bind<FineGranerPipe>(CName, CName));
 
   auto &Container(Pipeline[Name].containers().getOrCreate<MapContainer>(CName));
@@ -649,8 +612,8 @@ BOOST_AUTO_TEST_CASE(DifferentNamesAreNotCompatible) {
   Target Target1({ "f1Wrong" }, FunctionKind);
   Target Target2({ "f1" }, FunctionKind);
 
-  BOOST_TEST(not Target1.satisfies(Target2));
-  BOOST_TEST(not Target2.satisfies(Target1));
+  BOOST_TEST((Target1 != Target2));
+  BOOST_TEST((Target2 != Target1));
 }
 
 BOOST_AUTO_TEST_CASE(DifferentNamesRootOnlyAreNotCompatibleSet) {
@@ -671,8 +634,9 @@ BOOST_AUTO_TEST_CASE(SingleElementPipelineFailure) {
   const std::string Name = "first_step";
   Pipeline.emplaceStep("",
                        Name,
+                       "",
                        PipeWrapper::bind<FineGranerPipe>(CName, CName));
-  Pipeline.emplaceStep(Name, "End");
+  Pipeline.emplaceStep(Name, "End", "");
 
   auto &Container(Pipeline[Name].containers().getOrCreate<MapContainer>(CName));
   Container.get(Target(RootKind)) = 1;
@@ -725,7 +689,7 @@ struct LLVMPassFunctionCreator {
   static constexpr auto Name = "Function Creator";
 
   std::vector<ContractGroup> getContract() const {
-    return { ContractGroup(RootKind, KE::Exact, 0, FunctionKind) };
+    return { ContractGroup(RootKind, 0, FunctionKind) };
   }
 
   void registerPasses(llvm::legacy::PassManager &Manager) {
@@ -737,7 +701,7 @@ struct LLVMPassFunctionIdentity {
   static constexpr auto Name = "Identity";
 
   std::vector<ContractGroup> getContract() const {
-    return { ContractGroup(FunctionKind, KE::Exact) };
+    return { ContractGroup(FunctionKind) };
   }
 
   void registerPasses(llvm::legacy::PassManager &Manager) {
@@ -750,13 +714,16 @@ BOOST_AUTO_TEST_CASE(SingleElementLLVMPipelineBackwardFinedGrained) {
 
   Context Ctx;
   Runner Pipeline(Ctx);
-  Pipeline.addContainerFactory(CName, makeDefaultLLVMContainerFactory(Ctx, C));
+  Pipeline.addContainerFactory(CName,
+                               ContainerFactory::fromGlobal<LLVMContainer>(&Ctx,
+                                                                           &C));
 
   const std::string Name = "first_step";
-  Pipeline.emplaceStep("", Name);
+  Pipeline.emplaceStep("", Name, "");
   Pipeline
     .emplaceStep(Name,
                  "End",
+                 "",
                  LLVMContainer::wrapLLVMPasses(CName,
                                                LLVMPassFunctionCreator(),
                                                LLVMPassFunctionIdentity()));
@@ -765,7 +732,7 @@ BOOST_AUTO_TEST_CASE(SingleElementLLVMPipelineBackwardFinedGrained) {
   makeF(C1.getModule(), "root");
 
   ContainerToTargetsMap Targets;
-  Targets.add(CName, Target({ PathComponent("f1") }, FunctionKind));
+  Targets.add(CName, Target({ "f1" }, FunctionKind));
 
   auto Error = Pipeline.run("End", Targets);
   BOOST_TEST(!Error);
@@ -781,13 +748,16 @@ BOOST_AUTO_TEST_CASE(LLVMPurePipe) {
 
   Context Ctx;
   Runner Pipeline(Ctx);
-  Pipeline.addContainerFactory(CName, makeDefaultLLVMContainerFactory(Ctx, C));
+  Pipeline.addContainerFactory(CName,
+                               ContainerFactory::fromGlobal<LLVMContainer>(&Ctx,
+                                                                           &C));
 
   const std::string Name = "first_step";
   PureLLVMPassWrapper IdentityPass("IdentityPass");
-  Pipeline.emplaceStep("", Name);
+  Pipeline.emplaceStep("", Name, "");
   Pipeline.emplaceStep(Name,
                        "End",
+                       "",
                        LLVMContainer::wrapLLVMPasses(CName,
                                                      LLVMPassFunctionCreator(),
                                                      IdentityPass));
@@ -796,7 +766,7 @@ BOOST_AUTO_TEST_CASE(LLVMPurePipe) {
   makeF(C1.getModule(), "root");
 
   ContainerToTargetsMap Targets;
-  Targets.add(CName, Target({ PathComponent("f1") }, FunctionKind));
+  Targets.add(CName, Target({ "f1" }, FunctionKind));
 
   auto Error = Pipeline.run("End", Targets);
   BOOST_TEST(!Error);
@@ -813,17 +783,20 @@ BOOST_AUTO_TEST_CASE(SingleElementPipelineForwardFinedGrained) {
   Pipeline.addDefaultConstructibleFactory<MapContainer>(CName);
 
   const std::string Name = "first_step";
-  Pipeline.emplaceStep("", Name);
+  Pipeline.emplaceStep("", Name, "");
   Pipeline.emplaceStep(Name,
                        "End",
+                       "",
                        PipeWrapper::bind<FineGranerPipe>(CName, CName));
 
   auto &C1 = Pipeline[Name].containers().getOrCreate<MapContainer>(CName);
   C1.get(Target({}, RootKind)) = 1;
   auto &C2 = Pipeline["End"].containers().getOrCreate<MapContainer>(CName);
 
-  const auto T = Target({ PathComponent::all() }, FunctionKind);
+  const auto T = Target({ "f1" }, FunctionKind);
+  const auto T2 = Target({ "f2" }, FunctionKind);
   C2.get(T) = 1;
+  C2.get(T2) = 1;
 
   llvm::StringMap<ContainerToTargetsMap> Invalidations;
   Invalidations[Name].add(CName, {}, RootKind);
@@ -833,9 +806,7 @@ BOOST_AUTO_TEST_CASE(SingleElementPipelineForwardFinedGrained) {
 
   const auto &EndContainerInvalidations = Invalidations["End"][CName];
   BOOST_TEST(not EndContainerInvalidations.empty());
-  const auto &QuantifOfInvalidated = EndContainerInvalidations.front()
-                                       .getPathComponents();
-  BOOST_TEST((QuantifOfInvalidated.back().isAll()));
+  BOOST_TEST((EndContainerInvalidations == TargetsList({ T, T2 })));
 }
 
 BOOST_AUTO_TEST_CASE(SingleElementPipelineInvalidation) {
@@ -844,17 +815,20 @@ BOOST_AUTO_TEST_CASE(SingleElementPipelineInvalidation) {
   Pipeline.addDefaultConstructibleFactory<MapContainer>(CName);
 
   const std::string Name = "first_step";
-  Pipeline.emplaceStep("", Name);
+  Pipeline.emplaceStep("", Name, "");
   Pipeline.emplaceStep(Name,
                        "End",
+                       "",
                        PipeWrapper::bind<FineGranerPipe>(CName, CName));
 
   auto &C1 = Pipeline[Name].containers().getOrCreate<MapContainer>(CName);
   C1.get(Target({}, RootKind)) = 1;
   auto &C2 = Pipeline["End"].containers().getOrCreate<MapContainer>(CName);
 
-  const auto T = Target({ PathComponent::all() }, FunctionKind);
+  const auto T = Target({ "f1" }, FunctionKind);
+  const auto T2 = Target({ "f2" }, FunctionKind);
   C2.get(T) = 1;
+  C2.get(T2) = 1;
 
   Target ToKill({}, RootKind);
 
@@ -864,7 +838,7 @@ BOOST_AUTO_TEST_CASE(SingleElementPipelineInvalidation) {
   const auto &QuantifOfInvalidated = Invalidations["End"][CName]
                                        .front()
                                        .getPathComponents();
-  BOOST_TEST((QuantifOfInvalidated.front().isAll()));
+  BOOST_TEST((QuantifOfInvalidated.front() == "f1"));
 }
 
 BOOST_AUTO_TEST_CASE(SingleElementPipelineWithRemove) {
@@ -875,8 +849,9 @@ BOOST_AUTO_TEST_CASE(SingleElementPipelineWithRemove) {
   const std::string Name = "first_step";
   Pipeline.emplaceStep("",
                        Name,
+                       "",
                        PipeWrapper::bind<FineGranerPipe>(CName, CName));
-  Pipeline.emplaceStep(Name, "End");
+  Pipeline.emplaceStep(Name, "End", "");
 
   auto &C1 = Pipeline[Name].containers().getOrCreate<MapContainer>(CName);
   C1.get(Target(RootKind)) = 1;
@@ -893,9 +868,10 @@ BOOST_AUTO_TEST_CASE(SingleElementPipelineWithRemove) {
 BOOST_AUTO_TEST_CASE(LoaderTest) {
   StepDeclaration SDeclaration{ "FirstStep",
                                 { { "FineGranerPipe", { CName, CName } } } };
-  BranchDeclaration BDeclaration{ "", { move(SDeclaration) } };
-  PipelineDeclaration PDeclaration{ { { CName, "MapContainer" } },
-                                    { move(BDeclaration) } };
+  BranchDeclaration BDeclaration{ "", { std::move(SDeclaration) } };
+  PipelineDeclaration PDeclaration{ "revng-test",
+                                    { { CName, "MapContainer" } },
+                                    { std::move(BDeclaration) } };
 
   auto Ctx = Context::fromRegistry(Registry::registerAllKinds());
   Loader Loader(Ctx);
@@ -924,6 +900,7 @@ BOOST_AUTO_TEST_CASE(LoaderTest) {
 }
 
 static const std::string Pipeline(R"(---
+                       Component: revng-test
                        Containers:
                          - Name:            ContainerName
                            Type:            MapContainer
@@ -947,6 +924,7 @@ BOOST_AUTO_TEST_CASE(LoaderTestFromYaml) {
 }
 
 static const std::string PipelineTree(R"(---
+                       Component: revng-test
                        Containers:
                          - Name:            ContainerName
                            Type:            MapContainer
@@ -961,6 +939,7 @@ static const std::string PipelineTree(R"(---
                        )");
 
 static const std::string PipelineTree2(R"(---
+                       Component: revng-test
                        Containers:
                        Branches:
                          - From:      FirstStep
@@ -969,6 +948,7 @@ static const std::string PipelineTree2(R"(---
                        )");
 
 static const std::string PipelineTree3(R"(---
+                       Component: revng-test
                        Containers:
                        Branches:
                          - From:      FirstStep
@@ -990,14 +970,17 @@ BOOST_AUTO_TEST_CASE(LoaderTestFromYamlLLVM) {
   llvm::LLVMContext C;
   Context Ctx;
   Loader Loader(Ctx);
+
   Loader.addContainerFactory("LLVMContainer",
-                             makeDefaultLLVMContainerFactory(Ctx, C));
+                             ContainerFactory::fromGlobal<LLVMContainer>(&Ctx,
+                                                                         &C));
   auto *Name = "CreateFunctionPass";
   Loader.registerLLVMPass<LLVMPassFunctionCreator>(Name);
   Name = "IdentityPass";
   Loader.registerLLVMPass<LLVMPassFunctionIdentity>(Name);
 
   std::string LLVMPipeline(R"(---
+                       Component: revng-test
                        Containers:
                          - Name:            CustomName
                            Type:            LLVMContainer
@@ -1018,38 +1001,42 @@ BOOST_AUTO_TEST_CASE(LoaderTestFromYamlLLVM) {
   BOOST_TEST(!!MaybePipeline);
 }
 
-static std::string getCurrentPath() {
-  llvm::SmallVector<char, 3> ToReturn;
+static revng::DirectoryPath getCurrentPath() {
+  using revng::StorageClient;
+  llvm::SmallString<128> ToReturn;
   llvm::sys::fs::current_path(ToReturn);
-  return std::string(ToReturn.begin(), ToReturn.end());
+  return revng::DirectoryPath::fromLocalStorage(ToReturn.str());
 }
 
-BOOST_AUTO_TEST_CASE(SingleElementPipelineStoreToDisk) {
+BOOST_AUTO_TEST_CASE(SingleElementPipelinestore) {
   Context Ctx;
   Runner Pipeline(Ctx);
+  revng::DirectoryPath Path = getCurrentPath();
   Pipeline.addDefaultConstructibleFactory<MapContainer>(CName);
 
   const std::string Name = "first_step";
   Pipeline.emplaceStep("",
                        Name,
+                       "",
                        PipeWrapper::bind<FineGranerPipe>(CName, CName));
-  Pipeline.emplaceStep(Name, "End");
+  Pipeline.emplaceStep(Name, "End", "");
 
   auto &C1 = Pipeline[Name].containers().getOrCreate<MapContainer>(CName);
   C1.get(Target({}, RootKind)) = 1;
 
-  BOOST_TEST((!Pipeline.storeToDisk(getCurrentPath())));
+  BOOST_TEST((!Pipeline.store(Path)));
 
   auto &Container(Pipeline[Name].containers().getOrCreate<MapContainer>(CName));
 
   BOOST_TEST((Container.get(Target({}, RootKind)) == 1));
   Container.get(Target({}, RootKind)) = 2;
   BOOST_TEST((Container.get(Target({}, RootKind)) == 2));
-  BOOST_TEST((!Pipeline.loadFromDisk(getCurrentPath())));
-  BOOST_TEST(Pipeline[Name].containers().contains(CName));
+  BOOST_TEST((!Pipeline.load(Path)));
+  BOOST_TEST(Pipeline[Name].containers().containsOrCanCreate(CName));
+  BOOST_TEST(not Pipeline[Name].containers().contains(CName));
 }
 
-BOOST_AUTO_TEST_CASE(SingleElementPipelineStoreToDiskWithOverrides) {
+BOOST_AUTO_TEST_CASE(SingleElementPipelinestoreWithOverrides) {
   Context Ctx;
   Loader Loader(Ctx);
   Loader.addDefaultConstructibleContainer<MapContainer>("MapContainer");
@@ -1065,10 +1052,10 @@ BOOST_AUTO_TEST_CASE(SingleElementPipelineStoreToDiskWithOverrides) {
   auto &Container(Pipeline[Name].containers().getOrCreate<MapContainer>(CName));
 
   Container.get(Target({}, RootKind)) = 1;
-  BOOST_TEST((!MaybeMapping->storeToDisk(Pipeline)));
+  BOOST_TEST((!MaybeMapping->store(Pipeline)));
   Container.get(Target({}, RootKind)) = 2;
   BOOST_TEST((Container.get(Target({}, RootKind)) == 2));
-  BOOST_TEST((!MaybeMapping->loadFromDisk(Pipeline)));
+  BOOST_TEST((!MaybeMapping->load(Pipeline)));
   BOOST_TEST((Container.get(Target({}, RootKind)) == 1));
 }
 
@@ -1077,10 +1064,9 @@ class EnumerableContainerExample
 public:
   static char ID;
 
-  EnumerableContainerExample(Context &Ctx,
-                             llvm::StringRef Name,
-                             llvm::StringRef MIMEType) :
-    EnumerableContainer<EnumerableContainerExample>(Ctx, Name, MIMEType) {}
+  static inline const llvm::StringRef MIMEType = "";
+  EnumerableContainerExample(Context &Ctx, llvm::StringRef Name) :
+    EnumerableContainer<EnumerableContainerExample>(Ctx, Name) {}
 
   unique_ptr<ContainerBase>
   cloneFiltered(const TargetsList &Container) const final {
@@ -1089,28 +1075,24 @@ public:
 
   ~EnumerableContainerExample() override = default;
 
-  llvm::Error storeToDisk(llvm::StringRef Path) const override {
-
+  llvm::Error store(const revng::FilePath &Path) const override {
     return llvm::Error::success();
   }
 
-  llvm::Error loadFromDisk(llvm::StringRef Path) override {
-
+  llvm::Error load(const revng::FilePath &Path) override {
     return llvm::Error::success();
   }
 
   llvm::Error serialize(llvm::raw_ostream &OS) const final {
-
     return llvm::Error::success();
   }
 
   llvm::Error deserialize(const llvm::MemoryBuffer &Buffer) final {
-
     return llvm::Error::success();
   }
 
-  llvm::Error
-  extractOne(llvm::raw_ostream &OS, const Target &Target) const override {
+  llvm::Error extractOne(llvm::raw_ostream &OS,
+                         const Target &Target) const override {
     revng_abort();
     return llvm::Error::success();
   }
@@ -1142,7 +1124,7 @@ public:
 
   bool contains(const Target &Target,
                 const EnumerableContainerExample &Container) const {
-    return Container.Targets.count(Target);
+    return Container.Targets.contains(Target);
   }
 
   bool remove(const Context &Ctx,
@@ -1156,8 +1138,8 @@ public:
     return ErasedAll;
   }
 
-  bool
-  remove(const Target &Target, EnumerableContainerExample &Container) const {
+  bool remove(const Target &Target,
+              EnumerableContainerExample &Container) const {
 
     if (not contains(Target, Container))
       return false;
@@ -1171,67 +1153,61 @@ static ExampleContainerInpsector Example;
 
 BOOST_AUTO_TEST_CASE(EnumerableContainersTest) {
   Context Ctx;
-  EnumerableContainerExample Example(Ctx,
-                                     "dont_care",
-                                     "application/x.dont.care");
-  Target T({}, RootKind, Exactness::DerivedFrom);
+  EnumerableContainerExample Example(Ctx, "dont_care");
+  Target T({}, RootKind);
   Example.Targets.insert(T);
   BOOST_TEST(Example.contains(T));
   BOOST_TEST(Example.remove(TargetsList({ T })));
   BOOST_TEST(not Example.contains(T));
 }
 
-class LLVMInspectorExample
-  : public LLVMGlobalKindBase<ExampleLLVMInspectalbeContainer> {
+class LLVMInspectorExample : public LLVMKind {
 public:
-  using LLVMGlobalKindBase<ExampleLLVMInspectalbeContainer>::LLVMGlobalKindBase;
+  using LLVMKind::LLVMKind;
+
   std::optional<Target>
   symbolToTarget(const llvm::Function &Symbol) const override {
     return Target({ Symbol.getName() }, FunctionKind);
   }
 
-  TargetsList compactTargets(const Context &Ctx,
-                             TargetsList::List &Targets) const override {
-    Target F1({ "f1" }, FunctionKind);
-    Target F2({ "f2" }, FunctionKind);
-    Target All({ PathComponent::all() }, FunctionKind);
-    if (find(Targets, F1) != Targets.end()
-        and find(Targets, F2) != Targets.end())
-
-      return TargetsList({ All });
-    return TargetsList(move(Targets));
+  void appendAllTargets(const pipeline::Context &Ctx,
+                        pipeline::TargetsList &Out) const override {
+    Out.push_back(Target("f1", *this));
+    Out.push_back(Target("f2", *this));
   }
 };
 
-class LLVMRootInspectorExample
-  : public LLVMGlobalKindBase<ExampleLLVMInspectalbeContainer> {
+class LLVMRootInspectorExample : public LLVMKind {
 public:
-  using LLVMGlobalKindBase<ExampleLLVMInspectalbeContainer>::LLVMGlobalKindBase;
+  using LLVMKind::LLVMKind;
+
   std::optional<Target>
   symbolToTarget(const llvm::Function &Symbol) const override {
     return Target({}, RootKind);
   }
 
-  TargetsList compactTargets(const Context &Ctx,
-                             TargetsList::List &Targets) const override {
-    return TargetsList(move(Targets));
+  void appendAllTargets(const pipeline::Context &Ctx,
+                        pipeline::TargetsList &Out) const override {
+    Out.push_back(Target(*this));
   }
 };
 
-static LLVMInspectorExample ExampleLLVMInspector("dc", &FunctionRank);
-static LLVMRootInspectorExample ExampleLLVMRootInspector("dc2", &Root);
+static LLVMInspectorExample ExampleLLVMInspector("dc", FunctionRank);
+static LLVMRootInspectorExample ExampleLLVMRootInspector("dc2", Root);
 
 BOOST_AUTO_TEST_CASE(LLVMKindTest) {
   llvm::LLVMContext C;
-  using Cont = ExampleLLVMInspectalbeContainer;
+  using Cont = LLVMContainer;
 
   Context Ctx;
   Runner Pipeline(Ctx);
-  Pipeline.addContainerFactory(CName, makeLLVMContainerFactory<Cont>(Ctx, C));
+  Pipeline.addContainerFactory(CName,
+                               ContainerFactory::fromGlobal<Cont>(&Ctx, &C));
 
-  Pipeline.emplaceStep("", "first_step");
+  Pipeline.emplaceStep("", "first_step", "");
   Pipeline.emplaceStep("first_step",
                        "End",
+                       "",
                        Cont::wrapLLVMPasses(CName, LLVMPassFunctionCreator()));
 
   makeF(Pipeline["first_step"]
@@ -1252,28 +1228,18 @@ BOOST_AUTO_TEST_CASE(LLVMKindTest) {
   BOOST_TEST(F != nullptr);
 }
 
-class InspectorKindExample
-  : public LLVMGlobalKindBase<ExampleLLVMInspectalbeContainer> {
+class InspectorKindExample : public LLVMKind {
 public:
-  InspectorKindExample() :
-    LLVMGlobalKindBase<ExampleLLVMInspectalbeContainer>("ExampleName",
-                                                        &FunctionRank) {}
+  InspectorKindExample() : LLVMKind("ExampleName", FunctionRank) {}
 
   std::optional<Target>
   symbolToTarget(const llvm::Function &Symbol) const final {
     return Target({ Symbol.getName() }, *this);
   }
-
-  TargetsList
-  compactTargets(const Context &Ctx, TargetsList::List &Targets) const final {
-    Target F1({ "f1" }, *this);
-    Target F2({ "f2" }, *this);
-    Target All({ PathComponent::all() }, *this);
-    if (find(Targets, F1) != Targets.end()
-        and find(Targets, F2) != Targets.end())
-
-      return TargetsList({ All });
-    return TargetsList(move(Targets));
+  void appendAllTargets(const pipeline::Context &Ctx,
+                        pipeline::TargetsList &Out) const override {
+    Out.push_back(Target("f1", *this));
+    Out.push_back(Target("f2", *this));
   }
 
   ~InspectorKindExample() override {}
@@ -1285,8 +1251,8 @@ BOOST_AUTO_TEST_CASE(InspectorKindTest) {
   Context Ctx;
   llvm::LLVMContext C;
 
-  using Cont = ExampleLLVMInspectalbeContainer;
-  auto Factory = makeLLVMContainerFactory<Cont>(Ctx, C);
+  using Cont = LLVMContainer;
+  auto Factory = ContainerFactory::fromGlobal<Cont>(&Ctx, &C);
 
   auto Container = Factory("dont_care");
 
@@ -1305,22 +1271,24 @@ BOOST_AUTO_TEST_CASE(MultiStepInvalidationTest) {
 
   const std::string Name = "first_step";
   const std::string SecondName = "second_step";
-  Pipeline.emplaceStep("", Name);
+  Pipeline.emplaceStep("", Name, "");
   Pipeline.emplaceStep(Name,
                        SecondName,
+                       "",
                        PipeWrapper::bind<FineGranerPipe>(CName, CName));
   Pipeline.emplaceStep(SecondName,
                        "End",
+                       "",
                        PipeWrapper::bind<CopyPipe>(CName, CName2));
 
   auto &C1 = Pipeline[Name].containers().getOrCreate<MapContainer>(CName);
   auto &C1End = Pipeline["End"].containers().getOrCreate<MapContainer>(CName);
   auto &C2End = Pipeline["End"].containers().getOrCreate<MapContainer>(CName2);
 
-  const auto T = Target({}, RootKind);
+  const auto T = Target(RootKind);
   C1.get(T) = 1;
 
-  const auto ToProduce = Target({ PathComponent("f1") }, FunctionKind);
+  const auto ToProduce = Target({ "f1" }, FunctionKind);
   ContainerToTargetsMap Map;
   Map[CName2].emplace_back(ToProduce);
   cantFail(Pipeline.run("End", Map));
@@ -1330,10 +1298,15 @@ BOOST_AUTO_TEST_CASE(MultiStepInvalidationTest) {
 
   BOOST_TEST(C2End.get(ToProduce) == 1);
 
-  pipeline::InvalidationMap Invalidations;
+  pipeline::TargetInStepSet Invalidations;
   Invalidations[Name][CName].push_back(T);
 
+  // C2End.enumerate().dump();
+  llvm::outs() << "Invalidations\n";
   auto Error = Pipeline.getInvalidations(Invalidations);
+  // Invalidations[Name].dump();
+  // Invalidations[SecondName].dump();
+  // Invalidations["End"].dump();
   BOOST_TEST(!Error);
 
   Error = Pipeline.invalidate(Invalidations);
@@ -1350,31 +1323,37 @@ class ArgumentTestAnalysis {
 public:
   constexpr static const char *Name = "dont_care";
 
-  constexpr static std::tuple Options = { pipeline::Option("first", 10),
-                                          pipeline::Option("second",
-                                                           "something") };
+  constexpr static std::tuple Options = {
+    pipeline::Option("first", 10),
+    pipeline::Option("second", "something"),
+    pipeline::Option("third", static_cast<uint64_t>(32))
+  };
 
   std::vector<std::vector<pipeline::Kind *>> AcceptedKinds = { { &RootKind } };
 
-  void run(const Context &Ctx,
+  void run(const ExecutionContext &Ctx,
            const MapContainer &Cont,
            int First,
-           std::string Second) {
+           std::string Second,
+           uint64_t Third) {
     BOOST_TEST(First == 10);
     BOOST_TEST(Second == "something");
+    BOOST_TEST(Third == 32);
   }
 };
 
 BOOST_AUTO_TEST_CASE(PipeOptions) {
+  RegisterAnalysis<ArgumentTestAnalysis> Dummy;
   pipeline::AnalysisWrapperImpl W(ArgumentTestAnalysis(), { "container_name" });
   Context Ctx;
+  Step FakeStep(Ctx, "dc", "", {});
+  ExecutionContext ExecutionCtx(Ctx, FakeStep, nullptr);
   ContainerSet Set;
-  Set.add("container_name", [](llvm::StringRef Name) {
-    return std::make_unique<MapContainer>(Name);
-  });
+  auto Factory = ContainerFactory::create<MapContainer>();
+  Set.add("container_name", Factory);
   Set["container_name"];
-  if (auto Error = W.run(Ctx, Set, {}); Error)
-    BOOST_FAIL("unrechable");
+  if (auto Error = W.run(ExecutionCtx, Set, {}); Error)
+    BOOST_FAIL("unreachable");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

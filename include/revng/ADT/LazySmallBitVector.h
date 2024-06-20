@@ -4,6 +4,7 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include <algorithm>
 #include <climits>
 #include <cstdint>
 #include <cstring>
@@ -16,7 +17,7 @@
 // TODO: implement shrinking
 
 // TODO: implement using __builtin_clz if available
-/// \brief Returns the minimum amount of bits required to represent \p Value
+/// Returns the minimum amount of bits required to represent \p Value
 template<typename T>
 inline unsigned requiredBits(T Value) {
   unsigned Result = 0;
@@ -33,19 +34,19 @@ template<typename T, typename A, typename B>
 concept is_either = std::is_same_v<T, A> or std::is_same_v<T, B>;
 
 template<typename IntT>
-requires is_either<IntT, unsigned, int>
+  requires is_either<IntT, unsigned, int>
 inline unsigned findFirstBit(IntT Value) {
   return ffs(Value);
 }
 
 template<typename LongT>
-requires is_either<LongT, unsigned long, long>
+  requires is_either<LongT, unsigned long, long>
 inline unsigned findFirstBit(LongT Value) {
   return ffsl(Value);
 }
 
 template<typename LongLongT>
-requires is_either<LongLongT, unsigned long long, long long>
+  requires is_either<LongLongT, unsigned long long, long long>
 inline unsigned findFirstBit(LongLongT Value) {
   return ffsll(Value);
 }
@@ -92,8 +93,8 @@ private:
   unsigned NextBitIndex;
 };
 
-/// \brief Infinite zero-initialized BitVector, automatically enlarging and
-///        in-place up to sizeof(uintptr_t) * CHAR_BIT - 1 bits
+/// Infinite zero-initialized BitVector, automatically enlarging and in-place
+/// up to sizeof(uintptr_t) * CHAR_BIT - 1 bits
 class LazySmallBitVector {
 public:
   using const_iterator = LazySmallBitVectorIterator<const LazySmallBitVector>;
@@ -247,7 +248,7 @@ public:
     }
   }
 
-  /// \brief The bits required to represent this bit vector
+  /// The bits required to represent this bit vector
   ///
   /// This is the index of the most significant set bit, plus 1. 0 means the bit
   /// vector is composed exclusively by zeros.
@@ -582,7 +583,7 @@ public:
     return *this;
   }
 
-  /// \brief Returns the 1-based index of the next set bit after \p StartIndex
+  /// Returns the 1-based index of the next set bit after \p StartIndex
   ///
   /// \return 0 if no bits are set after \p StartIndex, the 1-based index of the
   ///         next bit set otherwise

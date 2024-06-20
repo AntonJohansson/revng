@@ -22,6 +22,10 @@ fields:
     type: uint64_t
   - name: To
     type: uint64_t
+key:
+  - Type
+  - From
+  - To
 
 TUPLE-TREE-YAML */
 
@@ -32,19 +36,6 @@ namespace yield {
 class Tag : public generated::Tag {
 public:
   using generated::Tag::Tag;
-  Tag(TagType::Values Type,
-      uint64_t From = std::numeric_limits<size_t>::min(),
-      uint64_t To = std::numeric_limits<size_t>::max()) :
-    generated::Tag(Type, From, To) {}
-
-  std::strong_ordering operator<=>(const Tag &Another) const {
-    if (From != Another.From)
-      return From <=> Another.From;
-    else if (To != Another.To)
-      return Another.To <=> To; // reversed order
-    else
-      return Type <=> Another.Type;
-  }
 
 public:
   bool verify(model::VerifyHelper &VH) const;
@@ -59,9 +50,5 @@ public:
 };
 
 } // namespace yield
-
-template<>
-struct KeyedObjectTraits<yield::Tag>
-  : public IdentityKeyedObjectTraits<yield::Tag> {};
 
 #include "revng/Yield/Generated/Late/Tag.h"

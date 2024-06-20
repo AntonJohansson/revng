@@ -1,5 +1,5 @@
 /// \file CompileModule.cpp
-/// \brief The compile module pipe transforma llvm module into a object file
+/// The compile module pipe transforms an llvm module into an object file.
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
@@ -12,9 +12,9 @@
 #include "llvm/CodeGen/MachineModuleInfo.h"
 #include "llvm/IR/AutoUpgrade.h"
 #include "llvm/IR/LegacyPassManager.h"
+#include "llvm/MC/TargetRegistry.h"
 #include "llvm/Option/OptTable.h"
 #include "llvm/Support/CodeGen.h"
-#include "llvm/Support/TargetRegistry.h"
 #include "llvm/Support/raw_os_ostream.h"
 #include "llvm/Target/TargetMachine.h"
 
@@ -25,6 +25,7 @@
 #include "revng/Recompile/CompileModulePipe.h"
 #include "revng/Support/Assert.h"
 #include "revng/Support/IRAnnotators.h"
+#include "revng/Support/IRHelpers.h"
 #include "revng/Support/OriginalAssemblyAnnotationWriter.h"
 
 using namespace llvm;
@@ -43,8 +44,9 @@ static cl::opt<char> OptLevel("compile-opt-level",
                               cl::ZeroOrMore,
                               cl::init(' '));
 
-static void
-compileModuleRunImpl(LLVMContainer &Module, FileContainer &TargetBinary) {
+static void compileModuleRunImpl(const Context &Ctx,
+                                 LLVMContainer &Module,
+                                 ObjectFileContainer &TargetBinary) {
   using namespace revng;
 
   auto Enumeration = Module.enumerate();
@@ -53,7 +55,7 @@ compileModuleRunImpl(LLVMContainer &Module, FileContainer &TargetBinary) {
     return;
 
   if (Enumeration.contains(pipeline::Target(kinds::IsolatedRoot))
-      and not Enumeration.contains(pipeline::Target(kinds::Isolated)))
+      and not Enumeration.contains(kinds::Isolated.allTargets(Ctx)))
     return;
 
   StringMap<llvm::cl::Option *> &RegOptions(getRegisteredOptions());
@@ -130,9 +132,9 @@ compileModuleRunImpl(LLVMContainer &Module, FileContainer &TargetBinary) {
                                          true,
                                          MMIWP);
   revng_assert(not Err);
-  revng_assert(llvm::verifyModule(*M, &llvm::dbgs()) == 0);
+  revng::verify(M);
   PM.run(*M);
-  revng_assert(llvm::verifyModule(*M, &llvm::dbgs()) == 0);
+  revng::verify(M);
 
   auto Path = TargetBinary.path();
 
@@ -141,16 +143,16 @@ compileModuleRunImpl(LLVMContainer &Module, FileContainer &TargetBinary) {
   fs::setPermissions(*TargetBinary.path(), Permissions);
 }
 
-void CompileModule::run(const Context &,
+void CompileModule::run(const ExecutionContext &Ctx,
                         LLVMContainer &Module,
-                        FileContainer &TargetBinary) {
-  compileModuleRunImpl(Module, TargetBinary);
+                        ObjectFileContainer &TargetBinary) {
+  compileModuleRunImpl(Ctx.getContext(), Module, TargetBinary);
 }
 
-void CompileIsolatedModule::run(const Context &,
+void CompileIsolatedModule::run(const ExecutionContext &Ctx,
                                 LLVMContainer &Module,
-                                FileContainer &TargetBinary) {
-  compileModuleRunImpl(Module, TargetBinary);
+                                ObjectFileContainer &TargetBinary) {
+  compileModuleRunImpl(Ctx.getContext(), Module, TargetBinary);
 }
 
 static RegisterPipe<CompileModule> E2;

@@ -1,7 +1,7 @@
 /// \file PipelineManager.cpp
-/// \brief A pipeline manager ties up all the various bit and pieces of a
-/// pipeline into a single object that does not require the c api to ever need
-/// to expose a delete operator except for the global one.
+/// A pipeline manager ties up all the various bit and pieces of a pipeline into
+/// a single object that does not require the c api to ever need to expose a
+/// delete operator except for the global one.
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
@@ -14,6 +14,7 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Error.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/raw_os_ostream.h"
 #include "llvm/Support/raw_ostream.h"
@@ -28,7 +29,6 @@
 #include "revng/Support/ResourceFinder.h"
 
 using namespace pipeline;
-using namespace std;
 using namespace llvm;
 using namespace ::revng::pipes;
 
@@ -61,8 +61,8 @@ static Context setUpContext(LLVMContext &Context) {
   return Ctx;
 }
 
-static llvm::Error
-pipelineConfigurationCallback(const Loader &Loader, LLVMPipe &NewPass) {
+static llvm::Error pipelineConfigurationCallback(const Loader &Loader,
+                                                 LLVMPipe &NewPass) {
   using Wrapper = revng::ModelGlobal;
   auto &Context = Loader.getContext();
   auto MaybeModelWrapper = Context.getGlobal<Wrapper>(revng::ModelGlobalName);
@@ -86,24 +86,23 @@ static Loader setupLoader(pipeline::Context &PipelineContext,
 
 llvm::Error
 PipelineManager::overrideContainer(llvm::StringRef PipelineFileMapping) {
-
   auto MaybeMapping = PipelineFileMapping::parse(PipelineFileMapping);
   if (not MaybeMapping)
     return MaybeMapping.takeError();
-  return MaybeMapping->loadFromDisk(*Runner);
+  return MaybeMapping->load(*Runner);
 }
 
 static llvm::Expected<Runner>
 setUpPipeline(pipeline::Context &PipelineContext,
               Loader &Loader,
               llvm::ArrayRef<std::string> TextPipelines,
-              llvm::StringRef ExecutionDirectory) {
+              const revng::DirectoryPath &ExecutionDirectory) {
   auto MaybePipeline = Loader.load(TextPipelines);
   if (not MaybePipeline)
     return MaybePipeline.takeError();
 
-  if (not ExecutionDirectory.empty())
-    if (auto Error = MaybePipeline->loadFromDisk(ExecutionDirectory); Error)
+  if (ExecutionDirectory.isValid())
+    if (auto Error = MaybePipeline->load(ExecutionDirectory); Error)
       return std::move(Error);
 
   return MaybePipeline;
@@ -113,66 +112,71 @@ llvm::Expected<PipelineManager>
 PipelineManager::create(llvm::ArrayRef<std::string> Pipelines,
                         llvm::ArrayRef<std::string> EnablingFlags,
                         llvm::StringRef ExecutionDirectory) {
-
-  auto MaybeManager = createContexts(EnablingFlags, ExecutionDirectory);
-  if (not MaybeManager)
-    return MaybeManager.takeError();
-  auto &Manager = *MaybeManager;
-
   std::vector<std::string> LoadedPipelines;
 
-  for (const auto &Path : Pipelines) {
+  std::vector<std::string> OrderedPipelines(Pipelines.begin(), Pipelines.end());
+  llvm::sort(OrderedPipelines, [](std::string &Elem1, std::string &Elem2) {
+    return llvm::sys::path::filename(Elem1) < llvm::sys::path::filename(Elem2);
+  });
+
+  for (const auto &Path : OrderedPipelines) {
     auto MaybeBuffer = errorOrToExpected(MemoryBuffer::getFileOrSTDIN(Path));
     if (not MaybeBuffer)
       return MaybeBuffer.takeError();
     LoadedPipelines.emplace_back((*MaybeBuffer)->getBuffer().str());
   }
-  if (auto MaybePipeline = setUpPipeline(*Manager.PipelineContext,
-                                         *Manager.Loader,
-                                         LoadedPipelines,
-                                         ExecutionDirectory);
-      MaybePipeline)
-    Manager.Runner = make_unique<pipeline::Runner>(move(*MaybePipeline));
-  else
-    return MaybePipeline.takeError();
 
-  Manager.recalculateAllPossibleTargets();
-  return std::move(Manager);
+  return createFromMemory(LoadedPipelines, EnablingFlags, ExecutionDirectory);
 }
 
-llvm::Expected<PipelineManager>
-PipelineManager::createContexts(llvm::ArrayRef<std::string> EnablingFlags,
-                                llvm::StringRef ExecutionDirectory) {
-  PipelineManager Manager;
-  Manager.ExecutionDirectory = ExecutionDirectory.str();
-  Manager.Context = std::make_unique<llvm::LLVMContext>();
-  auto Ctx = setUpContext(*Manager.Context);
-  Manager.PipelineContext = make_unique<pipeline::Context>(move(Ctx));
+PipelineManager::PipelineManager(llvm::ArrayRef<std::string> EnablingFlags,
+                                 std::unique_ptr<revng::StorageClient>
+                                   &&Client) :
+  StorageClient(std::move(Client)),
+  ExecutionDirectory(StorageClient.get(), "") {
+  Context = std::make_unique<llvm::LLVMContext>();
+  auto Ctx = setUpContext(*Context);
+  PipelineContext = make_unique<pipeline::Context>(std::move(Ctx));
 
-  auto Loader = setupLoader(*Manager.PipelineContext, EnablingFlags);
-  Manager.Loader = make_unique<pipeline::Loader>(move(Loader));
-  return Manager;
+  auto Loader = setupLoader(*PipelineContext, EnablingFlags);
+  this->Loader = make_unique<pipeline::Loader>(std::move(Loader));
 }
 
 llvm::Expected<PipelineManager>
 PipelineManager::createFromMemory(llvm::ArrayRef<std::string> PipelineContent,
                                   llvm::ArrayRef<std::string> EnablingFlags,
                                   llvm::StringRef ExecutionDirectory) {
+  std::unique_ptr<revng::StorageClient> Client;
+  if (not ExecutionDirectory.empty()) {
+    auto MaybeClient = revng::StorageClient::fromPathOrURL(ExecutionDirectory);
+    if (!MaybeClient)
+      return MaybeClient.takeError();
+    Client = std::move(MaybeClient.get());
+  }
 
-  auto MaybeManager = createContexts(EnablingFlags, ExecutionDirectory);
-  if (not MaybeManager)
-    return MaybeManager.takeError();
-  auto &Manager = *MaybeManager;
+  return createFromMemory(PipelineContent, EnablingFlags, std::move(Client));
+}
+
+llvm::Expected<PipelineManager>
+PipelineManager::createFromMemory(llvm::ArrayRef<std::string> PipelineContent,
+                                  llvm::ArrayRef<std::string> EnablingFlags,
+                                  std::unique_ptr<revng::StorageClient>
+                                    &&Client) {
+  PipelineManager Manager(EnablingFlags, std::move(Client));
   if (auto MaybePipeline = setUpPipeline(*Manager.PipelineContext,
                                          *Manager.Loader,
                                          PipelineContent,
-                                         ExecutionDirectory);
+                                         Manager.executionDirectory());
       MaybePipeline)
-    Manager.Runner = make_unique<pipeline::Runner>(move(*MaybePipeline));
+    Manager.Runner = make_unique<pipeline::Runner>(std::move(*MaybePipeline));
   else
     return MaybePipeline.takeError();
 
   Manager.recalculateAllPossibleTargets();
+
+  if (auto Error = Manager.computeDescription(); Error)
+    return Error;
+
   return std::move(Manager);
 }
 
@@ -210,18 +214,9 @@ void PipelineManager::getCurrentState(Runner::State &State) const {
   Runner->getCurrentState(State);
   for (auto &Step : State) {
     for (auto &Container : Step.second) {
-      TargetsList Expansions;
-      for (auto &Target : Container.second)
-        Target.expand(*PipelineContext, Expansions);
-      State[Step.first()][Container.first()] = std::move(Expansions);
+      State[Step.first()][Container.first()] = Container.second;
     }
   }
-}
-
-static bool isExpansionEmpty(const Context &Ctx, const Target &Target) {
-  TargetsList Expansions;
-  Target.expand(Ctx, Expansions);
-  return Expansions.empty();
 }
 
 void PipelineManager::getAllPossibleTargets(Runner::State &State,
@@ -231,10 +226,7 @@ void PipelineManager::getAllPossibleTargets(Runner::State &State,
     for (auto &Container : Step.second) {
       TargetsList Expansions;
       for (auto &Target : Container.second) {
-        if (ExpandTargets or isExpansionEmpty(*PipelineContext, Target))
-          Target.expand(*PipelineContext, Expansions);
-        else
-          Expansions.push_back(Target);
+        Expansions.push_back(Target);
       }
       State[Step.first()][Container.first()] = std::move(Expansions);
     }
@@ -256,29 +248,31 @@ void PipelineManager::writeAllPossibleTargets(llvm::raw_ostream &OS) const {
   }
 }
 
-llvm::Error PipelineManager::storeToDisk(llvm::StringRef DirPath) {
-  if (!DirPath.empty())
-    return Runner->storeToDisk(DirPath);
-
-  if (ExecutionDirectory.empty())
+llvm::Error PipelineManager::store() {
+  // If we are in ephemeral mode (resume was "") then we don't store anything
+  if (StorageClient == nullptr)
     return llvm::Error::success();
 
-  return Runner->storeToDisk(ExecutionDirectory);
+  // Run store on the runner, this will serialize all step/containers
+  // inside the resume directory
+  if (auto Error = Runner->store(ExecutionDirectory); Error)
+    return Error;
+
+  // Commit all the changes to storage
+  return StorageClient->commit();
 }
 
-llvm::Error PipelineManager::storeStepToDisk(llvm::StringRef StepName,
-                                             llvm::StringRef DirPath) {
+llvm::Error PipelineManager::storeStepToDisk(llvm::StringRef StepName) {
+  if (StorageClient == nullptr)
+    return llvm::Error::success();
+
   auto &Step = Runner->getStep(StepName);
-  if (!DirPath.empty())
-    return Runner->storeStepToDisk(StepName, DirPath);
-
-  if (ExecutionDirectory.empty())
-    return llvm::Error::success();
-
-  return Runner->storeStepToDisk(StepName, ExecutionDirectory);
+  if (auto Error = Runner->storeStepToDisk(StepName, ExecutionDirectory); Error)
+    return Error;
+  return StorageClient->commit();
 }
 
-llvm::Error
+llvm::Expected<TargetInStepSet>
 PipelineManager::deserializeContainer(pipeline::Step &Step,
                                       llvm::StringRef ContainerName,
                                       const llvm::MemoryBuffer &Buffer) {
@@ -292,20 +286,23 @@ PipelineManager::deserializeContainer(pipeline::Step &Step,
   if (auto Error = Container.deserialize(Buffer); !!Error)
     return Error;
 
-  recalculateAllPossibleTargets();
+  auto MaybeInvalidations = invalidateAllPossibleTargets();
+  if (not MaybeInvalidations)
+    return MaybeInvalidations.takeError();
 
   if (auto Error = storeStepToDisk(Step.getName()); !!Error)
     return Error;
 
-  return Error::success();
+  PipelineContext->bumpCommitIndex();
+  return MaybeInvalidations.get();
 }
 
 llvm::Error PipelineManager::store(const PipelineFileMapping &Mapping) {
-  return Mapping.storeToDisk(*Runner);
+  return Mapping.store(*Runner);
 }
 
 llvm::Error PipelineManager::overrideContainer(PipelineFileMapping Mapping) {
-  return Mapping.loadFromDisk(*Runner);
+  return Mapping.load(*Runner);
 }
 
 llvm::Error
@@ -315,45 +312,60 @@ PipelineManager::store(llvm::ArrayRef<std::string> StoresOverrides) {
     if (not MaybeMapping)
       return MaybeMapping.takeError();
 
-    if (auto Error = MaybeMapping->storeToDisk(*Runner))
+    if (auto Error = MaybeMapping->store(*Runner))
       return Error;
   }
   return llvm::Error::success();
 }
 
-llvm::Error PipelineManager::invalidateAllPossibleTargets() {
+llvm::Expected<TargetInStepSet>
+PipelineManager::invalidateAllPossibleTargets() {
+  TargetInStepSet ResultMap;
   auto Stream = ExplanationLogger.getAsLLVMStream();
   recalculateAllPossibleTargets();
 
+  Task T(CurrentState.size(), "invalidateAllPossibleTargets");
   for (const auto &Step : CurrentState) {
+    T.advance(Step.first(), true);
+    if (Step.first() == Runner->begin()->getName())
+      continue;
+
+    Task T2(Step.second.size(), "Containers");
     for (const auto &Container : Step.second) {
+      T2.advance(Container.first(), true);
+
       for (const auto &Target : Container.second) {
-        if (not getRunner()[Step.first()]
-                  .containers()[Container.first()]
-                  .enumerate()
-                  .contains(Target))
+        auto &Containers = getRunner()[Step.first()].containers();
+        if (not Containers.contains(Container.first()))
+          continue;
+
+        if (not Containers[Container.first()].enumerate().contains(Target))
           continue;
 
         *Stream << "Invalidating: ";
         *Stream << Step.first() << "/" << Container.first() << "/";
         Target.dump(*Stream);
-        InvalidationMap Map;
+
+        TargetInStepSet Map;
         Map[Step.first()][Container.first()].push_back(Target);
         if (auto Error = Runner->getInvalidations(Map); Error)
-          return Error;
+          return std::move(Error);
         if (auto Error = Runner->invalidate(Map); Error)
-          return Error;
+          return std::move(Error);
 
-        for (const auto &First : Map)
+        for (const auto &First : Map) {
           for (const auto &Second : First.second) {
             *Stream << "\t" << First.first() << " " << Second.first() << " ";
             Target.dump(*Stream);
           }
+        }
+
+        pipeline::merge(ResultMap, Map);
       }
     }
   }
 
-  return llvm::Error::success();
+  return ResultMap;
 }
 
 llvm::Error PipelineManager::produceAllPossibleTargets(bool ExpandTargets) {
@@ -378,23 +390,143 @@ llvm::Error PipelineManager::produceAllPossibleTargets(bool ExpandTargets) {
   return llvm::Error::success();
 }
 
+const pipeline::Step::AnalysisValueType &
+PipelineManager::getAnalysis(const AnalysisReference &Reference) const {
+  auto &Step = getRunner().getStep(Reference.getStepName());
+
+  auto Predicate = [&](const Step::AnalysisValueType &Analysis) -> bool {
+    return Analysis.first() == Reference.getAnalysisName();
+  };
+  auto Analysis = llvm::find_if(Step.analyses(), Predicate);
+  return *Analysis;
+}
+
 llvm::Expected<DiffMap>
-PipelineManager::runAnalysis(llvm::StringRef AnalysisName,
-                             llvm::StringRef StepName,
-                             const ContainerToTargetsMap &Targets,
+PipelineManager::runAnalyses(const pipeline::AnalysesList &List,
+                             TargetInStepSet &Map,
                              const llvm::StringMap<std::string> &Options,
                              llvm::raw_ostream *DiagnosticLog) {
-  auto Result = Runner->runAnalysis(AnalysisName, StepName, Targets, Options);
-  if (Result)
-    recalculateAllPossibleTargets();
+  auto Result = Runner->runAnalyses(List, Map, Options);
 
+  if (not Result)
+    return Result.takeError();
+
+  recalculateAllPossibleTargets();
+
+  PipelineContext->bumpCommitIndex();
   return Result;
 }
 
 llvm::Expected<DiffMap>
-PipelineManager::runAllAnalyses(const llvm::StringMap<std::string> &Options) {
-  auto Result = Runner->runAllAnalyses(Options);
-  if (Result)
-    recalculateAllPossibleTargets();
+PipelineManager::runAnalysis(llvm::StringRef AnalysisName,
+                             llvm::StringRef StepName,
+                             const ContainerToTargetsMap &Targets,
+                             TargetInStepSet &Map,
+                             const llvm::StringMap<std::string> &Options,
+                             llvm::raw_ostream *DiagnosticLog) {
+  auto Result = Runner->runAnalysis(AnalysisName,
+                                    StepName,
+                                    Targets,
+                                    Map,
+                                    Options);
+  if (not Result)
+    return Result.takeError();
+
+  recalculateAllPossibleTargets();
+
+  PipelineContext->bumpCommitIndex();
   return Result;
+}
+
+llvm::Expected<TargetInStepSet>
+PipelineManager::invalidateFromDiff(const llvm::StringRef Name,
+                                    const pipeline::GlobalTupleTreeDiff &Diff) {
+  TargetInStepSet Map;
+  if (auto ApplyError = getRunner().apply(Diff, Map); !!ApplyError)
+    return std::move(ApplyError);
+
+  // TODO: once invalidations are working, return `Map` instead of this
+  return invalidateAllPossibleTargets();
+}
+
+llvm::Error
+PipelineManager::materializeTargets(const llvm::StringRef StepName,
+                                    const ContainerToTargetsMap &Map) {
+  if (CurrentState.count(StepName) == 0)
+    return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                   "Step %s does not have any targets",
+                                   StepName.str().c_str());
+
+  const auto &StepCurrentState = CurrentState[StepName];
+  for (auto ContainerName : Map.keys()) {
+    if (!StepCurrentState.contains(ContainerName))
+      return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                     "Container %s does not have any targets",
+                                     ContainerName.str().c_str());
+
+    auto &CurrentContainerState = StepCurrentState.at(ContainerName);
+    for (const pipeline::Target &Target : Map.at(ContainerName)) {
+      if (!CurrentContainerState.contains(Target))
+        return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                       "Target %s cannot be produced",
+                                       Target.serialize().c_str());
+    }
+  }
+
+  if (auto Error = getRunner().run(StepName, Map); Error)
+    return Error;
+
+  return Error::success();
+}
+
+llvm::Expected<std::unique_ptr<pipeline::ContainerBase>>
+PipelineManager::produceTargets(const llvm::StringRef StepName,
+                                const Container &TheContainer,
+                                const pipeline::TargetsList &List) {
+  ContainerToTargetsMap Targets;
+  for (const pipeline::Target &Target : List)
+    Targets[TheContainer.second->name()].push_back(Target);
+
+  if (auto Error = materializeTargets(StepName, Targets); Error)
+    return Error;
+
+  const auto &ToFilter = Targets.at(TheContainer.second->name());
+  return TheContainer.second->cloneFiltered(ToFilter);
+}
+
+llvm::Error PipelineManager::computeDescription() {
+  using pipeline::description::PipelineDescription;
+  PipelineDescription Description = getRunner().description();
+
+  {
+    llvm::raw_string_ostream OS(this->Description);
+    yaml::Output YAMLOutput(OS);
+    YAMLOutput << Description;
+  }
+
+  if (StorageClient == nullptr)
+    return llvm::Error::success();
+
+  if (auto Error = ExecutionDirectory.create(); Error)
+    return Error;
+
+  constexpr auto DescriptionName = "pipeline-description.yml";
+  revng::FilePath DescriptionPath = ExecutionDirectory.getFile(DescriptionName);
+  auto MaybeWritableFile = DescriptionPath.getWritableFile();
+  if (!MaybeWritableFile)
+    return MaybeWritableFile.takeError();
+
+  MaybeWritableFile.get()->os() << this->Description;
+
+  return MaybeWritableFile.get()->commit();
+}
+
+llvm::Error
+PipelineManager::setStorageCredentials(llvm::StringRef Credentials) {
+  if (StorageClient == nullptr) {
+    return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                   "Client missing");
+  }
+
+  return StorageClient->setCredentials(Credentials);
 }

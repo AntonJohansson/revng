@@ -27,6 +27,8 @@ public:
   virtual llvm::ArrayRef<Kind *>
   getAcceptedKinds(size_t ContainerIndex) const = 0;
 
+  virtual std::unique_ptr<AnalysisWrapperBase>
+  clone(std::vector<std::string> NewRunningContainersNames = {}) const = 0;
   const std::string &getUserBoundName() const { return BoundName; }
   void setUserBoundName(std::string NewName) { BoundName = std::move(NewName); }
 };
@@ -41,9 +43,22 @@ public:
                       std::vector<std::string> RunningContainersNames) :
     Invokable(std::move(ActualPipe), std::move(RunningContainersNames)) {}
 
+  AnalysisWrapperImpl(AnalysisWrapperImpl ActualPipe,
+                      std::vector<std::string> RunningContainersNames) :
+    Invokable(std::move(ActualPipe.Invokable),
+              std::move(RunningContainersNames)) {}
+
   ~AnalysisWrapperImpl() override = default;
 
 public:
+  std::unique_ptr<AnalysisWrapperBase>
+  clone(std::vector<std::string> NewContainersNames = {}) const override {
+    if (NewContainersNames.empty())
+      return std::make_unique<AnalysisWrapperImpl>(*this);
+    return std::make_unique<AnalysisWrapperImpl>(*this,
+                                                 std::move(NewContainersNames));
+  }
+
   llvm::ArrayRef<Kind *>
   getAcceptedKinds(size_t ContainerIndex) const override {
     return Invokable.getPipe().AcceptedKinds.at(ContainerIndex);
@@ -59,7 +74,7 @@ public:
     Invokable.print(Ctx, OS, Indentation);
   }
 
-  llvm::Error run(Context &Ctx,
+  llvm::Error run(ExecutionContext &Ctx,
                   ContainerSet &Containers,
                   const llvm::StringMap<std::string> &ExtraArgs) override {
     return Invokable.run(Ctx, Containers, ExtraArgs);
@@ -75,6 +90,9 @@ public:
 
   std::vector<std::string> getRunningContainersNames() const override {
     return Invokable.getRunningContainersNames();
+  }
+  bool isContainerArgumentConst(size_t ArgumentIndex) const override {
+    return Invokable.isContainerArgumentConst(ArgumentIndex);
   }
   std::string getName() const override { return Invokable.getName(); }
 };

@@ -42,8 +42,10 @@ public:
   using generated::FunctionMetadata::FunctionMetadata;
 
 public:
-  const efa::BasicBlock *
-  findBlock(GeneratedCodeBasicInfo &GCBI, llvm::BasicBlock *BB) const;
+  const efa::BasicBlock *findBlock(GeneratedCodeBasicInfo &GCBI,
+                                   llvm::BasicBlock *BB) const;
+
+  void serialize(GeneratedCodeBasicInfo &GCBI) const;
 
 public:
   bool verify(const model::Binary &Binary) const debug_function;

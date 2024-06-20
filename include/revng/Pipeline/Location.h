@@ -1,7 +1,5 @@
 #pragma once
 
-// clang-format language: cpp
-
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
@@ -15,6 +13,7 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/YAMLTraits.h"
 
+#include "revng/ADT/CompilationTime.h"
 #include "revng/ADT/STLExtras.h"
 #include "revng/Pipeline/Rank.h"
 #include "revng/Support/MetaAddress.h"
@@ -32,7 +31,7 @@ namespace pipeline {
 /// are determined by the parents of the rank (see `Rank::Parent`).
 ///
 /// In deserialized form, the name gets lifted to a compilation time and can be
-/// accessed at `Rank::RankName`. The tuple of the keys is publically inherited
+/// accessed at `Rank::RankName`. The tuple of the keys is publicly inherited
 /// from, so it can either be accessed as normal tuple (for example, using
 /// `std::get<std::size_t>` after casting. There's a cast helper members
 /// (`tuple()`)) or using special accessors like `at()`.
@@ -60,12 +59,24 @@ public:
   auto &at(const AnotherRank &) {
     return std::get<AnotherRank::Depth - 1>(tuple());
   }
+
   template<RankConvertibleTo<Rank> AnotherRank>
   const auto &at(const AnotherRank &) const {
     return std::get<AnotherRank::Depth - 1>(tuple());
   }
 
-  // clang-format off
+  template<RankConvertibleTo<Rank> AnotherRank>
+  auto &back() {
+    return std::get<std::tuple_size_v<Tuple> - 1>(tuple());
+  }
+
+  const auto &back() { return std::get<std::tuple_size_v<Tuple> - 1>(tuple()); }
+
+  auto parent() const
+    requires(not std::is_same_v<typename Rank::Parent, void>)
+  {
+    return Location<typename Rank::Parent>::convert(*this);
+  }
 
   /// A static helper function for constructing locations from different
   /// location with related ranks.
@@ -75,15 +86,14 @@ public:
   ///
   /// If output location's rank is lower, all the extra keys get discarded.
   template<typename AnotherRank>
-    requires (RankConvertibleTo<Rank, AnotherRank>
-              || RankConvertibleTo<AnotherRank, Rank>)
+    requires(RankConvertibleTo<Rank, AnotherRank>
+             || RankConvertibleTo<AnotherRank, Rank>)
   static constexpr Location<Rank>
   convert(const Location<AnotherRank> &Another) {
-    // clang-format on
     Location<Rank> Result;
 
     constexpr auto Common = std::min(Rank::Depth, AnotherRank::Depth);
-    constexprRepeat<Common>([&Result, &Another]<std::size_t I> {
+    compile_time::repeat<Common>([&Result, &Another]<std::size_t I> {
       std::get<I>(Result.tuple()) = std::get<I>(Another.tuple());
     });
 
@@ -100,7 +110,7 @@ public:
 
     Result += Separator;
     Result += Rank::RankName;
-    constexprRepeat<Size>([&Result, this]<std::size_t Index> {
+    compile_time::repeat<Size>([&Result, this]<std::size_t Index> {
       Result += Separator;
       Result += serializeToString(std::get<Index>(tuple()));
     });
@@ -116,7 +126,7 @@ public:
   fromString(std::string_view String) {
     Location<Rank> Result;
 
-    auto MaybeSteps = constexprSplit<Size + 2>(Separator, String);
+    auto MaybeSteps = compile_time::split<Size + 2>(Separator, String);
     if (!MaybeSteps.has_value())
       return std::nullopt;
 
@@ -125,7 +135,7 @@ public:
     if (MaybeSteps->at(0) != "" || MaybeSteps->at(1) != ExpectedName)
       return std::nullopt;
 
-    auto Success = constexprAnd<Size>([&Result, &MaybeSteps]<std::size_t Idx> {
+    auto Success = compile_time::repeatAnd<Size>([&]<std::size_t Idx> {
       using T = typename std::tuple_element<Idx, Tuple>::type;
       using revng::detail::deserializeImpl;
       auto MaybeValue = deserializeImpl<T>(MaybeSteps->at(Idx + 2));
@@ -142,27 +152,21 @@ public:
   }
 };
 
-// clang-format off
-
 /// Constructs a new location from arbitrary arguments.
 ///
 /// The first argument is used to indicate the rank of location to be
 /// constructed, the rest are the arguments.
-template<RankSpecialization Rank, typename ...Args>
+template<RankSpecialization Rank, typename... Args>
   requires std::is_convertible_v<std::tuple<Args...>, typename Rank::Tuple>
 inline constexpr Location<Rank> location(const Rank &, Args &&...As) {
-  // clang-format on
   return Location<Rank>(As...);
 }
 
-// clang-format off
-
 /// Constructs a new location from arbitrary arguments and instantly serializes
 /// it into its string representation.
-template<RankSpecialization Rank, typename ...Args>
+template<RankSpecialization Rank, typename... Args>
   requires std::is_convertible_v<std::tuple<Args...>, typename Rank::Tuple>
 inline std::string serializedLocation(const Rank &R, Args &&...As) {
-  // clang-format on
   return location(R, std::forward<Args>(As)...).toString();
 }
 
@@ -176,6 +180,16 @@ locationFromString(const Rank &, std::string_view String) {
   return Location<Rank>::fromString(String);
 }
 
+/// A helper interface for location conversion.
+///
+/// It discloses the static `convert` member in an easier-to-access fashion.
+template<typename ResultRank, typename InputRank>
+  requires(RankConvertibleTo<ResultRank, InputRank>)
+inline constexpr Location<ResultRank>
+convertLocation(const ResultRank &Result, const Location<InputRank> &Input) {
+  return Location<ResultRank>::convert(Input);
+}
+
 namespace detail {
 
 /// Shorthand to "decay type then make a const pointer to it".
@@ -184,33 +198,31 @@ using ConstP = std::add_pointer_t<std::add_const_t<std::decay_t<T>>>;
 
 } // namespace detail
 
-// clang-format off
-
 /// A helper function used for deserializing any number of differently
 /// ranked locations at once.
 ///
-/// \arg Serialized is the string containing the serialized location.
-/// \arg Expected indicates the expected rank to be returned.
-/// \arg Supported lists all the other ranks that are supported, they must all
-/// be convertible to the \arg Expected rank.
+/// \param Serialized is the string containing the serialized location.
+/// \param Expected indicates the expected rank to be returned.
+/// \param Supported lists all the other ranks that are supported, they must all
+/// be convertible to the \ref Expected rank.
 ///
-/// \returns a valid location of \arg Expected rank if the \arg Serialized
+/// \returns a valid location of \ref Expected rank if the \ref Serialized
 /// string contains a valid serialized form of any location type within the
-/// \arg Supported list (including \arg Expected), `std::nullopt` otherwise.
-template <typename ExpectedRank, typename ...SupportedRanks>
-  requires (RankConvertibleTo<ExpectedRank, SupportedRanks> && ...)
+/// \ref Supported list (including \ref Expected), `std::nullopt` otherwise.
+template<typename ExpectedRank, typename... SupportedRanks>
+  requires(RankConvertibleTo<ExpectedRank, SupportedRanks> && ...)
 inline constexpr std::optional<Location<ExpectedRank>>
 genericLocationFromString(std::string_view Serialized,
                           const ExpectedRank &Expected,
                           const SupportedRanks &...Supported) {
-  // clang-format on
   Location<ExpectedRank> Result;
   bool ParsedOnce = false;
 
   using TupleType = std::tuple<detail::ConstP<ExpectedRank>,
                                detail::ConstP<SupportedRanks>...>;
   TupleType Tuple{ &Expected, &Supported... };
-  constexprRepeat<std::tuple_size_v<TupleType>>([&, Serialized]<std::size_t I> {
+  constexpr std::size_t TupleSize = std::tuple_size_v<TupleType>;
+  compile_time::repeat<TupleSize>([&, Serialized]<std::size_t I> {
     auto MaybeLoc = locationFromString(*std::get<I>(Tuple), Serialized);
     if (MaybeLoc.has_value()) {
       Result = Location<ExpectedRank>::convert(*MaybeLoc);
@@ -227,17 +239,14 @@ genericLocationFromString(std::string_view Serialized,
     return std::nullopt;
 }
 
-// clang-format off
-
 /// The simplified interface for generic location deserialization allowing for
 /// fetching a single key, indicated by \tparam Idx.
-template <std::size_t Idx, typename ExpectedRank, typename ...SupportedRanks>
-  requires (RankConvertibleTo<ExpectedRank, SupportedRanks> && ...)
+template<std::size_t Idx, typename ExpectedRank, typename... SupportedRanks>
+  requires(RankConvertibleTo<ExpectedRank, SupportedRanks> && ...)
 constexpr std::optional<std::tuple_element_t<Idx, typename ExpectedRank::Tuple>>
 genericLocationFromString(std::string_view Serialized,
                           const ExpectedRank &Expected,
                           const SupportedRanks &...Supported) {
-  // clang-format on
   static_assert(Idx < std::decay_t<ExpectedRank>::Depth);
   auto Result = genericLocationFromString(Serialized, Expected, Supported...);
   if (Result.has_value())

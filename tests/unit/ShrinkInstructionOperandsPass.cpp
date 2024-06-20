@@ -1,5 +1,4 @@
 /// \file ShrinkInstructionOperandsPass.cpp
-/// \brief Tests for ShrinkInstructionOperandsPass
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
@@ -19,6 +18,14 @@ bool init_unit_test();
 #include "revng/UnitTestHelpers/UnitTestHelpers.h"
 
 using namespace llvm;
+
+static unsigned getSize(llvm::Value *V) {
+  llvm::Type *T = V->getType();
+  if (auto *IntTy = llvm::dyn_cast<llvm::IntegerType>(T))
+    return IntTy->getBitWidth();
+
+  return 0;
+}
 
 static Function *run(Module *M, const char *Body) {
   Function *F = M->getFunction("main");

@@ -1,5 +1,4 @@
 /// \file PromoteCSVs.cpp
-/// \brief
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
@@ -33,7 +32,6 @@ struct PromoteCSVsPipe {
     using namespace pipeline;
     using namespace ::revng::kinds;
     return { ContractGroup::transformOnlyArgument(ABIEnforced,
-                                                  Exactness::Exact,
                                                   CSVsPromoted,
                                                   InputPreservation::Erase) };
   }
@@ -84,9 +82,12 @@ private:
   OpaqueFunctionsPool<StringRef> CSVInitializers;
   std::map<WrapperKey, Function *> Wrappers;
   std::set<GlobalVariable *> CSVs;
+  const model::Binary &Binary;
 
 public:
-  PromoteCSVs(Module *M, GeneratedCodeBasicInfo &GCBI);
+  PromoteCSVs(Module *M,
+              GeneratedCodeBasicInfo &GCBI,
+              const model::Binary &Binary);
 
 public:
   void run();
@@ -101,10 +102,12 @@ private:
   void wrapCallsToHelpers(Function *F);
 };
 
-PromoteCSVs::PromoteCSVs(Module *M, GeneratedCodeBasicInfo &GCBI) :
-  M(M), Initializers(M), CSVInitializers(M, false) {
+PromoteCSVs::PromoteCSVs(Module *M,
+                         GeneratedCodeBasicInfo &GCBI,
+                         const model::Binary &Binary) :
+  M(M), Initializers(M), CSVInitializers(M, false), Binary(Binary) {
 
-  CSVInitializers.addFnAttribute(Attribute::ReadOnly);
+  CSVInitializers.setMemoryEffects(MemoryEffects::readOnly());
   CSVInitializers.addFnAttribute(Attribute::NoUnwind);
   CSVInitializers.addFnAttribute(Attribute::WillReturn);
   CSVInitializers.setTags({ &FunctionTags::OpaqueCSVValue });
@@ -117,7 +120,7 @@ PromoteCSVs::PromoteCSVs(Module *M, GeneratedCodeBasicInfo &GCBI) :
       continue;
 
     CSVs.insert(CSV);
-    if (auto *F = M->getFunction((Twine("init_") + CSV->getName()).str()))
+    if (auto *F = M->getFunction((Twine("_init_") + CSV->getName()).str()))
       if (FunctionTags::OpaqueCSVValue.isTagOf(F))
         CSVInitializers.record(CSV->getName(), F);
   }
@@ -128,7 +131,7 @@ Function *PromoteCSVs::createWrapper(const WrapperKey &Key) {
   auto &[Helper, Read, Written] = Key;
 
   LLVMContext &Context = Helper->getParent()->getContext();
-  auto *PointeeTy = Helper->getType()->getPointerElementType();
+  auto *PointeeTy = Helper->getValueType();
   auto *HelperType = cast<FunctionType>(PointeeTy);
 
   //
@@ -143,38 +146,19 @@ Function *PromoteCSVs::createWrapper(const WrapperKey &Key) {
 
   // Add type of read registers
   for (GlobalVariable *CSV : Read)
-    NewArguments.push_back(CSV->getType()->getPointerElementType());
+    NewArguments.push_back(CSV->getValueType());
 
-  //
-  // Create return type
-  //
-
-  // If the helpers does not write any register, reuse the original
-  // return type
-  Type *OriginalReturnType = HelperType->getReturnType();
-  Type *NewReturnType = OriginalReturnType;
-
-  bool HasOutputCSVs = Written.size() != 0;
-  bool OriginalWasVoid = OriginalReturnType->isVoidTy();
-  if (HasOutputCSVs) {
-    SmallVector<Type *, 16> ReturnTypes;
-
-    // If the original return type was not void, put it as first field
-    // in the return type struct
-    if (not OriginalWasVoid) {
-      ReturnTypes.push_back(OriginalReturnType);
-    }
-
-    for (GlobalVariable *CSV : Written)
-      ReturnTypes.push_back(CSV->getType()->getPointerElementType());
-
-    NewReturnType = StructType::create(ReturnTypes);
-  }
+  // Add out arguments for written registers
+  const unsigned FirstOutArgument = NewArguments.size();
+  for (GlobalVariable *CSV : Written)
+    NewArguments.push_back(CSV->getType());
 
   //
   // Create new helper wrapper function
   //
-  auto *NewHelperType = FunctionType::get(NewReturnType, NewArguments, false);
+  auto *NewHelperType = FunctionType::get(HelperType->getReturnType(),
+                                          NewArguments,
+                                          false);
   auto *HelperWrapper = Function::Create(NewHelperType,
                                          Helper->getLinkage(),
                                          Twine(Helper->getName()) + "_wrapper",
@@ -205,7 +189,6 @@ Function *PromoteCSVs::createWrapper(const WrapperKey &Key) {
     Builder.CreateStore(&*It, CSV);
     It++;
   }
-  revng_assert(It == HelperWrapper->arg_end());
 
   // Prepare the arguments
   SmallVector<Value *, 16> HelperArguments;
@@ -218,19 +201,15 @@ Function *PromoteCSVs::createWrapper(const WrapperKey &Key) {
   // Create the function call
   auto *HelperResult = Builder.CreateCall(Helper, HelperArguments);
 
-  // Deserialize and return the appropriate values
-  if (HasOutputCSVs) {
-    SmallVector<Value *, 16> ReturnValues;
+  // Update values of the out arguments
+  unsigned OutArgument = FirstOutArgument;
+  for (GlobalVariable *CSV : Written) {
+    Builder.CreateStore(createLoad(Builder, CSV),
+                        HelperWrapper->getArg(OutArgument));
+    ++OutArgument;
+  }
 
-    if (not OriginalWasVoid)
-      ReturnValues.push_back(HelperResult);
-
-    for (GlobalVariable *CSV : Written)
-      ReturnValues.push_back(Builder.CreateLoad(CSV));
-
-    Initializers.createReturn(Builder, ReturnValues);
-
-  } else if (OriginalWasVoid) {
+  if (HelperResult->getType()->isVoidTy()) {
     Builder.CreateRetVoid();
   } else {
     Builder.CreateRet(HelperResult);
@@ -263,12 +242,14 @@ void PromoteCSVs::wrap(CallInst *Call,
   if (HelperWrapper == nullptr)
     HelperWrapper = createWrapper(Key);
 
-  auto *PointeeTy = Helper->getType()->getPointerElementType();
+  auto *PointeeTy = Helper->getValueType();
   auto *HelperType = cast<FunctionType>(PointeeTy);
 
   //
   // Emit call to the helper wrapper
   //
+  auto EntryIt = Call->getParent()->getParent()->getEntryBlock().begin();
+  IRBuilder<> AllocaBuilder(&*EntryIt);
   IRBuilder<> Builder(Call);
 
   // Initialize the new set of arguments with the old ones
@@ -278,34 +259,24 @@ void PromoteCSVs::wrap(CallInst *Call,
 
   // Add arguments read
   for (GlobalVariable *CSV : Read)
-    NewArguments.push_back(Builder.CreateLoad(CSV));
+    NewArguments.push_back(createLoad(Builder, CSV));
+
+  SmallVector<AllocaInst *, 16> WrittenCSVAllocas;
+  for (GlobalVariable *CSV : Written) {
+    Type *AllocaType = CSV->getValueType();
+    auto *OutArgument = AllocaBuilder.CreateAlloca(AllocaType);
+    WrittenCSVAllocas.push_back(OutArgument);
+    NewArguments.push_back(OutArgument);
+  }
 
   // Emit the actual call
   Instruction *Result = Builder.CreateCall(HelperWrapper, NewArguments);
   Result->setDebugLoc(Call->getDebugLoc());
+  Call->replaceAllUsesWith(Result);
 
-  bool HasOutputCSVs = Written.size() != 0;
-  bool OriginalWasVoid = HelperType->getReturnType()->isVoidTy();
-  if (HasOutputCSVs) {
-
-    unsigned FirstDeserialized = 0;
-    if (not OriginalWasVoid) {
-      FirstDeserialized = 1;
-      // RAUW the new result
-      Value *HelperResult = Builder.CreateExtractValue(Result, { 0 });
-      Call->replaceAllUsesWith(HelperResult);
-    }
-
-    // Restore into CSV the written registers
-    for (unsigned I = 0; I < Written.size(); I++) {
-      unsigned ResultIndex = { FirstDeserialized + I };
-      Builder.CreateStore(Builder.CreateExtractValue(Result, ResultIndex),
-                          Written[I]);
-    }
-
-  } else if (not OriginalWasVoid) {
-    Call->replaceAllUsesWith(Result);
-  }
+  // Restore into CSV the written registers
+  for (const auto &[CSV, Alloca] : zip(Written, WrittenCSVAllocas))
+    Builder.CreateStore(createLoad(Builder, Alloca), CSV);
 
   // Erase the old call
   eraseFromParent(Call);
@@ -322,33 +293,34 @@ void PromoteCSVs::promoteCSVs(Function *F) {
   // Create an alloca for each CSV and replace all uses of CSVs with the
   // corresponding allocas
   BasicBlock &Entry = F->getEntryBlock();
+  QuickMetadata QMD(F->getParent()->getContext());
 
   // Get/create initializers
   std::map<Function *, GlobalVariable *> CSVForInitializer;
   std::map<GlobalVariable *, Function *> InitializerForCSV;
   for (GlobalVariable *CSV : CSVs) {
     // Initialize all allocas with opaque, CSV-specific values
-    Type *CSVType = CSV->getType()->getPointerElementType();
-    auto *Initializer = CSVInitializers.get(CSV->getName(),
-                                            CSVType,
-                                            {},
-                                            Twine("init_") + CSV->getName());
-    CSVForInitializer[Initializer] = CSV;
-    InitializerForCSV[CSV] = Initializer;
+    Type *CSVType = CSV->getValueType();
+    llvm::StringRef CSVName = CSV->getName();
+    using namespace model::Register;
+    Values Register = fromCSVName(CSVName, Binary.Architecture());
+    if (Register != Invalid) {
+      auto *Initializer = CSVInitializers.get(CSVName,
+                                              CSVType,
+                                              {},
+                                              Twine("_init_") + CSVName);
+
+      if (not Initializer->hasMetadata("revng.abi_register")) {
+        Initializer->setMetadata("revng.abi_register",
+                                 QMD.tuple(getName(Register)));
+      }
+
+      CSVForInitializer[Initializer] = CSV;
+      InitializerForCSV[CSV] = Initializer;
+    }
   }
 
   // Collect existing CSV allocas
-  std::map<GlobalVariable *, AllocaInst *> CSVAllocas;
-  for (Instruction &I : Entry) {
-    if (auto *Call = dyn_cast<CallInst>(&I)) {
-      auto It = CSVForInitializer.find(Call->getCalledFunction());
-      if (It != CSVForInitializer.end()) {
-        auto *Initializer = cast<StoreInst>(getUniqueUser(Call));
-        auto *Alloca = cast<AllocaInst>(Initializer->getPointerOperand());
-        CSVAllocas[It->second] = Alloca;
-      }
-    }
-  }
 
   Instruction *NonAlloca = findFirstNonAlloca(&Entry);
   revng_assert(NonAlloca != nullptr);
@@ -359,6 +331,7 @@ void PromoteCSVs::promoteCSVs(Function *F) {
 
   // For each GlobalVariable representing a CSV used in F, create a dedicated
   // alloca and save it in CSVMaps.
+  std::map<GlobalVariable *, AllocaInst *> CSVAllocas;
   for (GlobalVariable *CSV : CSVs) {
     AllocaInst *Alloca = nullptr;
 
@@ -367,22 +340,26 @@ void PromoteCSVs::promoteCSVs(Function *F) {
       Alloca = It->second;
     } else {
       // Create the alloca
-      Type *CSVType = CSV->getType()->getPointerElementType();
+      Type *CSVType = CSV->getValueType();
       Alloca = AllocaBuilder.CreateAlloca(CSVType, nullptr, CSV->getName());
 
       // Check if already have an initializer
-      Function *Initializer = InitializerForCSV.at(CSV);
-      auto *InitializerCall = InitializersBuilder.CreateCall(Initializer);
+      Value *Initializer = nullptr;
+      auto It = InitializerForCSV.find(CSV);
+      if (It != InitializerForCSV.end()) {
+        Function *InitializerFunction = InitializerForCSV.at(CSV);
+        Initializer = InitializersBuilder.CreateCall(InitializerFunction);
+      } else {
+        Initializer = CSV->getInitializer();
+      }
 
       // Initialize the alloca
-      InitializersBuilder.CreateStore(InitializerCall, Alloca);
+      InitializersBuilder.CreateStore(Initializer, Alloca);
     }
 
     // Replace users
     replaceAllUsesInFunctionWith(F, CSV, Alloca);
   }
-
-  FunctionTags::CSVsPromoted.addTo(F);
 
   // Drop separators
   eraseFromParent(Separator);
@@ -451,8 +428,8 @@ struct UsedRegistersMFI : public SetUnionLattice<FunctionNodeData::UsedCSVSet> {
   using Label = FunctionNode *;
   using GraphType = GenericCallGraph *;
 
-  static LatticeElement
-  applyTransferFunction(Label L, const LatticeElement &Value) {
+  static LatticeElement applyTransferFunction(Label L,
+                                              const LatticeElement &Value) {
     return combineValues(L->UsedCSVs, Value);
   }
 };
@@ -467,21 +444,25 @@ CSVsUsageMap PromoteCSVs::getUsedCSVs(ArrayRef<CallInst *> CallsRange) {
 
   // Inspect the calls we need to analyze
   //
-  // There are two type of calls: calls to helpers tagged by CSAA and calls to
-  // regular functions. For the former, we ask GCBI to extract the information
-  // from metadata. For the latter, we use a monotone framework to compute the
-  // set of read/written registers by the callee.  Note that the former is more
-  // accurate thanks to CSAA being call-site sensitive.
+  // There are three types of calls: calls to helpers tagged by CSAA, calls to
+  // isolated functions and other calls that do not touch CPU state. For the
+  // former, we ask GCBI to extract the information from metadata. For the
+  // latter, we use a monotone framework to compute the set of read/written
+  // registers by the callee.  Note that the former is more accurate thanks to
+  // CSAA being call-site sensitive.
   std::queue<Function *> Queue;
   for (CallInst *Call : CallsRange) {
     Function *Callee = getCallee(Call);
-    if (FunctionTags::Helper.isTagOf(Callee)) {
+    if (FunctionTags::Isolated.isTagOf(Callee)) {
+      Queue.push(Callee);
+    } else if (FunctionTags::Helper.isTagOf(Callee)) {
       CSVsUsage &Usage = Result.Calls[Call];
       auto UsedCSVs = getCSVUsedByHelperCall(Call);
       Usage.Read = UsedCSVs.Read;
       Usage.Written = UsedCSVs.Written;
     } else {
-      Queue.push(Callee);
+      // Just create the entry
+      Result.Calls[Call];
     }
   }
 
@@ -521,7 +502,7 @@ CSVsUsageMap PromoteCSVs::getUsedCSVs(ArrayRef<CallInst *> CallsRange) {
             continue;
 
           // Ensure callee is visited
-          if (NodeMap.count(Callee) == 0)
+          if (!NodeMap.contains(Callee))
             Queue.push(Callee);
 
           // Insert an edge in the call graph
@@ -530,7 +511,7 @@ CSVsUsageMap PromoteCSVs::getUsedCSVs(ArrayRef<CallInst *> CallsRange) {
         }
 
         // If there was a memory access targeting a CSV, record it
-        if (CSVs.count(CSV) != 0) {
+        if (CSVs.contains(CSV)) {
           CallerNode->UsedCSVs.insert({ Write, CSV });
         }
       }
@@ -593,17 +574,24 @@ void PromoteCSVs::wrapCallsToHelpers(Function *F) {
 
 void PromoteCSVs::run() {
   for (Function &F : FunctionTags::ABIEnforced.functions(M)) {
-    // Wrap calls to wrappers
-    wrapCallsToHelpers(&F);
+    // Add tag
+    FunctionTags::CSVsPromoted.addTo(&F);
 
-    // (Re-)promote CSVs
-    promoteCSVs(&F);
+    if (not F.isDeclaration()) {
+      // Wrap calls to wrappers
+      wrapCallsToHelpers(&F);
+
+      // (Re-)promote CSVs
+      promoteCSVs(&F);
+    }
   }
 }
 
 bool PromoteCSVsPass::runOnModule(Module &M) {
   auto &GCBI = getAnalysis<GeneratedCodeBasicInfoWrapperPass>().getGCBI();
-  PromoteCSVs HW(&M, GCBI);
+  auto &ModelWrapper = getAnalysis<LoadModelWrapperPass>().get();
+  const model::Binary &Binary = *ModelWrapper.getReadOnlyModel();
+  PromoteCSVs HW(&M, GCBI, Binary);
   HW.run();
   return true;
 }

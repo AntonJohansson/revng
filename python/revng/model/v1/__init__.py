@@ -4,9 +4,8 @@
 # flake8: noqa: F405
 # type: ignore
 
-from revng.tupletree import Reference, init_reference_yaml_classes
+from revng.tupletree import Reference, enum_value_to_index, init_reference_yaml_classes
 
-from .._util import enum_value_to_index
 from ..metaaddress import *
 from . import _generated
 from ._generated import *
@@ -40,7 +39,7 @@ class Binary(_generated.Binary):
             typename = t.Kind.value
         else:
             typename = type(t).__name__
-        return f"/Types/{typename}-{t.ID}"
+        return f"/Types/{t.ID}-{typename}"
 
 
 # Since we subclassed them we need to re-register their constructors and representers

@@ -10,7 +10,7 @@
 #include "llvm/ADT/StringRef.h"
 
 //
-// FOR_EACH macro implemenation
+// FOR_EACH macro implementation
 //
 #define GET_MACRO(_0,   \
                   _1,   \
@@ -164,7 +164,9 @@ using skip_first_tuple = std::tuple<A...>;
     static constexpr std::array<llvm::StringRef, std::tuple_size_v<tuple>> \
       FieldNames = { FOR_EACH(TUPLE_FIELD_NAME, classname, __VA_ARGS__) }; \
                                                                            \
-    enum class Fields { FOR_EACH(ENUM_ENTRY, classname, __VA_ARGS__) };    \
+    enum class Fields {                                                    \
+      FOR_EACH(ENUM_ENTRY, classname, __VA_ARGS__)                         \
+    };                                                                     \
   };
 
 #define GET_IMPLEMENTATIONS(class, index, field) \

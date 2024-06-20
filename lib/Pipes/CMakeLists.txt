@@ -5,13 +5,12 @@
 revng_add_library_internal(
   revngPipes
   SHARED
-  AllFunctions.cpp
-  FileContainer.cpp
-  FunctionStringMap.cpp
+  IRHelpers.cpp
   PipelineManager.cpp
   Pipes.cpp
   RootKind.cpp
-  TaggedFunctionKind.cpp)
+  TaggedFunctionKind.cpp
+  GlobalsAnalyses.cpp)
 
 llvm_map_components_to_libnames(
   LLVM_LIBRARIES
@@ -41,4 +40,4 @@ llvm_map_components_to_libnames(
   X86Info)
 
 target_link_libraries(revngPipes revngPipeline revngModel revngSupport
-                      ${LLVM_LIBRARIES})
+                      revngStorage ${LLVM_LIBRARIES})

@@ -12,7 +12,7 @@
 #include "revng/Pipeline/Context.h"
 #include "revng/Pipeline/Contract.h"
 #include "revng/Pipeline/GenericLLVMPipe.h"
-#include "revng/Pipeline/LLVMGlobalKindBase.h"
+#include "revng/Pipeline/LLVMKind.h"
 #include "revng/Pipeline/Target.h"
 #include "revng/Pipes/FileContainer.h"
 #include "revng/Pipes/Kinds.h"
@@ -25,13 +25,11 @@ public:
 
   std::array<pipeline::ContractGroup, 1> getContract() const {
     pipeline::Contract BinaryPart(kinds::Binary,
-                                  pipeline::Exactness::Exact,
                                   0,
                                   kinds::Translated,
                                   2,
                                   pipeline::InputPreservation::Preserve);
     pipeline::Contract ObjectPart(kinds::Object,
-                                  pipeline::Exactness::Exact,
                                   1,
                                   kinds::Translated,
                                   2,
@@ -39,10 +37,10 @@ public:
     return { pipeline::ContractGroup({ BinaryPart, ObjectPart }) };
   }
 
-  void run(const pipeline::Context &Ctx,
-           FileContainer &InputBinary,
-           FileContainer &ObjectFile,
-           FileContainer &OutputBinary);
+  void run(const pipeline::ExecutionContext &Ctx,
+           BinaryFileContainer &InputBinary,
+           ObjectFileContainer &ObjectFile,
+           TranslatedFileContainer &OutputBinary);
 
   void print(const pipeline::Context &Ctx,
              llvm::raw_ostream &OS,

@@ -9,47 +9,41 @@
 #include "revng/Pipes/Kinds.h"
 #include "revng/Pipes/ModelGlobal.h"
 #include "revng/Yield/Function.h"
-#include "revng/Yield/Pipes/YieldControlFlowPipe.h"
+#include "revng/Yield/Pipes/YieldControlFlow.h"
 #include "revng/Yield/SVG.h"
+
+using ptml::PTMLBuilder;
 
 namespace revng::pipes {
 
-void YieldControlFlow::run(pipeline::Context &Context,
-                           const FunctionStringMap &Input,
-                           FunctionStringMap &Output) {
+void YieldControlFlow::run(pipeline::ExecutionContext &Context,
+                           const FunctionAssemblyStringMap &Input,
+                           FunctionControlFlowStringMap &Output) {
   // Access the model
   const auto &Model = revng::getModelFromContext(Context);
+  ptml::PTMLBuilder ThePTMLBuilder;
 
   for (auto [Address, S] : Input) {
     auto MaybeFunction = TupleTree<yield::Function>::deserialize(S);
     revng_assert(MaybeFunction && MaybeFunction->verify());
-    revng_assert((*MaybeFunction)->Entry == Address);
+    revng_assert((*MaybeFunction)->Entry() == Address);
 
-    Output.insert_or_assign((*MaybeFunction)->Entry,
-                            yield::svg::controlFlow(**MaybeFunction, *Model));
+    Output.insert_or_assign((*MaybeFunction)->Entry(),
+                            yield::svg::controlFlowGraph(ThePTMLBuilder,
+                                                         **MaybeFunction,
+                                                         *Model));
   }
 }
 
 void YieldControlFlow::print(const pipeline::Context &,
                              llvm::raw_ostream &OS,
                              llvm::ArrayRef<std::string> Files) const {
-  OS << *revng::ResourceFinder.findFile("bin/revng") << " magic ^_^\n";
-}
-
-std::array<pipeline::ContractGroup, 1> YieldControlFlow::getContract() const {
-  return { pipeline::ContractGroup(kinds::FunctionAssemblyInternal,
-                                   pipeline::Exactness::Exact,
-                                   0,
-                                   kinds::FunctionControlFlowGraphSVG,
-                                   1,
-                                   pipeline::InputPreservation::Preserve) };
+  OS << "[this is a pure pipe, no command exists for its invocation]\n";
 }
 
 } // end namespace revng::pipes
 
-static revng::pipes::RegisterFunctionStringMap
-  GraphContainer("FunctionControlFlowGraphSVG",
-                 "application/x.yaml.cfg.svg-body",
-                 revng::kinds::FunctionControlFlowGraphSVG);
+using namespace revng::pipes;
+static RegisterFunctionStringMap<FunctionControlFlowStringMap> GraphContainer;
 
 static pipeline::RegisterPipe<revng::pipes::YieldControlFlow> CFGPipe;

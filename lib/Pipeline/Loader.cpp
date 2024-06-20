@@ -1,6 +1,6 @@
 /// \file Loader.cpp
-/// \brief a loader is a object that acceps a serialized pipeline and yields a
-/// runner object that rappresents that pipeline.
+/// A loader is a object that acceps a serialized pipeline and yields a runner
+/// object that rappresents that pipeline.
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
@@ -12,17 +12,22 @@
 #include "llvm/Support/Error.h"
 
 #include "revng/Pipeline/Loader.h"
+#include "revng/Pipeline/Pipe.h"
 #include "revng/Pipeline/Runner.h"
 
 using namespace pipeline;
 using namespace std;
 using namespace llvm;
+using StringsMap = llvm::StringMap<string>;
 
 Error Loader::parseStepDeclaration(Runner &Runner,
                                    const StepDeclaration &Declaration,
                                    std::string &LastAddedStep,
-                                   const vector<string> &ReadOnlyNames) const {
-  auto &JustAdded = Runner.emplaceStep(LastAddedStep, Declaration.Name);
+                                   const StringsMap &ReadOnlyNames,
+                                   const llvm::StringRef Component) const {
+  auto &JustAdded = Runner.emplaceStep(LastAddedStep,
+                                       Declaration.Name,
+                                       Component);
   LastAddedStep = Declaration.Name;
 
   if (Declaration.Artifacts.isValid()) {
@@ -93,21 +98,21 @@ Loader::parseLLVMPass(const PipeInvocation &Invocation) const {
     ToInsert.addPass(std::move(*MaybePass));
   }
 
-  return PipeWrapper::make(move(ToInsert), Invocation.UsedContainers);
+  return PipeWrapper::make(std::move(ToInsert), Invocation.UsedContainers);
 }
 
 llvm::Expected<AnalysisWrapper>
 Loader::parseAnalysis(const AnalysisDeclaration &Declaration) const {
   auto It = KnownAnalysisTypes.find(Declaration.Type);
   if (It == KnownAnalysisTypes.end()) {
-    auto *Message = "while parsing analysis : No known Anaylis with "
-                    "name %s\n ";
+    auto *Message = "while parsing analyses : No known Analysis with "
+                    "name '%s'\n ";
     return createStringError(inconvertibleErrorCode(),
                              Message,
                              Declaration.Type.c_str());
   }
   auto &Entry = It->second;
-  auto ToReturn = Entry(Declaration.UsedContainers);
+  auto ToReturn = AnalysisWrapper(Entry, Declaration.UsedContainers);
   ToReturn->setUserBoundName(Declaration.Name);
   return ToReturn;
 }
@@ -115,9 +120,15 @@ Loader::parseAnalysis(const AnalysisDeclaration &Declaration) const {
 llvm::Expected<PipeWrapper>
 Loader::parseInvocation(Step &Step,
                         const PipeInvocation &Invocation,
-                        const std::vector<std::string> &ReadOnlyNames) const {
+                        const StringsMap &ReadOnlyNames) const {
   if (Invocation.Type == "LLVMPipe")
     return parseLLVMPass(Invocation);
+
+  if (not Invocation.Passes.empty())
+    return createStringError(inconvertibleErrorCode(),
+                             "while parsing pipe %s: Passes declarations are "
+                             "not allowed in non-llvm pipes\n",
+                             Invocation.Type.c_str());
 
   auto It = KnownPipesTypes.find(Invocation.Type);
   if (It == KnownPipesTypes.end()) {
@@ -127,33 +138,41 @@ Loader::parseInvocation(Step &Step,
                              Message,
                              Invocation.Type.c_str());
   }
-  auto &Entry = It->second;
-  for (const auto &ContainerName : Invocation.UsedContainers) {
+  auto &Pipe = It->second;
+  for (const auto &ContainerNameAndIndex :
+       llvm::enumerate(Invocation.UsedContainers)) {
 
-    if (llvm::find(ReadOnlyNames, ContainerName) == ReadOnlyNames.end())
+    const auto &ContainerName = ContainerNameAndIndex.value();
+    size_t Index = ContainerNameAndIndex.index();
+    if (ReadOnlyNames.find(ContainerName) == ReadOnlyNames.end())
+      continue;
+
+    const auto &RoleName = ReadOnlyNames.find(ContainerName)->second;
+    if (Pipe.Pipe->isContainerArgumentConst(Index))
       continue;
 
     if (PipelineContext->hasRegisteredReadOnlyContainer(ContainerName)) {
       return createStringError(inconvertibleErrorCode(),
-                               "Detected two uses of read only container %s\n",
+                               "Detected two non const uses of read only "
+                               "container %s\n",
                                ContainerName.c_str());
     }
 
+    revng_assert(Step.containers().containsOrCanCreate(ContainerName));
     const auto &Container = *Step.containers().find(ContainerName);
-    PipelineContext->addReadOnlyContainer(ContainerName, Container);
+    PipelineContext->addReadOnlyContainer(RoleName, Container);
   }
 
-  return Entry(Invocation.UsedContainers);
+  return PipeWrapper(Pipe, Invocation.UsedContainers);
 }
 
 using BCDecl = ContainerDeclaration;
 Error Loader::parseContainerDeclaration(Runner &Pipeline,
                                         const BCDecl &Dec,
-                                        vector<string> &ReadOnlyNames) const {
+                                        StringsMap &ReadOnlyNames) const {
   if (not Dec.Role.empty() and KnownContainerRoles.count(Dec.Role) == 0) {
     auto *Message = "while parsing container declaration with Name %s has a "
-                    "unkown "
-                    "role %s.\n";
+                    "unknown role %s.\n";
     return createStringError(inconvertibleErrorCode(),
                              Message,
                              Dec.Name.c_str(),
@@ -182,7 +201,7 @@ Error Loader::parseContainerDeclaration(Runner &Pipeline,
   auto &Entry = It->second;
   Pipeline.addContainerFactory(Dec.Name, Entry);
   if (not Dec.Role.empty())
-    ReadOnlyNames.push_back(Dec.Name);
+    ReadOnlyNames[Dec.Name] = Dec.Role;
 
   return Error::success();
 }
@@ -202,10 +221,10 @@ Loader::load(llvm::ArrayRef<std::string> Pipelines) const {
   return load(Declarations);
 }
 
-llvm::Error
-Loader::parseSteps(Runner &Runner,
-                   const BranchDeclaration &Declaration,
-                   const std::vector<std::string> &ReadOnlyNames) const {
+llvm::Error Loader::parseSteps(Runner &Runner,
+                               const BranchDeclaration &Declaration,
+                               const StringsMap &ReadOnlyNames,
+                               const llvm::StringRef Component) const {
 
   std::string LastAddedStep = Declaration.From.empty() ? "begin" :
                                                          Declaration.From;
@@ -216,17 +235,17 @@ Loader::parseSteps(Runner &Runner,
     if (auto Error = parseStepDeclaration(Runner,
                                           Step,
                                           LastAddedStep,
-                                          ReadOnlyNames);
+                                          ReadOnlyNames,
+                                          Component);
         !!Error)
       return Error;
   }
   return llvm::Error::success();
 }
 
-llvm::Error
-Loader::parseDeclarations(Runner &Runner,
-                          const PipelineDeclaration &Declaration,
-                          std::vector<std::string> &ReadOnlyNames) const {
+llvm::Error Loader::parseDeclarations(Runner &Runner,
+                                      const PipelineDeclaration &Declaration,
+                                      StringsMap &ReadOnlyNames) const {
 
   for (const auto &Container : Declaration.Containers)
     if (auto Error = parseContainerDeclaration(Runner,
@@ -279,24 +298,34 @@ Loader::load(llvm::ArrayRef<PipelineDeclaration> Pipelines) const {
   Runner ToReturn(*PipelineContext);
 
   llvm::SmallVector<const BranchDeclaration *, 2> ToSort;
-  for (const auto &Pipeline : Pipelines)
-    for (const auto &Declartion : Pipeline.Branches)
-      ToSort.push_back(&Declartion);
+  std::map<const BranchDeclaration *, llvm::StringRef> BranchToComponent;
+  for (const auto &Pipeline : Pipelines) {
+    for (const auto &Declaration : Pipeline.Branches) {
+      ToSort.push_back(&Declaration);
+      BranchToComponent[&Declaration] = Pipeline.Component;
+    }
+  }
 
   if (auto Error = sortPipeline(ToSort); Error)
     return std::move(Error);
 
-  std::vector<std::string> ReadOnlyNames;
+  llvm::StringMap<std::string> ReadOnlyNames;
   for (const auto &Declaration : Pipelines)
     if (auto Error = parseDeclarations(ToReturn, Declaration, ReadOnlyNames);
         Error)
       return std::move(Error);
 
-  ToReturn.emplaceStep("", "begin");
+  ToReturn.emplaceStep("", "begin", "");
 
-  for (const auto *Declaration : ToSort)
-    if (auto Error = parseSteps(ToReturn, *Declaration, ReadOnlyNames); Error)
+  for (const auto *Declaration : ToSort) {
+    llvm::StringRef Component = BranchToComponent[Declaration];
+    if (auto Error = parseSteps(ToReturn,
+                                *Declaration,
+                                ReadOnlyNames,
+                                Component);
+        Error)
       return std::move(Error);
+  }
 
   for (const auto &Declaration : Pipelines)
     for (const auto &Analysis : Declaration.Analyses) {
@@ -305,6 +334,28 @@ Loader::load(llvm::ArrayRef<PipelineDeclaration> Pipelines) const {
         return MaybeAnalysis.takeError();
       ToReturn.getStep(Analysis.Step)
         .addAnalysis(Analysis.Name, std::move(*MaybeAnalysis));
+    }
+
+  for (const auto &Declaration : Pipelines)
+    for (const auto &List : Declaration.AnalysesLists) {
+      llvm::SmallVector<AnalysisReference, 2> Analyses;
+      for (auto &AnalysisName : List.UsedAnalysesNames) {
+        if (not ToReturn.containsAnalysis(AnalysisName)) {
+          return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                         "No known analysis " + AnalysisName
+                                           + " used in analysis list "
+                                           + List.Name);
+        }
+
+        for (const auto &Step : ToReturn) {
+          if (Step.hasAnalysis(AnalysisName)) {
+            Analyses.emplace_back(Step.getName().str(), AnalysisName);
+            break;
+          }
+        }
+      }
+
+      ToReturn.addAnalysesList(List.Name, Analyses);
     }
 
   return ToReturn;
@@ -322,10 +373,10 @@ bool Loader::isInvocationUsed(const vector<string> &Invocation) const {
 
   const auto IsStringEnabled = [this](const std::string &Name) {
     if (not Name.starts_with("~"))
-      return EnabledFlags.count(Name) != 0;
+      return EnabledFlags.contains(Name);
 
     string ActualName(Name.begin() + 1, Name.end());
-    return EnabledFlags.count(ActualName) == 0;
+    return !EnabledFlags.contains(ActualName);
   };
   return llvm::any_of(Invocation, IsStringEnabled);
 }

@@ -1,0 +1,25 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+Types:
+  - Kind: PrimitiveType
+    ID: 1025
+    PrimitiveKind: Number
+    Size: 1
+  - Kind: CABIFunctionType
+    ID: 13950133128659256343
+    OriginalName: fn
+    ABI: SystemV_x86_64
+    ReturnType:
+      UnqualifiedType: "/Types/11568236181854152965-TypedefType"
+    Arguments:
+      - Index: 0
+        Type:
+          UnqualifiedType: "/Types/11568236181854152965-TypedefType"
+        OriginalName: x
+  - Kind: TypedefType
+    ID: 11568236181854152965
+    OriginalName: uint32_t
+    UnderlyingType:
+      UnqualifiedType: "/Types/1025-PrimitiveType"

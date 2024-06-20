@@ -1,5 +1,5 @@
 /// \file LinkSupport.cpp
-/// \brief Link support adds the helper functions to a lifeted module
+/// Link support adds the helper functions to a lifeted module
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
@@ -53,6 +53,8 @@ static llvm::StringRef getSupportName(model::Architecture::Values V) {
     return "mipsel";
   case systemz:
     return "s390x";
+  case hexagon:
+    return "hexagon";
   }
   revng_abort();
   return "Invalid";
@@ -62,7 +64,7 @@ static std::string getSupportPath(const Context &Ctx) {
   const auto &Model = getModelFromContext(Ctx);
   const char *SupportConfig = Tracing ? "trace" : "normal";
 
-  auto ArchName = getSupportName(Model->Architecture).str();
+  auto ArchName = getSupportName(Model->Architecture()).str();
   std::string SupportSearchPath = ("/share/revng/support-" + ArchName + "-"
                                    + SupportConfig + ".ll");
 
@@ -81,12 +83,12 @@ void LinkSupport::print(const pipeline::Context &Ctx,
      << Names[0] << "\n";
 }
 
-void revng::pipes::LinkSupport::run(const Context &Ctx,
+void revng::pipes::LinkSupport::run(const ExecutionContext &Ctx,
                                     LLVMContainer &TargetsList) {
   if (TargetsList.enumerate().empty())
     return;
 
-  std::string SupportPath = getSupportPath(Ctx);
+  std::string SupportPath = getSupportPath(Ctx.getContext());
 
   llvm::SMDiagnostic Err;
   auto Module = llvm::parseIRFile(SupportPath,

@@ -1,6 +1,6 @@
 /// \file LinkForTranslation.cpp
-/// \brief the link for translation pipe is used to link object files into a
-/// executable
+/// The link for translation pipe is used to link object files into a
+/// executable.
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
@@ -17,10 +17,10 @@ using namespace llvm::sys;
 using namespace pipeline;
 using namespace ::revng::pipes;
 
-void LinkForTranslation::run(const Context &Ctx,
-                             FileContainer &InputBinary,
-                             FileContainer &ObjectFile,
-                             FileContainer &OutputBinary) {
+void LinkForTranslation::run(const ExecutionContext &Ctx,
+                             BinaryFileContainer &InputBinary,
+                             ObjectFileContainer &ObjectFile,
+                             TranslatedFileContainer &OutputBinary) {
   if (not InputBinary.exists() or not ObjectFile.exists())
     return;
 
@@ -34,6 +34,10 @@ void LinkForTranslation::run(const Context &Ctx,
 void LinkForTranslation::print(const Context &Ctx,
                                llvm::raw_ostream &OS,
                                llvm::ArrayRef<std::string> Names) const {
+  // TODO: we should switch to invoke this *right before* the pipe is invoked
+  //       and use printLinkForTranslationCommands. We can't do this as of now,
+  //       since that function needs to read the input binary in order to
+  //       compose the list of commands to invoke.
   OS << *revng::ResourceFinder.findFile("bin/revng");
   OS << " link-for-translation " << Names[0] << " model.yml " << Names[1]
      << " -o=" << Names[2] << "\n";

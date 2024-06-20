@@ -1,5 +1,4 @@
 /// \file MachO.cpp
-/// \brief
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
@@ -10,11 +9,13 @@
 
 #include "revng/Model/Binary.h"
 #include "revng/Model/IRHelpers.h"
+#include "revng/Model/Importer/Binary/BinaryImporterHelper.h"
+#include "revng/Model/Importer/Binary/Options.h"
+#include "revng/Model/Pass/PromoteOriginalName.h"
 #include "revng/Model/RawBinaryView.h"
 #include "revng/Support/Debug.h"
 #include "revng/Support/OverflowSafeInt.h"
 
-#include "BinaryImporterHelper.h"
 #include "Importers.h"
 
 using namespace llvm::MachO;
@@ -76,7 +77,7 @@ getInitialPC(Architecture::Values Arch, bool Swap, ArrayRef<uint8_t> Command) {
   ArrayRefReader<uint8_t> Reader(Command, Swap);
   uint32_t Flavor = Reader.read<uint32_t>();
   uint32_t Count = Reader.read<uint32_t>();
-  Optional<uint64_t> PC;
+  std::optional<uint64_t> PC;
 
   switch (Arch) {
   case Architecture::x86: {
@@ -168,7 +169,9 @@ private:
 
 public:
   MachOImporter(TupleTree<model::Binary> &Model,
-                object::MachOObjectFile &TheBinary) :
+                object::MachOObjectFile &TheBinary,
+                uint64_t BaseAddress) :
+    BinaryImporterHelper(Model->Architecture(), BaseAddress),
     File(*Model, toArrayRef(TheBinary.getData())),
     Model(Model),
     TheBinary(TheBinary) {}
@@ -186,15 +189,15 @@ Error MachOImporter::import() {
 
   auto &MachO = cast<object::MachOObjectFile>(TheBinary);
 
-  revng_assert(Model->Architecture != Architecture::Invalid);
-  bool IsLittleEndian = Architecture::isLittleEndian(Model->Architecture);
+  revng_assert(Model->Architecture() != Architecture::Invalid);
+  bool IsLittleEndian = Architecture::isLittleEndian(Model->Architecture());
   StringRef StringDataRef = TheBinary.getData();
   auto RawDataRef = ArrayRef<uint8_t>(StringDataRef.bytes_begin(),
                                       StringDataRef.size());
   bool MustSwap = IsLittleEndian != sys::IsLittleEndianHost;
 
   bool EntryPointFound = false;
-  Optional<uint64_t> EntryPointOffset;
+  std::optional<uint64_t> EntryPointOffset;
   for (const LoadCommandInfo &LCI : MachO.load_commands()) {
     switch (LCI.C.cmd) {
 
@@ -218,9 +221,9 @@ Error MachOImporter::import() {
                                       LCI.C.cmdsize - sizeof(thread_command));
 
       if (contains(RawDataRef, CommandBuffer)) {
-        Model->EntryPoint = getInitialPC(Model->Architecture,
-                                         MustSwap,
-                                         CommandBuffer);
+        Model->EntryPoint() = getInitialPC(Model->Architecture(),
+                                           MustSwap,
+                                           CommandBuffer);
       } else {
         revng_log(Log, "LC_UNIXTHREAD Ptr is out of bounds. Ignoring.");
       }
@@ -249,9 +252,9 @@ Error MachOImporter::import() {
 
   if (EntryPointOffset) {
     using namespace model::Architecture;
-    auto LLVMArchitecture = toLLVMArchitecture(Model->Architecture);
-    Model->EntryPoint = File.offsetToAddress(*EntryPointOffset)
-                          .toPC(LLVMArchitecture);
+    auto LLVMArchitecture = toLLVMArchitecture(Model->Architecture());
+    Model->EntryPoint() = File.offsetToAddress(*EntryPointOffset)
+                            .toPC(LLVMArchitecture);
   }
 
   Error TheError = Error::success();
@@ -272,6 +275,7 @@ Error MachOImporter::import() {
   if (TheError)
     revng_log(Log, "Error while decoding weakBindTable: " << TheError);
 
+  promoteOriginalName(Model);
   return Error::success();
 }
 
@@ -281,7 +285,7 @@ void MachOImporter::parseMachOSegment(ArrayRef<uint8_t> RawDataRef,
   MetaAddress Start = fromGeneric(SegmentCommand.vmaddr);
   Segment Segment({ Start, SegmentCommand.vmsize });
 
-  Segment.StartOffset = SegmentCommand.fileoff;
+  Segment.StartOffset() = SegmentCommand.fileoff;
   auto MaybeEndOffset = OverflowSafeInt<uint64_t>(SegmentCommand.fileoff)
                         + SegmentCommand.filesize;
   if (not MaybeEndOffset) {
@@ -290,19 +294,20 @@ void MachOImporter::parseMachOSegment(ArrayRef<uint8_t> RawDataRef,
     return;
   }
 
-  Segment.OriginalName = SegmentCommand.segname;
-  Segment.FileSize = SegmentCommand.filesize;
+  Segment.OriginalName() = SegmentCommand.segname;
+  Segment.FileSize() = SegmentCommand.filesize;
 
-  Segment.IsReadable = SegmentCommand.initprot & VM_PROT_READ;
-  Segment.IsWriteable = SegmentCommand.initprot & VM_PROT_WRITE;
-  Segment.IsExecutable = SegmentCommand.initprot & VM_PROT_EXECUTE;
+  Segment.IsReadable() = SegmentCommand.initprot & VM_PROT_READ;
+  Segment.IsWriteable() = SegmentCommand.initprot & VM_PROT_WRITE;
+  Segment.IsExecutable() = SegmentCommand.initprot & VM_PROT_EXECUTE;
 
-  model::TypePath StructPath = createEmptyStruct(*Model, Segment.VirtualSize);
-  Segment.Type = model::QualifiedType(std::move(StructPath), {});
+  // TODO: replace the following with `populateSegmentTypeStruct`, when
+  // LC_SYMTAB and LC_DYSYMTAB parsing is available
+  Segment.Type() = createEmptyStruct(*Model, Segment.VirtualSize());
 
   Segment.verify(true);
 
-  Model->Segments.insert(std::move(Segment));
+  Model->Segments().insert(std::move(Segment));
 
   // TODO: parse sections contained in segments LC_SEGMENT and LC_SEGMENT_64
 }
@@ -311,7 +316,8 @@ void MachOImporter::registerBindEntry(const object::MachOBindEntry *Entry) {
   MetaAddress Target = fromGeneric(Entry->address());
   uint64_t Addend = static_cast<uint64_t>(Entry->addend());
   RelocationType::Values Type = RelocationType::Invalid;
-  auto PointerSize = Architecture::getPointerSize(Model->Architecture);
+  (void) Type;
+  auto PointerSize = Architecture::getPointerSize(Model->Architecture());
 
   switch (Entry->type()) {
   case BIND_TYPE_POINTER:
@@ -345,10 +351,7 @@ void MachOImporter::registerBindEntry(const object::MachOBindEntry *Entry) {
 
 Error importMachO(TupleTree<model::Binary> &Model,
                   object::MachOObjectFile &TheBinary,
-                  uint64_t PreferredBaseAddress) {
-  // TODO: use PreferredBaseAddress if PIC
-  (void) PreferredBaseAddress;
-
-  MachOImporter Importer(Model, TheBinary);
+                  const ImporterOptions &Options) {
+  MachOImporter Importer(Model, TheBinary, Options.BaseAddress);
   return Importer.import();
 }

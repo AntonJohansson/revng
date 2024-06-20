@@ -14,12 +14,15 @@ name: DynamicFunction
 doc: Function defined in a dynamic library
 type: struct
 fields:
-  - name: OriginalName
-    doc: The name of the symbol for this dynamic function
-    type: string
   - name: CustomName
     doc: An optional custom name
     type: Identifier
+    optional: true
+  - name: OriginalName
+    doc: The name of the symbol for this dynamic function
+    type: string
+  - name: Comment
+    type: string
     optional: true
   - name: Prototype
     doc: The prototype of the function
@@ -52,7 +55,7 @@ public:
 public:
   Identifier name() const;
 
-  const model::TypePath &prototype(const model::Binary &Root) const;
+  model::TypePath prototype(const model::Binary &Root) const;
 
 public:
   bool verify() const debug_function;

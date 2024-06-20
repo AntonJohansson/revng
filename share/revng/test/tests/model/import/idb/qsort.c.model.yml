@@ -1,0 +1,67 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+ImportedDynamicFunctions:
+  - OriginalName: qsort
+    Prototype: "/Types/3821538295510931842-CABIFunctionType"
+Types:
+  - Kind: CABIFunctionType
+    ID: 3821538295510931842
+    OriginalName: qsort
+    ABI: SystemV_x86_64
+    ReturnType:
+      UnqualifiedType: "/Types/256-PrimitiveType"
+    Arguments:
+      - Index: 0
+        Type:
+          UnqualifiedType: "/Types/256-PrimitiveType"
+          Qualifiers:
+            - Kind: Pointer
+              Size: 8
+        OriginalName: base
+      - Index: 1
+        Type:
+          UnqualifiedType: "/Types/855760813070670525-TypedefType"
+        OriginalName: nmemb
+      - Index: 2
+        Type:
+          UnqualifiedType: "/Types/855760813070670525-TypedefType"
+        OriginalName: size
+      - Index: 3
+        Type:
+          UnqualifiedType: "/Types/7339777181910699325-TypedefType"
+        OriginalName: compar
+  - Kind: TypedefType
+    ID: 855760813070670525
+    OriginalName: size_t
+    UnderlyingType:
+      UnqualifiedType: "/Types/1288-PrimitiveType"
+  - Kind: TypedefType
+    ID: 7339777181910699325
+    OriginalName: __compar_fn_t
+    UnderlyingType:
+      UnqualifiedType: "/Types/5090678720539169893-CABIFunctionType"
+      Qualifiers:
+        - Kind: Pointer
+          Size: 8
+  - Kind: CABIFunctionType
+    ID: 5090678720539169893
+    ABI: SystemV_x86_64
+    ReturnType:
+      UnqualifiedType: "/Types/1028-PrimitiveType"
+    Arguments:
+      - Index: 0
+        Type:
+          UnqualifiedType: "/Types/256-PrimitiveType"
+          Qualifiers:
+            - Kind: Pointer
+              Size: 8
+            - Kind: Const
+      - Index: 1
+        Type:
+          UnqualifiedType: "/Types/256-PrimitiveType"
+          Qualifiers:
+            - Kind: Pointer
+              Size: 8
+            - Kind: Const

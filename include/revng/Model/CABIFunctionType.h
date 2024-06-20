@@ -26,6 +26,9 @@ fields:
     type: ABI
   - name: ReturnType
     type: QualifiedType
+  - name: ReturnValueComment
+    type: string
+    optional: true
   - name: Arguments
     sequence:
       type: SortedVector
@@ -46,9 +49,9 @@ public:
   const llvm::SmallVector<model::QualifiedType, 4> edges() const {
     llvm::SmallVector<model::QualifiedType, 4> Result;
 
-    for (const model::Argument &Argument : Arguments)
-      Result.push_back(Argument.Type);
-    Result.push_back(ReturnType);
+    for (const model::Argument &Argument : Arguments())
+      Result.push_back(Argument.Type());
+    Result.push_back(ReturnType());
 
     return Result;
   }
@@ -56,7 +59,7 @@ public:
 public:
   Identifier name() const;
   static bool classof(const Type *T) { return classof(T->key()); }
-  static bool classof(const Key &K) { return std::get<0>(K) == AssociatedKind; }
+  static bool classof(const Key &K) { return std::get<1>(K) == AssociatedKind; }
 };
 
 #include "revng/Model/Generated/Late/CABIFunctionType.h"

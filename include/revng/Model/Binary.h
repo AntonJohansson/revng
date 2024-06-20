@@ -6,6 +6,7 @@
 
 #include "llvm/ADT/SmallString.h"
 
+#include "revng/ADT/Concepts.h"
 #include "revng/ADT/MutableSet.h"
 #include "revng/ADT/SortedVector.h"
 #include "revng/ADT/UpcastablePointer.h"
@@ -91,10 +92,6 @@ TUPLE-TREE-YAML */
 // TODO: Prevent changing the keys. Currently we need them to be public and
 //       non-const for serialization purposes.
 
-namespace model {
-using TypePath = TupleTreeReference<model::Type, model::Binary>;
-}
-
 class model::Binary : public model::generated::Binary {
 public:
   using generated::Binary::Binary;
@@ -116,41 +113,98 @@ public:
     return getTypePath(T->key());
   }
 
+  /// Return the first available (non-primitive) type ID available
+  uint64_t getAvailableTypeID() const;
+
+  /// Record the new type into the model and assign an ID (unless it's a
+  /// PrimitiveType)
   model::TypePath recordNewType(UpcastablePointer<Type> &&T);
 
-  model::TypePath
-  getPrimitiveType(PrimitiveTypeKind::Values V, uint8_t ByteSize);
+  /// Uses `SortedVector::batch_insert()` to emplace all the elements from
+  /// \ref NewTypes range into the `Types()` set.
+  ///
+  /// This inserts all the elements at the end of the underlying vector, and
+  /// then triggers sorting, instead of conventional searching for the position
+  /// of each element on its insertion.
+  ///
+  /// \note Unlike recordNewTypes, this method does not assign type IDs.
+  ///
+  /// \note It takes advantage of `std::move_iterator` to ensure all
+  ///       the elements are accessed strictly as r-values, so the original
+  ///       container, \ref NewTypes range points to, is left in an unspecified
+  ///       state after the invocation, as all of its elements are moved out of.
+  ///
+  /// \note Since it uses strict version of `batch-insert`'er, it will assert
+  ///       if this causes multiple elements with the same key (\ref Type::Key)
+  ///       to be present in the vector after the new elements are moved in.
+  ///
+  /// \tparam Range constrained input range type.
+  /// \param  NewTypes the input range.
+  template<range_with_value_type<UpcastablePointer<Type>> Range>
+  void recordNewTypes(Range &&NewTypes) {
+    auto Inserter = Types().batch_insert();
 
-  model::TypePath
-  getPrimitiveType(PrimitiveTypeKind::Values V, uint8_t ByteSize) const;
-
-  model::QualifiedType getPointerTo(const model::QualifiedType &Type) const {
-    QualifiedType Result = Type;
-    Result.Qualifiers.insert(Result.Qualifiers.begin(),
-                             model::Qualifier::createPointer(Architecture));
-    return Result;
+    static_assert(std::is_rvalue_reference_v<decltype(NewTypes)>);
+    auto Movable = as_rvalue(std::move(NewTypes));
+    for (UpcastablePointer<Type> &&NewType : Movable) {
+      static_assert(std::is_rvalue_reference_v<decltype(NewType)>);
+      revng_assert(NewType->ID() != 0);
+      Inserter.emplace(std::move(NewType));
+    }
   }
+
+  template<derived_from<model::Type> NewType, typename... ArgumentTypes>
+  [[nodiscard]] std::pair<NewType &, model::TypePath>
+  makeType(ArgumentTypes &&...Arguments) {
+    using UT = model::UpcastableType;
+    UT Result = UT::make<NewType>(std::forward<ArgumentTypes>(Arguments)...);
+    model::TypePath ResultPath = recordNewType(std::move(Result));
+    return { *llvm::cast<NewType>(ResultPath.get()), ResultPath };
+  }
+
+  model::TypePath getPrimitiveType(PrimitiveTypeKind::Values V,
+                                   uint8_t ByteSize);
+
+  model::TypePath getPrimitiveType(PrimitiveTypeKind::Values V,
+                                   uint8_t ByteSize) const;
 
   bool verifyTypes() const debug_function;
   bool verifyTypes(bool Assert) const debug_function;
   bool verifyTypes(VerifyHelper &VH) const;
 
 public:
-  bool verify() const debug_function;
+  std::string path(const model::Function &F) const {
+    return "/Functions/" + key(F);
+  }
+
+  std::string path(const model::DynamicFunction &F) const {
+    return "/ImportedDynamicFunctions/" + key(F);
+  }
+
+  std::string path(const model::Type &T) const { return "/Types/" + key(T); }
+
+  std::string path(const model::EnumType &T,
+                   const model::EnumEntry &Entry) const {
+    return path(static_cast<const model::Type &>(T)) + "/Entries/" + key(Entry);
+  }
+
+  std::string path(const model::Segment &Segment) const {
+    return "/Segments/" + key(Segment);
+  }
+
+public:
   bool verify(bool Assert) const debug_function;
   bool verify(VerifyHelper &VH) const;
-  void verify(ErrorList &EL) const;
+  bool verify() const;
   void dump() const debug_function;
+  void dumpTypeGraph(const char *Path) const debug_function;
   std::string toString() const debug_function;
-};
 
-inline model::TypePath
-getPrototype(const model::Binary &Binary,
-             const model::DynamicFunction &DynamicFunction) {
-  if (DynamicFunction.Prototype.isValid())
-    return DynamicFunction.Prototype;
-  else
-    return Binary.DefaultPrototype;
-}
+private:
+  template<typename T>
+  static std::string key(const T &Object) {
+    return getNameFromYAMLScalar(KeyedObjectTraits<T>::key(Object));
+  }
+};
 
 #include "revng/Model/Generated/Late/Binary.h"

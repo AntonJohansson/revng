@@ -1,5 +1,5 @@
 /// \file KeyedObjectsContainers.cpp
-/// \brief Tests for MutableSet and SortedVector
+/// Tests for MutableSet and SortedVector.
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
@@ -11,6 +11,7 @@ bool init_unit_test();
 
 #include "revng/ADT/MutableSet.h"
 #include "revng/ADT/SortedVector.h"
+#include "revng/ADT/TrackingContainer.h"
 #include "revng/Support/Assert.h"
 
 #include "TestKeyedObject.h"
@@ -71,14 +72,14 @@ void testSet() {
 
   // Test erase
   {
-    revng_check(Set.find(0x1500) == Set.end());
+    revng_check(!Set.contains(0x1500));
 
     auto [It, Success] = Set.insert({ 0x1500, 0xEEEE });
     revng_check(Success);
     auto Next = Set.erase(It);
     revng_check(Next == Set.find(0x2000));
 
-    revng_check(Set.find(0x1500) == Set.end());
+    revng_check(!Set.contains(0x1500));
 
     IterationResultType IterationResult;
     for (const Element &SE : Set)
@@ -116,7 +117,7 @@ void testSet() {
   // Test operator[] on new element
   revng_check(Set[0x2500].key() == 0x2500);
   revng_check(Set.size() == 4);
-  revng_check(Set.find(0x2500) != Set.end());
+  revng_check(Set.contains(0x2500));
   revng_check(Set[0x2500].value() == 0);
 
   // Test elements are mutable
@@ -126,7 +127,7 @@ void testSet() {
   // Test batch_insert
   {
     auto Inserter = Set.batch_insert();
-    Inserter.insert({ 0x1000, 0x2222 });
+    Inserter.insert({ 0x1100, 0x2222 });
     Inserter.insert({ 0x900, 0x1111 });
   }
   revng_check(Set[0x1000].value() == 0xDEADDEAD);
@@ -136,10 +137,11 @@ void testSet() {
   {
     auto Inserter = Set.batch_insert_or_assign();
     Inserter.insert_or_assign({ 0x1000, 0x2222 });
-    Inserter.insert_or_assign({ 0x900, 0x1111 });
+    Inserter.insert_or_assign({ 0x900, 0x3333 });
   }
   revng_check(Set[0x1000].value() == 0x2222);
-  revng_check(Set[0x900].value() == 0x1111);
+  revng_check(Set[0x1100].value() == 0x2222);
+  revng_check(Set[0x900].value() == 0x3333);
 
   // Test clear
   Set.clear();
@@ -201,3 +203,134 @@ BOOST_AUTO_TEST_CASE(TestUniqueLast) {
   Vector Expected = { { 1, 3 }, { 2, 3 } };
   revng_check(TheVector == Expected);
 }
+
+template<template<typename...> class T>
+static void testAt() {
+  revng::TrackingContainer<T<int>> Vector;
+  int One(1);
+  Vector.insert(One);
+  Vector.clearTracking();
+  const auto &Reference = Vector;
+  Reference.at(One);
+
+  auto TrackingResult = Reference.getTrackingResult();
+  revng_check(TrackingResult.InspectedKeys.size() == 1);
+  revng_check(TrackingResult.InspectedKeys.contains(1));
+}
+
+BOOST_AUTO_TEST_CASE(TrackingContainerVectorAt) {
+  testAt<SortedVector>();
+  testAt<MutableSet>();
+}
+
+template<template<typename...> class T>
+static void testVectorCount() {
+  revng::TrackingContainer<T<int>> Vector;
+  Vector.insert(1);
+  Vector.clearTracking();
+  const auto &Reference = Vector;
+  Reference.count(2);
+
+  auto TrackingResult = Reference.getTrackingResult();
+  revng_check(TrackingResult.InspectedKeys.size() == 1);
+  revng_check(not TrackingResult.Exact);
+  revng_check(TrackingResult.InspectedKeys.contains(2));
+}
+
+BOOST_AUTO_TEST_CASE(TrackingContainerVectorCount) {
+  testVectorCount<SortedVector>();
+  testVectorCount<MutableSet>();
+}
+
+template<template<typename...> class T>
+static void testTryGet() {
+  revng::TrackingContainer<T<int>> Vector;
+  Vector.insert(1);
+  Vector.clearTracking();
+  const auto &Reference = Vector;
+  const int *Result = nullptr;
+  Result = Reference.tryGet(2);
+  revng_check(Result == nullptr);
+  Result = Reference.tryGet(1);
+  revng_check(Result != nullptr && *Result == 1);
+
+  auto TrackingResult = Reference.getTrackingResult();
+  revng_check(TrackingResult.InspectedKeys == std::set<int>({ 1, 2 }));
+  revng_check(not TrackingResult.Exact);
+}
+
+BOOST_AUTO_TEST_CASE(TrackingContainerVectorTryGet) {
+  testTryGet<SortedVector>();
+  testTryGet<MutableSet>();
+}
+
+template<template<typename...> class T>
+static void testBeginEnd() {
+  revng::TrackingContainer<SortedVector<int>> Vector;
+  Vector.insert(1);
+  Vector.clearTracking();
+  const auto &Reference = Vector;
+  llvm::find(Reference, 1);
+
+  auto TrackingResult = Reference.getTrackingResult();
+  revng_check(TrackingResult.InspectedKeys.size() == 0);
+  revng_check(TrackingResult.Exact);
+}
+
+BOOST_AUTO_TEST_CASE(TrackingContainerVectorBeginEnd) {
+  testBeginEnd<SortedVector>();
+  testBeginEnd<MutableSet>();
+}
+
+template<template<typename...> class T>
+static void testSetCount() {
+  revng::TrackingContainer<SortedVector<int>> Vector;
+  Vector.insert(1);
+  Vector.clearTracking();
+  const auto &Reference = Vector;
+  Reference.count(1);
+
+  auto TrackingResult = Reference.getTrackingResult();
+  revng_check(TrackingResult.InspectedKeys == std::set<int>({ 1 }));
+  revng_check(not TrackingResult.Exact);
+}
+
+BOOST_AUTO_TEST_CASE(TrackingContainerSetCount) {
+  testSetCount<SortedVector>();
+  testSetCount<MutableSet>();
+}
+
+template<template<typename...> class T>
+static void testPush() {
+  revng::TrackingContainer<SortedVector<int>> Vector;
+  Vector.insert(1);
+  Vector.clearTracking();
+  const auto &Reference = Vector;
+  Reference.count(1);
+
+  Reference.trackingPush();
+
+  auto TrackingResult = Reference.getTrackingResult();
+  revng_check(TrackingResult.InspectedKeys == std::set<int>({ 1 }));
+  revng_check(not TrackingResult.Exact);
+
+  Reference.trackingPop();
+
+  TrackingResult = Reference.getTrackingResult();
+  revng_check(TrackingResult.InspectedKeys == std::set<int>({ 1 }));
+  revng_check(not TrackingResult.Exact);
+
+  Reference.trackingPop();
+
+  TrackingResult = Reference.getTrackingResult();
+  revng_check(TrackingResult.InspectedKeys.empty());
+  revng_check(not TrackingResult.Exact);
+}
+
+BOOST_AUTO_TEST_CASE(TrackingContainerPush) {
+  testPush<SortedVector>();
+  testPush<MutableSet>();
+}
+
+static_assert(KeyedObjectContainer<TrackingSortedVector<int>>);
+static_assert(KeyedObjectContainer<revng::TrackingContainer<MutableSet<int>>>);

@@ -13,6 +13,7 @@
 
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/Error.h"
 #include "llvm/Support/ManagedStatic.h"
 #include "llvm/Support/raw_os_ostream.h"
 #include "llvm/Support/raw_ostream.h"
@@ -26,22 +27,22 @@ extern size_t MaxLoggerNameLength;
 
 #define debug_function __attribute__((used, noinline))
 
-/// \brief Emits \p Indentation space pairs
+/// Emits \p Indentation space pairs
 template<typename Stream>
 void indent(Stream &Output, size_t Indentation) {
   for (size_t I = 0; I < Indentation; I++)
     Output << "  ";
 }
 
-/// \brief Stream an instance of this class to call Logger::emit()
+/// Stream an instance of this class to call Logger::emit()
 struct LogTerminator {
   const char *File;
   uint64_t Line;
 };
 #define DoLog (LogTerminator{ __FILE__, __LINE__ })
 
-/// \brief Logger that self-registers itself, can be disable, has a name and
-///        follows the global indentation level
+/// Logger that self-registers itself, can be disabled, has a name and follows
+/// the global indentation level
 ///
 /// The typical usage of this class is to be a static global variable in a
 /// translation unit.
@@ -69,7 +70,7 @@ public:
 
   void disable() { Enabled = false; }
 
-  /// \brief Write a log line
+  /// Write a log line
   ///
   /// To call this method using the stream syntax, see LogTerminator, or simply
   /// MyLogger << DoLog;
@@ -102,7 +103,7 @@ private:
   bool Enabled;
 };
 
-/// \brief Indent all loggers within the scope of this object
+/// Indent all loggers within the scope of this object
 template<bool StaticEnabled = true>
 class LoggerIndent {
 public:
@@ -113,7 +114,7 @@ private:
   Logger<StaticEnabled> &L;
 };
 
-/// \brief Emit a message for the specified logger upon return
+/// Emit a message for the specified logger upon return
 ///
 /// You can create an instance of this object associated to a Logger, so that
 /// when the object goes out of scope (typically, on return), the emit method
@@ -128,8 +129,7 @@ private:
   Logger<StaticEnabled> &L;
 };
 
-/// \brief The catch-all function for logging, it can log any type not already
-///        handled
+/// The catch-all function for logging, it can log any type not already handled
 ///
 /// The \p Ignore argument is not used. It's only purpose is having a template
 /// argument as type, which makes it less specific that other functions that
@@ -149,19 +149,19 @@ inline void writeToLog(Logger<X> &This, const T Other, LowPrio) {
     This.Buffer << Other;
 }
 
-/// \brief Specialization of writeToLog to emit a message
+/// Specialization of writeToLog to emit a message
 template<bool X>
 inline void writeToLog(Logger<X> &This, const LogTerminator &LineInfo, int) {
   This.flush(LineInfo);
 }
 
-/// \brief Specialization for llvm::StringRef
+/// Specialization for llvm::StringRef
 template<bool X>
 inline void writeToLog(Logger<X> &This, const llvm::StringRef &S, int Ign) {
   writeToLog(This, S.str(), Ign);
 }
 
-/// \brief Specialization for llvm::StringRef
+/// Specialization for llvm::StringRef
 template<bool X>
 inline void writeToLog(Logger<X> &This, const llvm::Error &Error, int Ign) {
   std::string Message;
@@ -172,7 +172,7 @@ inline void writeToLog(Logger<X> &This, const llvm::Error &Error, int Ign) {
   writeToLog(This, Message, Ign);
 }
 
-/// \brief A global registry for all the loggers
+/// A global registry for all the loggers
 ///
 /// Loggers are usually global static variables in translation units, the role
 /// of this class is collecting them.
@@ -215,40 +215,6 @@ private:
 
 extern llvm::ManagedStatic<LoggersRegistry> Loggers;
 
-enum PlaceholderEnum {};
-struct DebugLogOptionList : public llvm::cl::list<PlaceholderEnum> {
-  using list = llvm::cl::list<PlaceholderEnum>;
-  DebugLogOptionList() :
-    list("debug-log",
-         llvm::cl::desc("enable verbose logging"),
-         llvm::cl::cat(MainCategory)) {}
-
-  virtual bool addOccurrence(unsigned Pos,
-                             llvm::StringRef ArgName,
-                             llvm::StringRef Value,
-                             bool MultiArg = false) override {
-    Loggers->enable(Value);
-    return list::addOccurrence(Pos, ArgName, Value, MultiArg);
-  }
-};
-
-struct DebugLogOptionWrapper {
-  DebugLogOptionList TheOption;
-};
-extern llvm::ManagedStatic<DebugLogOptionWrapper> DebugLogOption;
-
-template<>
-inline void Logger<true>::init() {
-  Loggers->add(this);
-  DebugLogOption->TheOption.getParser().addLiteralOption(Name.data(),
-                                                         Loggers->size(),
-                                                         description().data());
-}
-
-template<>
-inline void Logger<false>::init() {
-}
-
 class StreamWrapperBase {
 public:
   virtual void flush(std::stringstream &Buffer) = 0;
@@ -277,7 +243,7 @@ private:
   O &Stream;
 };
 
-/// \brief Enables a debug feature and disables it when goes out of scope
+/// Enables a debug feature and disables it when goes out of scope
 class ScopedDebugFeature {
 public:
   /// \param Name the name of the debugging feature

@@ -5,11 +5,12 @@
 //
 
 #include "revng/Pipeline/Global.h"
+#include "revng/Storage/Path.h"
 
 namespace pipeline {
 class GlobalsMap {
 private:
-  using MapType = llvm::StringMap<std::unique_ptr<Global>>;
+  using MapType = std::map<std::string, std::unique_ptr<Global>>;
   MapType Map;
 
 public:
@@ -17,31 +18,39 @@ public:
     DiffMap ToReturn;
 
     for (const auto &Pair : Map) {
-      const auto &OtherPair = *Other.Map.find(Pair.first());
+      const auto &OtherPair = *Other.Map.find(Pair.first);
 
       auto Diff = Pair.second->diff(*OtherPair.second);
-      ToReturn.try_emplace(Pair.first(), std::move(Diff));
+      ToReturn.try_emplace(Pair.first, std::move(Diff));
     }
 
     return ToReturn;
   }
 
-  template<typename ToAdd, typename... T>
-  void emplace(llvm::StringRef Name, T &&...Args) {
-    Map.try_emplace(Name, std::make_unique<ToAdd>(std::forward<T>(Args)...));
+private:
+  static const Global *
+  dereferenceIterator(const MapType::const_iterator::value_type &Pair) {
+    return Pair.second.get();
   }
 
-  llvm::Error
-  replace(llvm::StringRef GlobalName, std::unique_ptr<Global> &&Global) {
-    if (auto OldGlobal = get(GlobalName); !OldGlobal)
-      return OldGlobal.takeError();
-    Map.insert_or_assign(GlobalName, std::move(Global));
-    return llvm::Error::success();
+public:
+  auto begin() const {
+    return llvm::map_iterator(Map.begin(), dereferenceIterator);
+  }
+
+  auto end() const {
+    return llvm::map_iterator(Map.end(), dereferenceIterator);
+  }
+
+  template<typename ToAdd, typename... T>
+  void emplace(llvm::StringRef Name, T &&...Args) {
+    Map.try_emplace(Name.str(),
+                    std::make_unique<ToAdd>(Name, std::forward<T>(Args)...));
   }
 
   template<typename T>
   llvm::Expected<T *> get(llvm::StringRef Name) const {
-    auto It = Map.find(Name);
+    auto It = Map.find(Name.str());
     if (It == Map.end()) {
       auto *Message = "Unknown Global %s";
       return llvm::createStringError(llvm::inconvertibleErrorCode(),
@@ -61,7 +70,7 @@ public:
   }
 
   llvm::Expected<pipeline::Global *> get(llvm::StringRef Name) const {
-    auto It = Map.find(Name);
+    auto It = Map.find(Name.str());
     if (It == Map.end()) {
       auto *Message = "Unknown Global %s";
       return llvm::createStringError(llvm::inconvertibleErrorCode(),
@@ -72,32 +81,34 @@ public:
   }
 
   llvm::StringRef getName(size_t Index) const {
-    return std::next(Map.begin(), Index)->first();
+    return std::next(Map.begin(), Index)->first;
   }
 
-  llvm::Error
-  serialize(llvm::StringRef GlobalName, llvm::raw_ostream &OS) const {
+  llvm::Error serialize(llvm::StringRef GlobalName,
+                        llvm::raw_ostream &OS) const {
     auto MaybeGlobal = get(GlobalName);
     if (!MaybeGlobal)
       return MaybeGlobal.takeError();
     return MaybeGlobal.get()->serialize(OS);
   }
 
-  llvm::Error
-  deserialize(llvm::StringRef GlobalName, const llvm::MemoryBuffer &Buffer) {
+  llvm::Error deserialize(llvm::StringRef GlobalName,
+                          const llvm::MemoryBuffer &Buffer) {
     auto MaybeGlobal = get(GlobalName);
     if (!MaybeGlobal)
       return MaybeGlobal.takeError();
     return MaybeGlobal.get()->deserialize(Buffer);
   }
 
-  ErrorList verify(llvm::StringRef GlobalName) const {
-    ErrorList EL;
+  llvm::Error verify(llvm::StringRef GlobalName) const {
     auto MaybeGlobal = get(GlobalName);
     if (!MaybeGlobal)
       return MaybeGlobal.takeError();
-    MaybeGlobal.get()->verify(EL);
-    return EL;
+    if (not MaybeGlobal.get()->verify()) {
+      return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                     "Could not verify " + GlobalName);
+    }
+    return llvm::Error::success();
   }
 
   llvm::Expected<std::unique_ptr<Global>>
@@ -106,7 +117,7 @@ public:
     auto MaybeGlobal = get(GlobalName);
     if (!MaybeGlobal)
       return MaybeGlobal.takeError();
-    return MaybeGlobal.get()->createNew(Buffer);
+    return MaybeGlobal.get()->createNew(GlobalName, Buffer);
   }
 
   llvm::Expected<std::unique_ptr<Global>> clone(llvm::StringRef GlobalName) {
@@ -116,8 +127,8 @@ public:
     return MaybeGlobal.get()->clone();
   }
 
-  llvm::Error storeToDisk(llvm::StringRef Path) const;
-  llvm::Error loadFromDisk(llvm::StringRef Path);
+  llvm::Error store(const revng::DirectoryPath &Path) const;
+  llvm::Error load(const revng::DirectoryPath &Path);
 
   size_t size() const { return Map.size(); }
 
@@ -127,7 +138,7 @@ public:
   GlobalsMap(GlobalsMap &&Other) = default;
   GlobalsMap(const GlobalsMap &Other) {
     for (const auto &Entry : Other.Map)
-      Map.try_emplace(Entry.first(), Entry.second->clone());
+      Map.try_emplace(Entry.first, Entry.second->clone());
   }
 
   GlobalsMap &operator=(GlobalsMap &&Other) = default;
@@ -138,9 +149,32 @@ public:
     Map = MapType();
 
     for (const auto &Entry : Other.Map)
-      Map.try_emplace(Entry.first(), Entry.second->clone());
+      Map.try_emplace(Entry.first, Entry.second->clone());
 
     return *this;
+  }
+  void collectReadFields(const TargetInContainer &Target,
+                         llvm::StringMap<PathTargetBimap> &Out) const {
+    for (const auto &Global : Map) {
+      Global.second->collectReadFields(Target, Out[Global.first]);
+    }
+  }
+
+  void clearAndResume() const {
+    for (const auto &Global : Map)
+      Global.second->clearAndResume();
+  }
+  void pushReadFields() const {
+    for (const auto &Global : Map)
+      Global.second->pushReadFields();
+  }
+  void popReadFields() const {
+    for (const auto &Global : Map)
+      Global.second->popReadFields();
+  }
+  void stopTracking() const {
+    for (const auto &Global : Map)
+      Global.second->stopTracking();
   }
 };
 } // namespace pipeline

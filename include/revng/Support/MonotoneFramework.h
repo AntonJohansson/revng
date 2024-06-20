@@ -9,14 +9,13 @@
 #include <type_traits>
 #include <vector>
 
-#include "llvm/ADT/Optional.h"
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/SmallVector.h"
 
 #include "revng/ADT/Queue.h"
 #include "revng/Support/Debug.h"
 
-/// \brief Backport of std::map::insert_or_assign
+/// Backport of std::map::insert_or_assign
 template<typename K, typename V>
 inline void insert_or_assign(std::map<K, V> &Map, K Key, V &&Value) {
   auto It = Map.find(Key);
@@ -35,8 +34,7 @@ enum VisitType {
   ReversePostOrder
 };
 
-/// \brief Work list for the monotone framework supporting various visit
-///        strategies
+/// Work list for the monotone framework supporting various visit strategies
 template<typename Iterated, VisitType Visit>
 class MonotoneFrameworkWorkList {};
 
@@ -57,13 +55,11 @@ public:
 };
 
 // (Reverse) post order implementation
-// clang-format off
 template<typename Iterated, VisitType Visit>
-  requires (Visit == PostOrder or Visit == ReversePostOrder)
+  requires(Visit == PostOrder or Visit == ReversePostOrder)
 class MonotoneFrameworkWorkList<Iterated, Visit> {
-  // clang-format on
 private:
-  /// \brief Class for an entry in the work list
+  /// Class for an entry in the work list
   ///
   /// All the basic blocks are always in the list in (reverse) post order. When
   /// an entry is popped it is simply disabled.
@@ -219,7 +215,7 @@ private:
   }
 };
 
-/// \brief CRTP base class for an element of the lattice
+/// CRTP base class for an element of the lattice
 ///
 /// \note This class is more for reference. It's unused.
 ///
@@ -227,21 +223,21 @@ private:
 template<typename D>
 class ElementBase {
 public:
-  /// \brief The partial ordering relation
+  /// The partial ordering relation
   bool lowerThanOrEqual(const ElementBase &RHS) const {
     const D &This = *static_cast<const D *>(this);
     const D &Other = static_cast<const D &>(RHS);
     return This.lowerThanOrEqual(Other);
   }
 
-  /// \brief The combination operator
+  /// The combination operator
   // TODO: assert monotonicity
   ElementBase &combine(const ElementBase &RHS) {
     return static_cast<const D *>(this)->combine(static_cast<const D &>(RHS));
   }
 };
 
-/// \brief Default class to represent a simple Interrupt for a MonotoneFramework
+/// Default class to represent a simple Interrupt for a MonotoneFramework
 ///
 /// This class provides the simplest possible implementation for an Interrupt
 /// for a Monotone Framework.
@@ -279,7 +275,7 @@ private:
   LatticeElement Result;
 };
 
-/// \brief Helper struct for creation of Interrupts for MonotoneFramework
+/// Helper struct for creation of Interrupts for MonotoneFramework
 ///
 /// This is for creating generic Interrupts.
 /// In this case we delegate the construction of the Interrupts to the
@@ -302,7 +298,7 @@ struct InterruptCreator {
   }
 };
 
-/// \brief Specialization of InterruptCreator for DefaultInterrupt
+/// Specialization of InterruptCreator for DefaultInterrupt
 ///
 /// This is for creating DefaultInterrupt<LatticeElement>.
 /// In case of DefaultInterrupt the Summary Interrupt is never created,
@@ -322,7 +318,7 @@ struct InterruptCreator<D, LatticeElement, DefaultInterrupt<LatticeElement>> {
     return DefaultInterrupt<LatticeElement>();
   }
 };
-/// \brief CRTP base class for implementing a monotone framework
+/// CRTP base class for implementing a monotone framework
 ///
 /// This class provides the base structure to implement an analysis based on a
 /// monotone framework. It also provides an implementation of the MFP solution.
@@ -334,7 +330,7 @@ struct InterruptCreator<D, LatticeElement, DefaultInterrupt<LatticeElement>> {
 /// the IR you're working on), a class representing an element of the lattice
 /// (LatticeElement, see ElementBase) and a class representing an Interrupt
 /// reason of the analysis. It is suggested to create a namespace for these
-/// classes and keep their names simple: Analysis for the class inherting from
+/// classes and keep their names simple: Analysis for the class inheriting from
 /// MonotoneFramework, Element for LatticeElement and Interrupt for Interrupt.
 ///
 /// \tparam Label the type identifying a "label" in the monotone framework,
@@ -416,7 +412,7 @@ private:
   InterruptCreator<D, LatticeElement, InterruptType> TheInterruptCreator;
 
 public:
-  /// \brief The transfer function
+  /// The transfer function
   ///
   /// Starting from the initial state at \p L provides a new lattice element or
   /// a reason why the analysis has be interrupted.
@@ -424,16 +420,14 @@ public:
   /// \note This method must be implemented by the derived class D
   Interrupt transfer(Label L) { return derived().transfer(L); }
 
-  /// \brief Return the element of the lattice associated with the extremal
-  ///        label \p L
+  /// Return the element of the lattice associated with the extremal label \p L
   ///
   /// \note This method must be implemented by the derived class D
   LatticeElement extremalValue(Label L) const {
     return derived().extremalValue(L);
   }
 
-  /// \brief Create a "summary" interrupt, used upon a regular analysis
-  ///        completion
+  /// Create a "summary" interrupt, used upon a regular analysis completion
   ///
   /// \note This method must be implemented by the derived class D only if
   ///       Interrupt != DefaultInterrupt<LatticeElement>
@@ -441,8 +435,8 @@ public:
     return TheInterruptCreator.createSummaryInterrupt(derived());
   }
 
-  /// \brief Create a "no return" interrupt, used when the analysis terminates
-  ///        without identifying a return basic block
+  /// Create a "no return" interrupt, used when the analysis terminates without
+  /// identifying a return basic block
   ///
   /// \note This method must be implemented by the derived class D only if
   ///       Interrupt != DefaultInterrupt<LatticeElement>
@@ -450,12 +444,12 @@ public:
     return TheInterruptCreator.createNoReturnInterrupt(derived());
   }
 
-  /// \brief Dump the final state
+  /// Dump the final state
   ///
   /// \note This method must be implemented by the derived class D
   void dumpFinalState() const { return derived().dumpFinalState(); }
 
-  /// \brief Get the successors of label \p L
+  /// Get the successors of label \p L
   ///
   /// Also the interrupt \p I is given since it can sometimes be useful to
   /// provide a different set of successors.
@@ -470,8 +464,8 @@ public:
     return derived().successor_size(L, I);
   }
 
-  /// \brief Assert that \p A is lower than or equal \p B, useful for debugging
-  ///        purposes
+  /// Assert that \p A is lower than or equal \p B, useful for debugging
+  /// purposes
   ///
   /// \note This method must be implemented by the derived class D
   void assertLowerThanOrEqual(const LatticeElement &A,
@@ -479,17 +473,16 @@ public:
     derived().assertLowerThanOrEqual(A, B);
   }
 
-  /// \brief Handle the propagation of \p Original from \p Source to
-  ///        \p Destination
+  /// Handle the propagation of \p Original from \p Source to \p Destination
   ///
   /// \return Empty optional value if \p Original is fine, a new LatticeElement
   ///         otherwise.
-  llvm::Optional<LatticeElement>
+  std::optional<LatticeElement>
   handleEdge(const LatticeElement &Original, Label Source, Label Destination) {
     return derived().handleEdge(Original, Source, Destination);
   }
 
-  /// \brief Initialize/reset the analysis
+  /// Initialize/reset the analysis
   ///
   /// Call this method before invoking run or if you want to reset the state of
   /// the analysis to run it again.
@@ -506,7 +499,7 @@ public:
     }
   }
 
-  /// \brief Registers \p L to be visited before the end of the analysis
+  /// Registers \p L to be visited before the end of the analysis
   ///
   /// If \p L has already been visited at least once before, it's simply
   /// enqueued in the WorkList, otherwise is registered to be visited at least
@@ -515,19 +508,19 @@ public:
   /// This function is required when you want to visit a basic block only if
   /// it's part of the current function, or fail otherwise.
   void registerToVisit(Label L) {
-    if (State.count(L) == 0)
+    if (!State.contains(L))
       ToVisit.insert(L);
     else
       WorkList.insert(L);
   }
 
-  /// \brief Number of label analyzed so far
+  /// Number of label analyzed so far
   size_t size() const { return State.size(); }
 
-  /// \brief Register a new extremal label
+  /// Register a new extremal label
   void registerExtremal(Label L) { Extremals.insert(L); }
 
-  /// \brief Resolve the data flow analysis problem using the MFP solution
+  /// Resolve the data flow analysis problem using the MFP solution
   Interrupt run() {
     using namespace llvm;
 
@@ -536,7 +529,7 @@ public:
       Label ToAnalyze = WorkList.head();
 
       // If we've been asked to visit this basic block before the end, consider
-      // the requested satified
+      // the requested satisfied
       ToVisit.erase(ToAnalyze);
 
       // Run the transfer function
@@ -589,10 +582,10 @@ public:
       // If it has successors, check if we have to re-enqueue them
       for (Label Successor : successors(ToAnalyze, Result)) {
 
-        Optional<LatticeElement> NewElement = handleEdge(NewLatticeElement,
-                                                         ToAnalyze,
-                                                         Successor);
-        bool GotNewElement = NewElement.hasValue();
+        std::optional<LatticeElement> NewElement = handleEdge(NewLatticeElement,
+                                                              ToAnalyze,
+                                                              Successor);
+        bool GotNewElement = NewElement.has_value();
         LatticeElement &ActualElement = GotNewElement ? *NewElement :
                                                         NewLatticeElement;
 
@@ -631,7 +624,7 @@ public:
       // In case of dynamic graph, register successors of this label
       if (DynamicGraph) {
         // The successors must match, unless the current label has become a
-        // return label or we intiially had no successors
+        // return label or we initially had no successors
         if (Successors->size() != 0 and NewSuccessors.size() != 0)
           revng_assert(NewSuccessors == *Successors);
 
@@ -684,18 +677,13 @@ public:
         //       only for debugging purposes and the DynamicGraph template
         //       argument should be replaced with an `#ifndef NDEBUG`.
         if (Reachable.size() != State.size()) {
-          for (const Label &L : Reachable) {
-            if (State.count(L) == 0) {
+          for (const Label &L : Reachable)
+            if (!State.contains(L))
               revng_abort("A label is Reachable but not present in State");
-            }
-          }
 
-          for (const auto &P : State) {
-            const Label &L = P.first;
-            if (Reachable.count(L) == 0) {
+          for (const auto &P : State)
+            if (!Reachable.contains(P.first))
               revng_abort("A label is in State but not Reachable");
-            }
-          }
 
           revng_abort();
         }
@@ -703,7 +691,7 @@ public:
         // Merge all the final states, if they are reachable
         bool First = true;
         for (auto &P : FinalStates) {
-          if (Reachable.count(P.first) != 0) {
+          if (Reachable.contains(P.first)) {
 
             if (First)
               FinalResult = std::move(P.second);
@@ -722,7 +710,7 @@ public:
   }
 };
 
-/// \brief Base class for lattices for MonotoneFrameworks built over a set of T
+/// Base class for lattices for MonotoneFrameworks built over a set of T
 ///
 /// You can have a custom lattice for your monotone framework instance, but
 /// using sets makes everything quite smooth.
@@ -772,11 +760,10 @@ protected:
   size_type erase(const T &El) { return Set.erase(El); }
   const_iterator erase(const_iterator It) { return this->Set.erase(It); }
 
-  bool contains(const T &Key) const { return Set.count(Key); }
+  bool contains(const T &Key) const { return Set.contains(Key); }
 };
 
-/// \brief Lattice for a MonotoneFramework over a set, where combine is set
-///        union
+/// Lattice for a MonotoneFramework over a set, where combine is set union
 template<typename T>
 class UnionMonotoneSet : public MonotoneSet<T> {
 private:
@@ -814,7 +801,7 @@ public:
     return std::any_of(this->begin(), this->end(), Predicate);
   }
   bool contains_any_of(const std::set<T> &Other) const {
-    return contains([&Other](const T &El) { return Other.count(El); });
+    return contains([&Other](const T &El) { return Other.contains(El); });
   }
 
   void erase_if(std::function<bool(const T &)> Predicate) {
@@ -844,8 +831,8 @@ public:
   }
 };
 
-/// \brief Lattice for a MonotoneFramework over a set,
-///        where combine is set intersection
+/// Lattice for a MonotoneFramework over a set, where combine is set
+/// intersection
 template<typename T>
 class IntersectionMonotoneSet : public MonotoneSet<T> {
 private:
@@ -906,18 +893,9 @@ public:
       IsBottom = false;
       return;
     }
-    using iterator = typename MonotoneSet<T>::iterator;
-    std::vector<iterator> ToDrop;
-    iterator OtherEnd = Other.end();
-    iterator SetIt = this->Set.begin();
-    iterator SetEnd = this->Set.end();
-    for (; SetIt != SetEnd; ++SetIt) {
-      iterator OtherIt = Other.Set.find(*SetIt);
-      if (OtherIt == OtherEnd)
-        ToDrop.push_back(SetIt);
-    }
-    for (iterator I : ToDrop)
-      this->Set.erase(I);
+
+    llvm::erase_if(this->Set,
+                   [&Other](const auto &E) { return !Other.contains(E); });
   }
 
   bool lowerThanOrEqual(const IntersectionMonotoneSet &Other) const {

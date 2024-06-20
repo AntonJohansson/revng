@@ -36,6 +36,9 @@ fields:
   - name: OriginalName
     type: string
     optional: true
+  - name: Comment
+    type: string
+    optional: true
   - name: CanonicalRegisterValues
     optional: true
     sequence:
@@ -54,7 +57,10 @@ fields:
     doc: If there's at least one Section, only Sections where
          ContainsCode == true will be searched for code.
   - name: Type
-    type: QualifiedType
+    doc: The type of the segment
+    reference:
+      pointeeType: Type
+      rootType: Binary
     optional: true
 
 key:
@@ -73,8 +79,9 @@ public:
 
 public:
   bool contains(MetaAddress Address) const {
-    auto EndAddress = StartAddress + VirtualSize;
-    return (Address.isValid() and StartAddress.addressLowerThanOrEqual(Address)
+    auto EndAddress = StartAddress() + VirtualSize();
+    return (Address.isValid()
+            and StartAddress().addressLowerThanOrEqual(Address)
             and Address.addressLowerThan(EndAddress));
   }
 
@@ -83,13 +90,15 @@ public:
   }
 
   /// \return the end offset (guaranteed to be greater than StartOffset).
-  auto endOffset() const { return StartOffset + FileSize; }
+  auto endOffset() const { return StartOffset() + FileSize(); }
 
   /// \return a valid MetaAddress.
-  auto endAddress() const { return StartAddress + VirtualSize; }
+  auto endAddress() const { return StartAddress() + VirtualSize(); }
+  auto startAddress() const { return StartAddress(); } // TODO(anjo): TMP
+  auto size() const { return VirtualSize(); } // TODO(anjo): TMP
 
   std::pair<MetaAddress, MetaAddress> pagesRange() const {
-    MetaAddress Start = StartAddress;
+    MetaAddress Start = StartAddress();
     Start = Start - (Start.address() % 4096);
 
     MetaAddress End = endAddress();

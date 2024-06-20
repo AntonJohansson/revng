@@ -1,5 +1,4 @@
 /// \file Model.cpp
-/// \brief
 
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
@@ -15,8 +14,11 @@ bool init_unit_test();
 #include "revng/Support/MetaAddress.h"
 #include "revng/Support/MetaAddress/YAMLTraits.h"
 #include "revng/Support/YAMLTraits.h"
+#include "revng/TupleTree/DiffError.h"
 #include "revng/TupleTree/Introspection.h"
+#include "revng/TupleTree/Tracking.h"
 #include "revng/TupleTree/TupleTreeDiff.h"
+#include "revng/TupleTree/VisitsImpl.h"
 #include "revng/UnitTestHelpers/UnitTestHelpers.h"
 
 using namespace model;
@@ -31,7 +33,7 @@ BOOST_AUTO_TEST_CASE(TestIntrospection) {
   Function TheFunction(MetaAddress::invalid());
 
   // Use get
-  TheFunction.CustomName = "FunctionName";
+  TheFunction.CustomName() = "FunctionName";
   revng_check(get<1>(TheFunction) == "FunctionName");
 
   // Test std::tuple_size
@@ -40,8 +42,8 @@ BOOST_AUTO_TEST_CASE(TestIntrospection) {
   // Test TupleLikeTraits
   static_assert(TraitedTupleLike<Function>);
   using TLT = TupleLikeTraits<Function>;
-  static_assert(std::is_same_v<std::tuple_element_t<1, Function>,
-                               decltype(TheFunction.CustomName)>);
+  static_assert(std::is_same_v<std::tuple_element_t<1, Function> &,
+                               decltype(TheFunction.CustomName())>);
   revng_check(StringRef(TLT::Name) == "Function");
   revng_check(StringRef(TLT::FullName) == "model::Function");
   revng_check(StringRef(TLT::FieldNames[1]) == "CustomName");
@@ -49,14 +51,14 @@ BOOST_AUTO_TEST_CASE(TestIntrospection) {
 
 BOOST_AUTO_TEST_CASE(TestPathAccess) {
   Binary TheBinary;
-  using FunctionsType = decltype(TheBinary.Functions);
+  using FunctionsType = std::decay_t<decltype(TheBinary.Functions())>;
   TupleTreePath Zero;
   Zero.push_back(size_t(0));
   auto *FirstField = getByPath<FunctionsType>(Zero, TheBinary);
-  revng_check(FirstField == &TheBinary.Functions);
+  revng_check(FirstField == &TheBinary.Functions());
 
   auto *FunctionsField = getByPath<FunctionsType>("/Functions", TheBinary);
-  revng_check(FunctionsField == &TheBinary.Functions);
+  revng_check(FunctionsField == &TheBinary.Functions());
 
   // Test non existing field
   revng_check(getByPath<FunctionsType>("/Function", TheBinary) == nullptr);
@@ -65,8 +67,22 @@ BOOST_AUTO_TEST_CASE(TestPathAccess) {
   revng_check(getByPath<Function>("/Functions/:Invalid", TheBinary) == nullptr);
 
   // Test existing entry in container
-  Function &F = TheBinary.Functions[MetaAddress::invalid()];
+  Function &F = TheBinary.Functions()[MetaAddress::invalid()];
   revng_check(getByPath<Function>("/Functions/:Invalid", TheBinary) == &F);
+
+  // Test UpcastablePointer
+  auto UInt8Path = TheBinary.getPrimitiveType(PrimitiveTypeKind::Unsigned, 8);
+  model::Type *UInt8 = UInt8Path.get();
+  using llvm::Twine;
+  std::string TypePath = (Twine("/Types/") + Twine(UInt8->ID())
+                          + "-PrimitiveType/OriginalName")
+                           .str();
+  auto *OriginalNamePointer = getByPath<std::string>(TypePath, TheBinary);
+  revng_check(OriginalNamePointer == &UInt8->OriginalName());
+
+  TypePath = (Twine("/Types/") + Twine(UInt8->ID()) + Twine("-PrimitiveType"))
+               .str();
+  revng_check(getByPath<model::Type>(TypePath, TheBinary) == UInt8);
 }
 
 BOOST_AUTO_TEST_CASE(TestCompositeScalar) {
@@ -109,7 +125,7 @@ BOOST_AUTO_TEST_CASE(TestStringPathConversion) {
 
 BOOST_AUTO_TEST_CASE(TestPathMatcher) {
   //
-  // Single matcher
+  // Test regular matcher
   //
   {
     auto Matcher = PathMatcher::create<Binary>("/Functions/*/Entry").value();
@@ -123,65 +139,42 @@ BOOST_AUTO_TEST_CASE(TestPathMatcher) {
     revng_check(MaybeMatch);
     revng_check(std::get<0>(*MaybeMatch) == ARM1000);
   }
-}
 
-namespace TestTupleTree {
-class Element;
-class Root;
-} // namespace TestTupleTree
+  //
+  // Test matching through an UpcastablePointer
+  //
+  {
+    auto Matcher = PathMatcher::create<Binary>("/Types/*-RawFunctionType/"
+                                               "FinalStackOffset")
+                     .value();
 
-class TestTupleTree::Element {
-public:
-  int Key;
-  TupleTreeReference<TestTupleTree::Element, TestTupleTree::Root> Self;
-};
-INTROSPECTION_NS(TestTupleTree, Element, Key, Self)
+    model::Type::Key Key{ 1000, model::TypeKind::RawFunctionType };
+    auto Path1000 = pathAsString<Binary>(Matcher.apply(Key));
+    revng_check(Path1000 == "/Types/1000-RawFunctionType/FinalStackOffset");
 
-template<>
-struct KeyedObjectTraits<TestTupleTree::Element> {
-  static int key(const TestTupleTree::Element &Obj) { return Obj.Key; }
+    auto MaybeToMatch = stringAsPath<Binary>(*Path1000);
+    revng_check(MaybeToMatch);
+    auto MaybeMatch = Matcher.match<model::Type::Key>(MaybeToMatch.value());
+    revng_check(MaybeMatch);
+    revng_check(std::get<0>(*MaybeMatch) == Key);
 
-  static TestTupleTree::Element fromKey(const int &Key) {
-    return TestTupleTree::Element{ Key, {} };
+    MaybeToMatch = stringAsPath<Binary>("/Types/1000-CABIFunctionType/ID");
+    MaybeMatch = Matcher.match<model::Type::Key>(MaybeToMatch.value());
+    revng_check(not MaybeMatch);
   }
-};
-
-class TestTupleTree::Root {
-public:
-  SortedVector<TestTupleTree::Element> Elements;
-};
-
-INTROSPECTION_NS(TestTupleTree, Root, Elements)
-
-static_assert(TupleLike<TestTupleTree::Root>);
-
-BOOST_AUTO_TEST_CASE(TestTupleTreeReference) {
-  using namespace TestTupleTree;
-
-  using Reference = TupleTreeReference<TestTupleTree::Element,
-                                       TestTupleTree::Root>;
-
-  TupleTree<Root> TheRoot;
-  Element &AnElement = TheRoot->Elements[3];
-  AnElement.Self = Reference::fromString(TheRoot.get(), "/Elements/3");
-
-  TheRoot.initializeReferences();
-
-  revng_check(AnElement.Self.get() == &AnElement);
 }
 
 template<typename T>
 static T *createType(model::Binary &Model) {
-  model::TypePath Path = Model.recordNewType(makeType<T>());
-  return llvm::cast<T>(Path.get());
+  return &Model.makeType<T>().first;
 }
 
 BOOST_AUTO_TEST_CASE(TestModelDeduplication) {
   TupleTree<model::Binary> Model;
   auto Dedup = [&Model]() {
-    int64_t OldTypesCount = Model->Types.size();
+    int64_t OldTypesCount = Model->Types().size();
     deduplicateEquivalentTypes(Model);
-    int64_t NewTypesCount = Model->Types.size();
+    int64_t NewTypesCount = Model->Types().size();
     return OldTypesCount - NewTypesCount;
   };
 
@@ -191,15 +184,15 @@ BOOST_AUTO_TEST_CASE(TestModelDeduplication) {
   // Two typedefs
   {
     auto *Typedef1 = createType<TypedefType>(*Model);
-    Typedef1->UnderlyingType = { UInt8, {} };
+    Typedef1->UnderlyingType() = { UInt8, {} };
 
     auto *Typedef2 = createType<TypedefType>(*Model);
-    Typedef2->UnderlyingType = { UInt8, {} };
+    Typedef2->UnderlyingType() = { UInt8, {} };
 
     revng_check(Dedup() == 0);
 
-    Typedef1->OriginalName = "MyUInt8";
-    Typedef2->OriginalName = "MyUInt8";
+    Typedef1->OriginalName() = "MyUInt8";
+    Typedef2->OriginalName() = "MyUInt8";
 
     revng_check(Dedup() == 1);
   }
@@ -207,18 +200,18 @@ BOOST_AUTO_TEST_CASE(TestModelDeduplication) {
   // Two structs
   {
     auto *Struct1 = createType<StructType>(*Model);
-    Struct1->Fields[0].CustomName = "FirstField";
-    Struct1->Fields[0].Type = { UInt8, {} };
-    Struct1->OriginalName = "MyStruct";
+    Struct1->Fields()[0].CustomName() = "FirstField";
+    Struct1->Fields()[0].Type() = { UInt8, {} };
+    Struct1->OriginalName() = "MyStruct";
 
     auto *Struct2 = createType<StructType>(*Model);
-    Struct2->Fields[0].CustomName = "DifferentName";
-    Struct2->Fields[0].Type = { UInt8, {} };
-    Struct2->OriginalName = "MyStruct";
+    Struct2->Fields()[0].CustomName() = "DifferentName";
+    Struct2->Fields()[0].Type() = { UInt8, {} };
+    Struct2->OriginalName() = "MyStruct";
 
     revng_check(Dedup() == 0);
 
-    Struct1->Fields[0].CustomName = Struct2->Fields[0].CustomName;
+    Struct1->Fields()[0].CustomName() = Struct2->Fields()[0].CustomName();
 
     revng_check(Dedup() == 1);
   }
@@ -230,27 +223,29 @@ BOOST_AUTO_TEST_CASE(TestModelDeduplication) {
     auto *Left1 = createType<StructType>(*Model);
     auto *Left2 = createType<StructType>(*Model);
 
-    Left1->Fields[0].Type = { Model->getTypePath(Left2), { PointerQualifier } };
-    Left2->Fields[0].Type = { Model->getTypePath(Left1), { PointerQualifier } };
+    Left1->Fields()[0].Type() = { Model->getTypePath(Left2),
+                                  { PointerQualifier } };
+    Left2->Fields()[0].Type() = { Model->getTypePath(Left1),
+                                  { PointerQualifier } };
 
-    Left1->OriginalName = "LoopingStructs1";
-    Left2->OriginalName = "LoopingStructs2";
+    Left1->OriginalName() = "LoopingStructs1";
+    Left2->OriginalName() = "LoopingStructs2";
 
     auto *Right1 = createType<StructType>(*Model);
     auto *Right2 = createType<StructType>(*Model);
 
-    Right1->Fields[0].Type = { Model->getTypePath(Right2),
-                               { PointerQualifier } };
-    Right2->Fields[0].Type = { Model->getTypePath(Right1),
-                               { PointerQualifier, PointerQualifier } };
+    Right1->Fields()[0].Type() = { Model->getTypePath(Right2),
+                                   { PointerQualifier } };
+    Right2->Fields()[0].Type() = { Model->getTypePath(Right1),
+                                   { PointerQualifier, PointerQualifier } };
 
-    Right1->OriginalName = "LoopingStructs1";
-    Right2->OriginalName = "LoopingStructs2";
+    Right1->OriginalName() = "LoopingStructs1";
+    Right2->OriginalName() = "LoopingStructs2";
 
     revng_check(Dedup() == 0);
 
-    Right2->Fields[0].Type = { Model->getTypePath(Right1),
-                               { PointerQualifier } };
+    Right2->Fields()[0].Type() = { Model->getTypePath(Right1),
+                                   { PointerQualifier } };
 
     revng_check(Dedup() == 2);
   }
@@ -277,7 +272,7 @@ BOOST_AUTO_TEST_CASE(TestTupleTreeDiffDeserialization) {
   model::Binary New;
 
   MetaAddress Address(0x1000, MetaAddressType::Code_aarch64);
-  New.ExtraCodeAddresses.insert(Address);
+  New.ExtraCodeAddresses().insert(Address);
 
   auto Diff = diff(Empty, New);
 
@@ -285,6 +280,7 @@ BOOST_AUTO_TEST_CASE(TestTupleTreeDiffDeserialization) {
   llvm::raw_string_ostream Stream(S);
   serialize(Stream, Diff);
   Stream.flush();
+  llvm::outs() << S << "\n";
 
   auto Diff2 = llvm::cantFail(deserialize<TupleTreeDiff<model::Binary>>(S));
 
@@ -297,19 +293,149 @@ BOOST_AUTO_TEST_CASE(TestTupleTreeDiffDeserialization) {
 }
 
 BOOST_AUTO_TEST_CASE(CABIFunctionTypePathShouldParse) {
-  const char *Path = "/Types/CABIFunctionType-10000";
+  const char *Path = "/Types/10000-CABIFunctionType";
   auto MaybeParsed = stringAsPath<model::Binary>(Path);
   BOOST_TEST(MaybeParsed.has_value());
 }
 
 BOOST_AUTO_TEST_CASE(CABIFunctionTypeArgumentsPathShouldParse) {
-  const char *Path = "/Types/CABIFunctionType-10000/Arguments";
+  const char *Path = "/Types/10000-CABIFunctionType/Arguments";
   auto MaybeParsed = stringAsPath<model::Binary>(Path);
   BOOST_TEST(MaybeParsed.has_value());
 }
 
-static_assert(std::is_default_constructible_v<TupleTree<TestTupleTree::Root>>);
-static_assert(std::is_copy_assignable_v<TupleTree<TestTupleTree::Root>>);
-static_assert(std::is_copy_constructible_v<TupleTree<TestTupleTree::Root>>);
-static_assert(std::is_move_assignable_v<TupleTree<TestTupleTree::Root>>);
-static_assert(std::is_move_constructible_v<TupleTree<TestTupleTree::Root>>);
+class LocationExample : public revng::LocationBase {
+public:
+  std::string toString() const final { return "don't care"; };
+  ~LocationExample() override = default;
+  static std::string getTypeName() { return "LocationExample"; }
+};
+
+class DocumentErrorExample
+  : public revng::DocumentError<DocumentErrorExample, LocationExample> {
+public:
+  using DocumentError<DocumentErrorExample, LocationExample>::DocumentError;
+  inline static char ID = '0';
+  std::string getTypeName() const override { return "Example1"; }
+};
+
+class DocumentErrorExample2
+  : public revng::DocumentError<DocumentErrorExample2, LocationExample> {
+public:
+  using DocumentError<DocumentErrorExample2, LocationExample>::DocumentError;
+  inline static char ID = '0';
+  std::string getTypeName() const override { return "Example2"; }
+};
+
+BOOST_AUTO_TEST_CASE(ModelErrors) {
+  llvm::Error Error = llvm::make_error<DocumentErrorExample>("something",
+                                                             LocationExample());
+  BOOST_TEST(Error.isA<DocumentErrorExample>());
+  BOOST_TEST(not Error.isA<DocumentErrorExample2>());
+  BOOST_TEST(Error.isA<revng::DocumentErrorBase>());
+  llvm::consumeError(std::move(Error));
+}
+
+BOOST_AUTO_TEST_CASE(CollectReadFieldsShouldCompile) {
+  model::Binary Model;
+  revng::Tracking::collect(Model);
+}
+
+BOOST_AUTO_TEST_CASE(TrackingResetterShouldCompile) {
+  model::Binary Model;
+  revng::Tracking::clearAndResume(Model);
+}
+
+BOOST_AUTO_TEST_CASE(TrackingPushAndPopperShouldCompile) {
+  model::Binary Model;
+  revng::Tracking::push(Model);
+  revng::Tracking::pop(Model);
+}
+
+BOOST_AUTO_TEST_CASE(CollectReadFieldsShouldBeEmptyAtFirst) {
+  model::Binary Model;
+  auto MetaAddress = MetaAddress::fromPC(llvm::Triple::ArchType::x86_64, 0);
+  Model.Segments().insert(Segment(MetaAddress, 1000));
+  revng::Tracking::clearAndResume(Model);
+
+  auto Collected = revng::Tracking::collect(Model);
+  BOOST_TEST(Collected.Read.size() == 0);
+}
+
+BOOST_AUTO_TEST_CASE(CollectReadFieldsShouldCollectSegments) {
+  model::Binary Model;
+  const auto MetaAddress = MetaAddress::fromPC(llvm::Triple::ArchType::x86_64,
+                                               0);
+  Model.Segments().insert(Segment(MetaAddress, 1000));
+  revng::Tracking::clearAndResume(Model);
+  const auto &ConstModel = Model;
+  ConstModel.Segments().at(Segment::Key(MetaAddress, 1000)).StartAddress();
+
+  auto Collected = revng::Tracking::collect(Model);
+  BOOST_TEST(Collected.Read.size() == 2);
+  std::vector StringPaths = {
+    "/Segments",
+    "/Segments/0x0:Code_x86_64-1000",
+  };
+
+  std::set<TupleTreePath> Paths;
+  for (const auto &Path : StringPaths) {
+    Paths.insert(*stringAsPath<model::Binary>(Path));
+  }
+  BOOST_TEST(Collected.Read == Paths);
+}
+
+BOOST_AUTO_TEST_CASE(CollectReadFieldsShouldCollectNotFoundSegments) {
+  model::Binary Model;
+  const auto MetaAddress = MetaAddress::fromPC(llvm::Triple::ArchType::x86_64,
+                                               0);
+  revng::Tracking::clearAndResume(Model);
+  const auto &ConstModel = Model;
+  ConstModel.Segments().tryGet(Segment::Key(MetaAddress, 1000));
+
+  auto Collected = revng::Tracking::collect(Model);
+  BOOST_TEST(Collected.Read.size() == 2);
+  std::set<TupleTreePath> Paths = {
+    *stringAsPath<model::Binary>("/Segments"),
+    *stringAsPath<model::Binary>("/Segments/0x0:Code_x86_64-1000"),
+  };
+  BOOST_TEST(Collected.Read == Paths);
+}
+
+BOOST_AUTO_TEST_CASE(CollectReadFieldsShouldCollectAllSegments) {
+  model::Binary Model;
+  const auto MetaAddress = MetaAddress::fromPC(llvm::Triple::ArchType::x86_64,
+                                               0);
+  Model.Segments().insert(Segment(MetaAddress, 1000));
+  revng::Tracking::clearAndResume(Model);
+  const auto &ConstModel = Model;
+  ConstModel.Segments().begin();
+
+  auto Collected = revng::Tracking::collect(Model);
+  BOOST_TEST(Collected.Read.size() == 1);
+  std::set<TupleTreePath> Paths = {
+    *stringAsPath<model::Binary>("/Segments"),
+  };
+  BOOST_TEST(Collected.Read == Paths);
+  BOOST_TEST(Collected.ExactVectors == Paths);
+}
+
+/// This test asserts that Tracking visits do no inspect inside a vector.
+/// We need to find a way to represent non sorted vector, using regular vectors
+/// breaks diffs, since they don't have a index to represent a child
+BOOST_AUTO_TEST_CASE(QualifiersInsideAVectorAreNotVisited) {
+  model::QualifiedType Type;
+  const auto MetaAddress = MetaAddress::fromPC(llvm::Triple::ArchType::x86_64,
+                                               0);
+  Type.Qualifiers().push_back(Qualifier());
+  revng::Tracking::clearAndResume(Type);
+  const auto &ConstType = Type;
+  ConstType.Qualifiers().at(0).Size();
+
+  auto Collected = revng::Tracking::collect(Type);
+  BOOST_TEST(Collected.Read.size() == 1);
+  std::set<TupleTreePath> Paths = {
+    *stringAsPath<model::QualifiedType>("/Qualifiers"),
+  };
+  BOOST_TEST(Collected.Read == Paths);
+}

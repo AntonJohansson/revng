@@ -21,7 +21,7 @@
 #include "revng/Pipeline/CopyPipe.h"
 #include "revng/Pipeline/GenericLLVMPipe.h"
 #include "revng/Pipeline/LLVMContainerFactory.h"
-#include "revng/Pipeline/LLVMGlobalKindBase.h"
+#include "revng/Pipeline/LLVMKind.h"
 #include "revng/Pipeline/Loader.h"
 #include "revng/Pipeline/Runner.h"
 #include "revng/Pipeline/Target.h"
@@ -44,10 +44,9 @@ static cl::list<string> ContainerOverrides("i",
                                                 "target step"),
                                            cat(MainCategory));
 
-static opt<string> SaveModel("save-model",
-                             desc("Save the model at the end of the run"),
-                             cat(MainCategory),
-                             init(""));
+static OutputPathOpt SaveModel("save-model",
+                               desc("Save the model at the end of the run"),
+                               cat(MainCategory));
 
 static opt<string> ApplyModelDiff("apply-model-diff",
                                   desc("Apply model diff"),
@@ -68,11 +67,9 @@ static opt<bool> ProduceAllPossibleTargetsSingle("produce-all-single",
                                                  cat(MainCategory),
                                                  init(false));
 
-static opt<bool> AnalyzeAll("analyze-all",
-                            desc("Try analyzing all possible "
-                                 "targets"),
-                            cat(MainCategory),
-                            init(false));
+static cl::list<string> AnalysesLists("analyses-list",
+                                      desc("Analyses list to run"),
+                                      cat(MainCategory));
 
 static opt<bool> InvalidateAll("invalidate-all",
                                desc("Try invalidating all possible "
@@ -122,7 +119,8 @@ parseProductionRequest(Runner &Pipeline,
   const auto &Registry = Pipeline.getKindsRegistry();
   for (const auto &Target : Targets) {
     auto [StepName, Rest] = Target.split("/");
-    AbortOnError(parseTarget(ToProduce[StepName], Rest, Registry));
+    auto &Step = ToProduce[StepName];
+    AbortOnError(parseTarget(Pipeline.getContext(), Step, Rest, Registry));
   }
 
   return ToProduce;
@@ -135,28 +133,33 @@ static void runAnalysis(Runner &Pipeline, llvm::StringRef Target) {
   auto [AnalysisName, Rest2] = Rest.split("/");
 
   ContainerToTargetsMap ToProduce;
-  AbortOnError(parseTarget(ToProduce, Rest2, Registry));
-  AbortOnError(Pipeline.runAnalysis(AnalysisName, Step, ToProduce));
+  TargetInStepSet Map;
+  AbortOnError(parseTarget(Pipeline.getContext(), ToProduce, Rest2, Registry));
+  AbortOnError(Pipeline.runAnalysis(AnalysisName, Step, ToProduce, Map));
 }
 
 static void runPipeline(Runner &Pipeline) {
-
-  for (llvm::StringRef Entry : Analyze) {
-    runAnalysis(Pipeline, Entry);
+  // First run the requested analyses
+  {
+    Task T(Analyze.size(), "revng-pipeline analyses");
+    for (llvm::StringRef Entry : Analyze) {
+      T.advance(Entry, true);
+      runAnalysis(Pipeline, Entry);
+    }
   }
 
+  // Then produce the requested targets
+  Task T(Produce.size(), "revng-pipeline produce");
   for (llvm::StringRef Entry : Produce) {
+    T.advance(Entry, true);
     llvm::SmallVector<llvm::StringRef, 3> Targets;
     Entry.split(Targets, ",");
     AbortOnError(Pipeline.run(parseProductionRequest(Pipeline, Targets)));
   }
 }
 
-int main(int argc, const char *argv[]) {
-  revng::InitRevng X(argc, argv);
-
-  HideUnrelatedOptions(MainCategory);
-  ParseCommandLineOptions(argc, argv);
+int main(int argc, char *argv[]) {
+  revng::InitRevng X(argc, argv, "", { &MainCategory });
 
   Registry::runAllInitializationRoutines();
 
@@ -180,11 +183,24 @@ int main(int argc, const char *argv[]) {
     auto Diff = AbortOnError(deserializeFileOrSTDIN<Type>(ApplyModelDiff));
 
     auto &Runner = Manager.getRunner();
-    AbortOnError(Runner.apply(GlobalTupleTreeDiff(std::move(Diff))));
+    TargetInStepSet Map;
+    GlobalTupleTreeDiff GlobalDiff(std::move(Diff), ModelGlobalName);
+    AbortOnError(Runner.apply(GlobalDiff, Map));
   }
 
-  if (AnalyzeAll)
-    AbortOnError(Manager.getRunner().runAllAnalyses());
+  TargetInStepSet InvMap;
+  for (auto &AnalysesListName : AnalysesLists) {
+    if (!Manager.getRunner().hasAnalysesList(AnalysesListName)) {
+      AbortOnError(createStringError(inconvertibleErrorCode(),
+                                     "no known analyses list named %s, invoke "
+                                     "this command without arguments to see "
+                                     "the list of available analysis",
+                                     AnalysesListName.c_str()));
+    }
+
+    AnalysesList AL = Manager.getRunner().getAnalysesList(AnalysesListName);
+    AbortOnError(Manager.runAnalyses(AL, InvMap));
+  }
 
   runPipeline(Manager.getRunner());
 
@@ -198,13 +214,13 @@ int main(int argc, const char *argv[]) {
   }
 
   AbortOnError(Manager.store(StoresOverrides));
-  AbortOnError(Manager.storeToDisk());
+  AbortOnError(Manager.store());
 
-  if (not SaveModel.empty()) {
+  if (SaveModel.hasValue()) {
     auto Context = Manager.context();
     const auto &ModelName = revng::ModelGlobalName;
     auto FinalModel = AbortOnError(Context.getGlobal<ModelGlobal>(ModelName));
-    AbortOnError(FinalModel->storeToDisk(SaveModel));
+    AbortOnError(FinalModel->store(*SaveModel));
   }
 
   return EXIT_SUCCESS;

@@ -18,12 +18,13 @@
 #include "revng/Pipeline/CopyPipe.h"
 #include "revng/Pipeline/GenericLLVMPipe.h"
 #include "revng/Pipeline/LLVMContainerFactory.h"
-#include "revng/Pipeline/LLVMGlobalKindBase.h"
+#include "revng/Pipeline/LLVMKind.h"
 #include "revng/Pipeline/Loader.h"
 #include "revng/Pipeline/Target.h"
 #include "revng/Pipes/ModelGlobal.h"
 #include "revng/Pipes/PipelineManager.h"
 #include "revng/Pipes/ToolCLOptions.h"
+#include "revng/Support/InitRevng.h"
 
 using std::string;
 using namespace llvm;
@@ -37,15 +38,14 @@ static cl::list<string> Arguments(Positional,
                                   desc("<ArtifactToProduce> <InputBinary>"),
                                   cat(MainCategory));
 
-static opt<string> Output("o",
-                          desc("Output filepath of produced artifact"),
-                          cat(MainCategory),
-                          init("-"));
+static OutputPathOpt Output("o",
+                            desc("Output filepath of produced artifact"),
+                            cat(MainCategory),
+                            init(revng::PathInit::Dash));
 
-static opt<string> SaveModel("save-model",
-                             desc("Save the model at the end of the run"),
-                             cat(MainCategory),
-                             init(""));
+static OutputPathOpt SaveModel("save-model",
+                               desc("Save the model at the end of the run"),
+                               cat(MainCategory));
 
 static opt<bool> ListArtifacts("list",
                                desc("list all possible targets of artifact and "
@@ -53,19 +53,17 @@ static opt<bool> ListArtifacts("list",
                                cat(MainCategory),
                                init(false));
 
-static opt<bool> AnalyzeAll("analyze-all",
-                            desc("Try analyzing all possible "
-                                 "targets"),
-                            cat(MainCategory),
-                            init(false));
+static cl::list<string> AnalysesLists("analyses-list",
+                                      desc("Analyses list to run"),
+                                      cat(MainCategory));
 
 static ToolCLOptions BaseOptions(MainCategory);
 
 static ExitOnError AbortOnError;
 
-int main(int argc, const char *argv[]) {
-  HideUnrelatedOptions(MainCategory);
-  ParseCommandLineOptions(argc, argv);
+int main(int argc, char *argv[]) {
+  using revng::FilePath;
+  revng::InitRevng X(argc, argv, "", { &MainCategory });
 
   Registry::runAllInitializationRoutines();
 
@@ -85,16 +83,34 @@ int main(int argc, const char *argv[]) {
   }
 
   auto &InputContainer = Manager.getRunner().begin()->containers()["input"];
-  AbortOnError(InputContainer.loadFromDisk(Arguments[1]));
+  AbortOnError(InputContainer.load(FilePath::fromLocalStorage(Arguments[1])));
 
-  if (AnalyzeAll)
-    AbortOnError(Manager.getRunner().runAllAnalyses());
+  TargetInStepSet InvMap;
+  for (auto &AnalysesListName : AnalysesLists) {
+    if (!Manager.getRunner().hasAnalysesList(AnalysesListName)) {
+      AbortOnError(createStringError(inconvertibleErrorCode(),
+                                     "No known analyses list named "
+                                       + AnalysesListName));
+    }
+  }
 
+  Task T(2, "revng-artifact");
+  T.advance("Run analyses", true);
+
+  Task T2(AnalysesLists.size(), "Analyses");
+  for (const std::string &AnalysesListName : AnalysesLists) {
+    T2.advance(AnalysesListName, true);
+    AnalysesList AL = Manager.getRunner().getAnalysesList(AnalysesListName);
+    AbortOnError(Manager.runAnalyses(AL, InvMap));
+  }
+  T2.complete();
+
+  T.advance("Produce artifact", true);
   if (not Manager.getRunner().containsStep(Arguments[0])) {
     AbortOnError(createStringError(inconvertibleErrorCode(),
-                                   "no known artifact named %s, invoke this "
-                                   "command without arguments to see the list "
-                                   "of aviable artifacts",
+                                   "No known artifact named %s.\n Use `revng "
+                                   "artifact` with no arguments to list "
+                                   "available artifacts",
                                    Arguments[0].c_str()));
   }
   auto &Step = Manager.getRunner().getStep(Arguments[0]);
@@ -106,12 +122,8 @@ int main(int argc, const char *argv[]) {
     Manager.recalculateAllPossibleTargets();
     auto &StepState = *Manager.getLastState().find(Step.getName());
     auto State = StepState.second.find(ContainerName)->second.filter(*Kind);
-    TargetsList ToDump;
-    for (const auto &Entry : State) {
-      Entry.expand(Manager.context(), ToDump);
-    }
 
-    for (const auto &Entry : ToDump) {
+    for (const auto &Entry : State) {
       Entry.dumpPathComponents(dbg);
       dbg << "\n";
     }
@@ -120,7 +132,7 @@ int main(int argc, const char *argv[]) {
 
   ContainerToTargetsMap Map;
   if (Arguments.size() == 2) {
-    Map.add(ContainerName, Target(*Kind));
+    Map.add(ContainerName, Kind->allTargets(Manager.context()));
   } else {
     for (llvm::StringRef Argument : llvm::drop_begin(Arguments, 2)) {
       auto SlashRemoved = Argument.drop_front();
@@ -131,16 +143,19 @@ int main(int argc, const char *argv[]) {
   }
   AbortOnError(Manager.getRunner().run(Step.getName(), Map));
 
-  AbortOnError(Manager.storeToDisk());
+  AbortOnError(Manager.store());
 
-  auto Produced = Container.second->cloneFiltered(Map.at(ContainerName));
-  AbortOnError(Produced->storeToDisk(Output));
+  const TargetsList &Targets = Map.contains(ContainerName) ?
+                                 Map.at(ContainerName) :
+                                 TargetsList();
+  auto Produced = Container.second->cloneFiltered(Targets);
+  AbortOnError(Produced->store(*Output));
 
-  if (not SaveModel.empty()) {
+  if (SaveModel.hasValue()) {
     auto Context = Manager.context();
     const auto &ModelName = revng::ModelGlobalName;
     auto FinalModel = AbortOnError(Context.getGlobal<ModelGlobal>(ModelName));
-    AbortOnError(FinalModel->storeToDisk(SaveModel));
+    AbortOnError(FinalModel->store(*SaveModel));
   }
 
   return EXIT_SUCCESS;

@@ -23,13 +23,15 @@
 #include "revng/Pipeline/GenericLLVMPipe.h"
 #include "revng/Pipeline/Global.h"
 #include "revng/Pipeline/LLVMContainerFactory.h"
-#include "revng/Pipeline/LLVMGlobalKindBase.h"
+#include "revng/Pipeline/LLVMKind.h"
 #include "revng/Pipeline/Loader.h"
 #include "revng/Pipeline/Step.h"
 #include "revng/Pipeline/Target.h"
 #include "revng/Pipes/ModelGlobal.h"
 #include "revng/Pipes/PipelineManager.h"
 #include "revng/Pipes/ToolCLOptions.h"
+#include "revng/Support/CommandLine.h"
+#include "revng/Support/InitRevng.h"
 #include "revng/TupleTree/TupleTree.h"
 
 using std::string;
@@ -41,13 +43,13 @@ using namespace revng;
 
 static cl::list<string> Arguments(Positional,
                                   ZeroOrMore,
-                                  desc("<ArtifactToProduce> <InputBinary>"),
+                                  desc("<AnalysisToRun> <InputBinary>"),
                                   cat(MainCategory));
 
-static opt<string> Output("o",
-                          desc("Output filepath of produced model"),
-                          cat(MainCategory),
-                          init("-"));
+static OutputPathOpt Output("o",
+                            desc("Output filepath of produced model"),
+                            cat(MainCategory),
+                            init(revng::PathInit::Dash));
 
 static opt<bool> NoApplyModel("no-apply",
                               desc("run the analysis but do not apply it (used "
@@ -68,36 +70,42 @@ static TupleTreeGlobal<model::Binary> &getModel(PipelineManager &Manager) {
   return *FinalModel;
 }
 
-static Step *
-getStepOfAnalysis(pipeline::Runner &Runner, llvm::StringRef AnalysisName) {
+static Step *getStepOfAnalysis(pipeline::Runner &Runner,
+                               llvm::StringRef AnalysisName) {
   const auto &StepHasAnalysis = [AnalysisName](const Step &Step) {
     return Step.hasAnalysis(AnalysisName);
   };
-  auto It = find_if(Runner, StepHasAnalysis);
+  auto It = llvm::find_if(Runner, StepHasAnalysis);
   if (It == Runner.end())
     return nullptr;
   return &*It;
 }
 
-static llvm::Error
-overrideModel(PipelineManager &Manager, TupleTree<model::Binary> NewModel) {
+static llvm::Error overrideModel(PipelineManager &Manager,
+                                 TupleTree<model::Binary> NewModel) {
   const auto &Name = revng::ModelGlobalName;
   auto *Model(cantFail(Manager.context().getGlobal<revng::ModelGlobal>(Name)));
   Model->get() = std::move(NewModel);
   return llvm::Error::success();
 }
 
-int main(int argc, const char *argv[]) {
-  HideUnrelatedOptions(MainCategory);
-  ParseCommandLineOptions(argc, argv);
+int main(int argc, char *argv[]) {
+  using revng::FilePath;
+  using BinaryRef = TupleTreeGlobal<model::Binary>;
+
+  revng::InitRevng X(argc, argv, "", { &MainCategory });
 
   Registry::runAllInitializationRoutines();
 
   auto Manager = AbortOnError(BaseOptions.makeManager());
-  auto OriginalModel = getModel(Manager);
+  const auto &Ctx = Manager.context();
+  auto OriginalModel = *AbortOnError(Ctx.getGlobal<BinaryRef>(ModelGlobalName));
 
   if (Arguments.size() == 0) {
-    dbg << "all\n";
+    for (size_t I = 0; I < Manager.getRunner().getAnalysesListCount(); I++) {
+      AnalysesList AL = Manager.getRunner().getAnalysesList(I);
+      dbg << AL.getName().str() << "\n";
+    }
     for (const auto &Step : Manager.getRunner())
       for (const auto &Analysis : Step.analyses())
         dbg << Analysis.getKey().str() << "\n";
@@ -106,23 +114,25 @@ int main(int argc, const char *argv[]) {
 
   if (Arguments.size() == 1) {
     AbortOnError(createStringError(inconvertibleErrorCode(),
-                                   "expected any number of positional "
+                                   "Expected any number of positional "
                                    "arguments different from 1"));
   }
 
   auto &InputContainer = Manager.getRunner().begin()->containers()["input"];
-  AbortOnError(InputContainer.loadFromDisk(Arguments[1]));
+  AbortOnError(InputContainer.load(FilePath::fromLocalStorage(Arguments[1])));
 
-  if (Arguments[0] == "all") {
-    AbortOnError(Manager.getRunner().runAllAnalyses());
+  TargetInStepSet InvMap;
+  if (Manager.getRunner().hasAnalysesList(Arguments[0])) {
+    AnalysesList AL = Manager.getRunner().getAnalysesList(Arguments[0]);
+    AbortOnError(Manager.runAnalyses(AL, InvMap));
   } else {
     auto *Step = getStepOfAnalysis(Manager.getRunner(), Arguments[0]);
     if (not Step) {
       AbortOnError(createStringError(inconvertibleErrorCode(),
-                                     "no known analysis named %s, invoke this "
+                                     "No known analysis named %s, invoke "
+                                     "this "
                                      "command without arguments to see the "
-                                     "list "
-                                     "of aviable analysis",
+                                     "list of available analysis",
                                      Arguments[0].c_str()));
     }
 
@@ -134,21 +144,22 @@ int main(int argc, const char *argv[]) {
       auto Index = Pair.index();
       const auto &ContainerName = Pair.value();
       for (const auto &Kind : Analysis->getAcceptedKinds(Index)) {
-        Map.add(ContainerName, Target(*Kind));
+        Map.add(ContainerName, Kind->allTargets(Manager.context()));
       }
     }
 
-    AbortOnError(Manager.getRunner().runAnalysis(Analysis->getName(),
-                                                 Step->getName(),
-                                                 Map));
+    llvm::StringRef StepName = Step->getName();
+    std::string AnalysisName = Analysis->getName();
+    AbortOnError(Manager.runAnalysis(AnalysisName, StepName, Map, InvMap));
   }
+
   if (NoApplyModel)
     AbortOnError(overrideModel(Manager, OriginalModel.get()));
 
-  AbortOnError(Manager.storeToDisk());
+  AbortOnError(Manager.store());
 
   auto &FinalModel = getModel(Manager);
-  AbortOnError(FinalModel.storeToDisk(Output));
+  AbortOnError(FinalModel.store(*Output));
 
   return EXIT_SUCCESS;
 }

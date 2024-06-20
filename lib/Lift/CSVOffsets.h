@@ -7,12 +7,13 @@
 #include <set>
 
 #include "revng/Support/Assert.h"
+#include "revng/Support/Debug.h"
 
 template<bool StaticallyEnabled>
 class Logger;
 
-/// \brief Different types of accesses to the CPU State Variables (CSVs), with a
-///        set of possible offsets.
+/// Different types of accesses to the CPU State Variables (CSVs), with a set of
+/// possible offsets.
 class CSVOffsets {
 
 private:
@@ -140,6 +141,7 @@ public:
   }
 
   void insert(int64_t O) { Offsets.insert(O); }
+
   void combine(const CSVOffsets &Other) {
     Kind K0 = OffsetKind;
     Kind K1 = Other.OffsetKind;
